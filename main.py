@@ -15,16 +15,18 @@ from dotenv import load_dotenv
 from database import (init_db, init_extras, upsert_player, get_player, save_match,
                       get_stats, get_rank, get_leaderboard,
                       get_history, count_history, get_all_matches, count_all_matches,
-                      get_link, remove_link, link_account, set_verified, verified_owner,
+                      get_link, remove_link, link_account,
                       get_match, last_match_id, cancel_match,
-                      backup_db, apply_season_reset, remove_player, get_info)
+                      backup_db, apply_season_reset, remove_player, get_info,
+                      create_pause, get_pause, list_open_pauses, count_open_pauses, close_pause)
 from mojang import get_uuid
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, tier_from_elo
 from elo import calcola
 from graphics import (build_leaderboard_image, build_match_image, build_profile_image,
                       build_history_image, build_settier_image, build_matchlog_image,
-                      build_setelo_image, build_info_image)
+                      build_setelo_image, build_info_image,
+                      build_pause_image, build_paused_list_image)
 
 load_dotenv()
 
@@ -42,6 +44,12 @@ NO_MENTIONS = discord.AllowedMentions.none()
 SEASON_ELO_LOSS = 100
 GENERIC_ERROR = ("Something went wrong while running this command. "
                  "Please try again in a moment, and tell the staff if it keeps happening.")
+
+SCORE_CHOICES = [
+    app_commands.Choice(name="3-0", value=0),
+    app_commands.Choice(name="3-1", value=1),
+    app_commands.Choice(name="3-2", value=2),
+]
 
 
 # ---------- small helpers ----------
@@ -98,15 +106,45 @@ async def resolve_target(interaction: discord.Interaction, ign, user):
         return result[0], result[1], True
 
     target = user or interaction.user
-    link = await get_link(target.id)
-    if link is None:
+    link_row = await get_link(target.id)
+    if link_row is None:
         if user:
             msg = f"{user.display_name} hasn't linked a Minecraft account yet."
         else:
             msg = "You haven't linked a Minecraft account yet. Use `/link` or type a username."
         await interaction.followup.send(msg, allowed_mentions=NO_MENTIONS)
         return None
-    return link["uuid"], link["ign"], False
+    return link_row["uuid"], link_row["ign"], False
+
+
+async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, name_l,
+                    score_name: str, loser_games: int) -> bool:
+    """Registers a finished match, updates the elo and sends the result card.
+    Returns False if the match could not be logged (a message has been sent)."""
+    p_w = await get_player(uuid_w)
+    p_l = await get_player(uuid_l)
+    if p_w is None or p_l is None:
+        missing = discord.utils.escape_markdown(name_w if p_w is None else name_l)
+        await interaction.followup.send(
+            f"**{missing}** doesn't have a tier yet: use `/settier` first.")
+        return False
+
+    gain, loss = calcola(p_w["elo"], p_l["elo"], loser_games)
+    new_w, new_l = p_w["elo"] + gain, p_l["elo"] + loss
+
+    now = datetime.now(timezone.utc)
+    match_id = await save_match(uuid_w, uuid_l, p_w["elo"], new_w, p_l["elo"], new_l,
+                                score_name, played_at=now.isoformat())
+
+    w = {"uuid": uuid_w, "name": name_w, "before": p_w["elo"], "after": new_w, "delta": gain,
+         "tier_before": tier_from_elo(p_w["elo"]), "tier_after": tier_from_elo(new_w)}
+    l = {"uuid": uuid_l, "name": name_l, "before": p_l["elo"], "after": new_l,
+         "delta": new_l - p_l["elo"],
+         "tier_before": tier_from_elo(p_l["elo"]), "tier_after": tier_from_elo(new_l)}
+
+    data = await build_match_image(w, l, score_name, match_id, now.strftime("%m/%d/%Y"))
+    await interaction.followup.send(file=png_file(data, "match.png"))
+    return True
 
 
 # ---------- views ----------
@@ -349,11 +387,7 @@ async def setelo(interaction: discord.Interaction, ign: str, elo: app_commands.R
 @bot.tree.command(name="match", description="Log a 1v1 result (staff only)")
 @app_commands.describe(winner="Username of the winner", loser="Username of the loser",
                        score="Match score")
-@app_commands.choices(score=[
-    app_commands.Choice(name="3-0", value=0),
-    app_commands.Choice(name="3-1", value=1),
-    app_commands.Choice(name="3-2", value=2),
-])
+@app_commands.choices(score=SCORE_CHOICES)
 @staff_only()
 async def match(interaction: discord.Interaction, winner: str, loser: str,
                 score: app_commands.Choice[int]):
@@ -371,29 +405,7 @@ async def match(interaction: discord.Interaction, winner: str, loser: str,
         await interaction.followup.send("The winner and the loser can't be the same player.")
         return
 
-    p_w = await get_player(uuid_w)
-    p_l = await get_player(uuid_l)
-    if p_w is None or p_l is None:
-        missing = name_w if p_w is None else name_l
-        await interaction.followup.send(
-            f"**{missing}** doesn't have a tier yet: use `/settier` first.")
-        return
-
-    gain, loss = calcola(p_w["elo"], p_l["elo"], score.value)
-    new_w, new_l = p_w["elo"] + gain, p_l["elo"] + loss
-
-    now = datetime.now(timezone.utc)
-    match_id = await save_match(uuid_w, uuid_l, p_w["elo"], new_w, p_l["elo"], new_l,
-                                score.name, played_at=now.isoformat())
-
-    w = {"uuid": uuid_w, "name": name_w, "before": p_w["elo"], "after": new_w, "delta": gain,
-         "tier_before": tier_from_elo(p_w["elo"]), "tier_after": tier_from_elo(new_w)}
-    l = {"uuid": uuid_l, "name": name_l, "before": p_l["elo"], "after": new_l,
-         "delta": new_l - p_l["elo"],
-         "tier_before": tier_from_elo(p_l["elo"]), "tier_after": tier_from_elo(new_l)}
-
-    data = await build_match_image(w, l, score.name, match_id, now.strftime("%m/%d/%Y"))
-    await interaction.followup.send(file=png_file(data, "match.png"))
+    await log_match(interaction, uuid_w, name_w, uuid_l, name_l, score.name, score.value)
 
 
 @bot.tree.command(name="undo", description="Cancel a logged match (staff only)")
@@ -419,8 +431,8 @@ async def undo(interaction: discord.Interaction, match_id: int):
             return
 
     # and their elo must not have changed since (new /settier, /setelo, season reset...)
-    p_w = await get_player(m["winner_uuid"])
-    p_l = await get_player(m["loser_uuid"])
+    p_w = await get_player(m["winner_uuid"], include_removed=True)
+    p_l = await get_player(m["loser_uuid"], include_removed=True)
     if p_w["elo"] != m["winner_elo_after"] or p_l["elo"] != m["loser_elo_after"]:
         await interaction.followup.send(
             f"Match #{match_id} can't be cancelled: the elo of one of the players changed "
@@ -445,7 +457,7 @@ async def undo(interaction: discord.Interaction, match_id: int):
     await interaction.followup.send(file=png_file(data, "undo.png"))
 
 
-@bot.tree.command(name="removeplayer", description="Remove a player from the database (staff only)")
+@bot.tree.command(name="removeplayer", description="Remove a player from the leaderboard and profiles (staff only)")
 @app_commands.describe(ign="Minecraft username of the player to remove")
 @staff_only()
 async def removeplayer(interaction: discord.Interaction, ign: str):
@@ -457,22 +469,21 @@ async def removeplayer(interaction: discord.Interaction, ign: str):
 
     player = await get_player(uuid)
     if player is None:
-        await interaction.followup.send(f"**{name}** is not in the database.")
+        await interaction.followup.send(f"**{name}** is not in the leaderboard.")
         return
-    played = await count_history(uuid)
     safe_name = discord.utils.escape_markdown(name)
 
     async def do_remove(i: discord.Interaction):
-        hidden = await remove_player(uuid)
+        kept = await remove_player(uuid)
         await i.edit_original_response(content="Done.")
         await i.followup.send(
-            f"🗑️ **{safe_name}** was removed from the database. "
-            f"{hidden} matches were hidden from stats and history.")
+            f"🗑️ **{safe_name}** was removed from the leaderboard and profiles. "
+            f"Their {kept} matches were kept in the history.")
 
     await interaction.followup.send(
-        f"⚠️ This will remove **{safe_name}** (elo {player['elo']}, {played} matches played) "
-        f"and their linked account. Their matches will disappear from history and stats, "
-        f"but the elo of their opponents will **not** be changed. Do you want to continue?",
+        f"⚠️ This will remove **{safe_name}** (elo {player['elo']}) from the leaderboard and `/profile`, "
+        f"and unlink their Discord account. Their matches **stay** in the history and match log. "
+        f"You can bring them back later with `/settier` or `/setelo`. Do you want to continue?",
         view=ConfirmView(interaction.user.id, do_remove), ephemeral=True)
 
 
@@ -498,6 +509,119 @@ async def endseason(interaction: discord.Interaction):
         view=ConfirmView(interaction.user.id, do_season), ephemeral=True)
 
 
+# ---------- paused matches ----------
+
+@bot.tree.command(name="pause", description="Save an interrupted match to be continued later (staff only)")
+@app_commands.describe(player1="Username of player 1", player2="Username of player 2",
+                       games1="Games won so far by player 1 (0-2)",
+                       games2="Games won so far by player 2 (0-2)")
+@staff_only()
+async def pause_cmd(interaction: discord.Interaction, player1: str, player2: str,
+                    games1: app_commands.Range[int, 0, 2], games2: app_commands.Range[int, 0, 2]):
+    await interaction.response.defer()
+    r1 = await lookup_ign(interaction, player1)
+    if r1 is None:
+        return
+    r2 = await lookup_ign(interaction, player2)
+    if r2 is None:
+        return
+    uuid1, name1 = r1
+    uuid2, name2 = r2
+
+    if uuid1 == uuid2:
+        await interaction.followup.send("The two players can't be the same person.")
+        return
+    if games1 + games2 == 0:
+        await interaction.followup.send("No games have been played yet, so there is nothing to save.")
+        return
+
+    p1 = await get_player(uuid1)
+    p2 = await get_player(uuid2)
+    if p1 is None or p2 is None:
+        missing = discord.utils.escape_markdown(name1 if p1 is None else name2)
+        await interaction.followup.send(f"**{missing}** doesn't have a tier yet: use `/settier` first.")
+        return
+
+    pause_id = await create_pause(uuid1, uuid2, games1, games2)
+    a = {"uuid": uuid1, "name": name1, "tier": p1["tier"], "elo": p1["elo"], "games": games1}
+    b = {"uuid": uuid2, "name": name2, "tier": p2["tier"], "elo": p2["elo"], "games": games2}
+    data = await build_pause_image(a, b, pause_id, datetime.now(timezone.utc).strftime("%m/%d/%Y"))
+    await interaction.followup.send(file=png_file(data, "paused.png"))
+
+
+@bot.tree.command(name="paused", description="Show the matches waiting to be continued")
+async def paused(interaction: discord.Interaction):
+    await interaction.response.defer()
+    total = await count_open_pauses()
+    if total == 0:
+        await interaction.followup.send("There are no paused matches.")
+        return
+    rows = await list_open_pauses(10)
+    entries = [{"id": r["id"], "date": fmt_date(r["created_at"]),
+                "p1": r["p1_ign"], "p1_uuid": r["p1_uuid"], "g1": r["p1_games"],
+                "p2": r["p2_ign"], "p2_uuid": r["p2_uuid"], "g2": r["p2_games"]} for r in rows]
+    data = await build_paused_list_image(entries, total)
+    await interaction.followup.send(file=png_file(data, "paused_list.png"))
+
+
+@bot.tree.command(name="resume", description="Finish a paused match and log the final result (staff only)")
+@app_commands.describe(pause_id="Paused match number (see /paused)",
+                       winner="Username of the winner", score="Final score")
+@app_commands.choices(score=SCORE_CHOICES)
+@staff_only()
+async def resume_cmd(interaction: discord.Interaction, pause_id: int, winner: str,
+                     score: app_commands.Choice[int]):
+    await interaction.response.defer()
+    pm = await get_pause(pause_id)
+    if pm is None:
+        await interaction.followup.send(f"Paused match #{pause_id} does not exist.")
+        return
+    if pm["status"] != "open":
+        await interaction.followup.send(f"Paused match #{pause_id} was already {pm['status']}.")
+        return
+
+    result = await lookup_ign(interaction, winner)
+    if result is None:
+        return
+    uuid_w, name_w = result
+
+    if uuid_w == pm["p1_uuid"]:
+        uuid_l, name_l, loser_games_before = pm["p2_uuid"], pm["p2_ign"], pm["p2_games"]
+    elif uuid_w == pm["p2_uuid"]:
+        uuid_l, name_l, loser_games_before = pm["p1_uuid"], pm["p1_ign"], pm["p1_games"]
+    else:
+        await interaction.followup.send(
+            f"**{discord.utils.escape_markdown(name_w)}** is not part of paused match #{pause_id}.")
+        return
+
+    if score.value < loser_games_before:
+        await interaction.followup.send(
+            f"**{discord.utils.escape_markdown(name_l)}** already had {loser_games_before} games, "
+            f"so the final score can't be {score.name}.")
+        return
+
+    if await log_match(interaction, uuid_w, name_w, uuid_l, name_l, score.name, score.value):
+        await close_pause(pause_id, "resumed")
+
+
+@bot.tree.command(name="droppause", description="Discard a paused match that won't be continued (staff only)")
+@app_commands.describe(pause_id="Paused match number (see /paused)")
+@staff_only()
+async def droppause(interaction: discord.Interaction, pause_id: int):
+    await interaction.response.defer()
+    pm = await get_pause(pause_id)
+    if pm is None:
+        await interaction.followup.send(f"Paused match #{pause_id} does not exist.")
+        return
+    if pm["status"] != "open":
+        await interaction.followup.send(f"Paused match #{pause_id} was already {pm['status']}.")
+        return
+    await close_pause(pause_id, "dropped")
+    await interaction.followup.send(
+        f"🗑️ Paused match #{pause_id} ({discord.utils.escape_markdown(pm['p1_ign'])} "
+        f"{pm['p1_games']}-{pm['p2_games']} {discord.utils.escape_markdown(pm['p2_ign'])}) was discarded.")
+
+
 # ---------- player commands ----------
 
 @bot.tree.command(name="profile", description="Show a player's tier, elo and record")
@@ -513,7 +637,7 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
 
     p = await get_player(uuid)
     if p is None:
-        await interaction.followup.send(f"**{name}** doesn't have a tier yet.")
+        await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** doesn't have a tier yet.")
         return
 
     if fresh:
@@ -533,13 +657,17 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
 def history_entries(rows, uuid):
     entries = []
     for m in rows:
-        base = {"id": m["id"], "date": fmt_date(m["played_at"]), "score": m["score"] or "-"}
+        cancelled = bool(m["cancelled"])
+        base = {"id": m["id"], "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
+                "cancelled": cancelled}
         if m["winner_uuid"] == uuid:
+            delta = 0 if cancelled else m["winner_elo_after"] - m["winner_elo_before"]
             entries.append({**base, "win": True, "opp": m["loser_ign"], "opp_uuid": m["loser_uuid"],
-                            "delta": m["winner_elo_after"] - m["winner_elo_before"]})
+                            "delta": delta})
         else:
+            delta = 0 if cancelled else m["loser_elo_after"] - m["loser_elo_before"]
             entries.append({**base, "win": False, "opp": m["winner_ign"], "opp_uuid": m["winner_uuid"],
-                            "delta": m["loser_elo_after"] - m["loser_elo_before"]})
+                            "delta": delta})
     return entries
 
 
@@ -572,16 +700,16 @@ async def history(interaction: discord.Interaction, ign: Optional[str] = None,
         return
     uuid, name, fresh = target
 
-    p = await get_player(uuid)
+    p = await get_player(uuid, include_removed=True)
     if p is None:
-        await interaction.followup.send(f"**{name}** doesn't have a tier yet.")
+        await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** doesn't have a tier yet.")
         return
     if not fresh:
         name = p["ign"]
 
     total = await count_history(uuid)
     if total == 0:
-        await interaction.followup.send(f"**{name}** hasn't played any matches yet.")
+        await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** hasn't played any matches yet.")
         return
 
     view = HistoryView(uuid, name, total)
@@ -597,12 +725,14 @@ async def history(interaction: discord.Interaction, ign: Optional[str] = None,
 def log_entries(rows):
     entries = []
     for m in rows:
+        cancelled = bool(m["cancelled"])
         entries.append({
             "id": m["id"], "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
+            "cancelled": cancelled,
             "winner": m["winner_ign"], "winner_uuid": m["winner_uuid"],
             "loser": m["loser_ign"], "loser_uuid": m["loser_uuid"],
-            "w_delta": m["winner_elo_after"] - m["winner_elo_before"],
-            "l_delta": m["loser_elo_after"] - m["loser_elo_before"],
+            "w_delta": 0 if cancelled else m["winner_elo_after"] - m["winner_elo_before"],
+            "l_delta": 0 if cancelled else m["loser_elo_after"] - m["loser_elo_before"],
         })
     return entries
 

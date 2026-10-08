@@ -288,6 +288,85 @@ async def build_match_image(winner, loser, score, match_id, date, title="MATCH R
     return await asyncio.to_thread(_draw_match, winner, loser, score, match_id, date, heads, title)
 
 
+# ---------- paused match (side by side) ----------
+
+def _pause_panel(img, d, x0, y0, p, head_data):
+    cx = x0 + PANEL_W // 2
+    d.rounded_rectangle([x0, y0, x0 + PANEL_W, y0 + PANEL_H], radius=18,
+                        fill=ROW_BG, outline=MUTED, width=3)
+    _paste_head(img, d, head_data, cx - 60, y0 + 32, 120, radius=14)
+    d.text((cx, y0 + 184), p["name"], font=get_font(32, True), fill=TEXT, anchor="mm")
+    _badge(d, cx, y0 + 224, p["tier"], _tier_color(p["tier"]), w=60, h=30, font_size=18)
+    d.text((cx, y0 + 252), "GAMES WON", font=get_font(14, True), fill=MUTED, anchor="mm")
+    d.text((cx, y0 + 284), str(p["games"]), font=get_font(40, True), fill=GOLD, anchor="mm")
+    d.text((cx, y0 + 318), f"{p['elo']} elo", font=get_font(18), fill=MUTED, anchor="mm")
+
+
+def _draw_pause(p1, p2, pause_id, date, heads):
+    top = HEADER_H + 24
+    height = top + PANEL_H + 20 + FOOTER_H
+    img = Image.new("RGB", (WIDTH, height), BG)
+    d = ImageDraw.Draw(img)
+    _header(d, "MATCH PAUSED", f"{GUILD_NAME} · to be continued · first to 3")
+
+    _pause_panel(img, d, PAD, top, p1, heads.get(p1["uuid"]))
+    _pause_panel(img, d, WIDTH - PAD - PANEL_W, top, p2, heads.get(p2["uuid"]))
+
+    mid = top + PANEL_H // 2
+    d.text((WIDTH // 2, mid - 40), "VS", font=get_font(34, True), fill=MUTED, anchor="mm")
+    _badge(d, WIDTH // 2, mid + 20, "PAUSED", GOLD, w=104, h=34, font_size=18)
+
+    _footer(d, height, f"Paused #{pause_id} · {date}")
+    return _png(img)
+
+
+async def build_pause_image(p1, p2, pause_id, date):
+    heads = await _fetch_heads([(p1["uuid"], p1["name"]), (p2["uuid"], p2["name"])])
+    return await asyncio.to_thread(_draw_pause, p1, p2, pause_id, date, heads)
+
+
+# ---------- list of paused matches ----------
+
+def _draw_paused_list(entries, total, heads):
+    height = HEADER_H + 10 + len(entries) * ROW_H + FOOTER_H
+    img = Image.new("RGB", (WIDTH, height), BG)
+    d = ImageDraw.Draw(img)
+    _header(d, "PAUSED MATCHES", f"{GUILD_NAME} · {total} waiting to be continued")
+
+    for i, e in enumerate(entries):
+        y0 = HEADER_H + 10 + i * ROW_H
+        cy = y0 + (ROW_H - 8) // 2
+
+        d.rounded_rectangle([PAD, y0, WIDTH - PAD, y0 + ROW_H - 8], radius=14, fill=ROW_BG)
+        d.rounded_rectangle([PAD, y0, PAD + 8, y0 + ROW_H - 8], radius=4, fill=GOLD)
+
+        d.text((PAD + 24, cy - 10), f"Paused #{e['id']}", font=get_font(18, True), fill=TEXT, anchor="lm")
+        d.text((PAD + 24, cy + 14), e["date"], font=get_font(15), fill=MUTED, anchor="lm")
+
+        _paste_head(img, d, heads.get(e["p1_uuid"]), 178, cy - 20, 40)
+        d.text((226, cy), e["p1"], font=get_font(20, True), fill=TEXT, anchor="lm")
+
+        d.text((450, cy), f"{e['g1']} - {e['g2']}", font=get_font(22, True), fill=GOLD, anchor="mm")
+
+        _paste_head(img, d, heads.get(e["p2_uuid"]), 494, cy - 20, 40)
+        d.text((542, cy), e["p2"], font=get_font(20, True), fill=TEXT, anchor="lm")
+
+        d.text((WIDTH - PAD - 28, cy), "to continue", font=get_font(15), fill=MUTED, anchor="rm")
+
+    note = f"Showing the latest {len(entries)}" if total > len(entries) else None
+    _footer(d, height, note)
+    return _png(img)
+
+
+async def build_paused_list_image(entries, total):
+    items = []
+    for e in entries:
+        items.append((e["p1_uuid"], e["p1"]))
+        items.append((e["p2_uuid"], e["p2"]))
+    heads = await _fetch_heads(items)
+    return await asyncio.to_thread(_draw_paused_list, entries, total, heads)
+
+
 # ---------- player profile ----------
 
 def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, heads):
@@ -325,7 +404,7 @@ async def build_profile_image(uuid, name, tier, elo, rank, wins, losses, winrate
     return await asyncio.to_thread(_draw_profile, uuid, name, tier, elo, rank, wins, losses, winrate, heads)
 
 
-# ---------- player match history (paged) ----------
+# ---------- player match history (paged, cancelled matches included) ----------
 
 def _draw_history(name, entries, heads, page, pages, total):
     height = HEADER_H + 10 + len(entries) * ROW_H + FOOTER_H
@@ -336,16 +415,20 @@ def _draw_history(name, entries, heads, page, pages, total):
     for i, e in enumerate(entries):
         y0 = HEADER_H + 10 + i * ROW_H
         cy = y0 + (ROW_H - 8) // 2
-        color = GREEN if e["win"] else RED
+        cancelled = e.get("cancelled", False)
+        color = MUTED if cancelled else (GREEN if e["win"] else RED)
+        label = "CANCELLED" if cancelled else ("WIN" if e["win"] else "LOSS")
 
         d.rounded_rectangle([PAD, y0, WIDTH - PAD, y0 + ROW_H - 8], radius=14, fill=ROW_BG)
         d.rounded_rectangle([PAD, y0, PAD + 8, y0 + ROW_H - 8], radius=4, fill=color)
-        _badge(d, PAD + 80, cy, "WIN" if e["win"] else "LOSS", color, w=84, h=36, font_size=20)
+        _badge(d, PAD + 80, cy, label, color, w=100 if cancelled else 84, h=36,
+               font_size=14 if cancelled else 20)
 
         hx = PAD + 140
         _paste_head(img, d, heads.get(e["opp_uuid"]), hx, cy - HEAD // 2, HEAD)
         tx = hx + HEAD + 18
-        d.text((tx, cy - 11), f"vs {e['opp']}", font=get_font(26, True), fill=TEXT, anchor="lm")
+        d.text((tx, cy - 11), f"vs {e['opp']}", font=get_font(26, True),
+               fill=MUTED if cancelled else TEXT, anchor="lm")
         d.text((tx, cy + 17), f"Match #{e['id']} · {e['date']}", font=get_font(16), fill=MUTED, anchor="lm")
 
         d.text((620, cy), e["score"], font=get_font(24, True), fill=MUTED, anchor="mm")
@@ -353,7 +436,8 @@ def _draw_history(name, entries, heads, page, pages, total):
         ex = WIDTH - PAD - 28
         d.text((ex, cy), "elo", font=get_font(18), fill=MUTED, anchor="rm")
         w = d.textlength("elo", font=get_font(18))
-        d.text((ex - w - 8, cy), f"{e['delta']:+d}", font=get_font(30, True), fill=color, anchor="rm")
+        delta_text = "—" if cancelled else f"{e['delta']:+d}"
+        d.text((ex - w - 8, cy), delta_text, font=get_font(30, True), fill=color, anchor="rm")
 
     _footer(d, height, f"Page {page + 1}/{pages}")
     return _png(img)
@@ -364,7 +448,7 @@ async def build_history_image(name, entries, page, pages, total):
     return await asyncio.to_thread(_draw_history, name, entries, heads, page, pages, total)
 
 
-# ---------- guild-wide match log (paged) ----------
+# ---------- guild-wide match log (paged, cancelled matches included) ----------
 
 def _draw_matchlog(entries, heads, page, pages, total):
     height = HEADER_H + 10 + len(entries) * ROW_H + FOOTER_H
@@ -375,24 +459,30 @@ def _draw_matchlog(entries, heads, page, pages, total):
     for i, e in enumerate(entries):
         y0 = HEADER_H + 10 + i * ROW_H
         cy = y0 + (ROW_H - 8) // 2
+        cancelled = e.get("cancelled", False)
 
         d.rounded_rectangle([PAD, y0, WIDTH - PAD, y0 + ROW_H - 8], radius=14, fill=ROW_BG)
-        d.rounded_rectangle([PAD, y0, PAD + 8, y0 + ROW_H - 8], radius=4, fill=GOLD)
+        d.rounded_rectangle([PAD, y0, PAD + 8, y0 + ROW_H - 8], radius=4, fill=MUTED if cancelled else GOLD)
 
         d.text((PAD + 24, cy - 10), f"Match #{e['id']}", font=get_font(18, True), fill=TEXT, anchor="lm")
         d.text((PAD + 24, cy + 14), e["date"], font=get_font(15), fill=MUTED, anchor="lm")
 
         _paste_head(img, d, heads.get(e["winner_uuid"]), 178, cy - 20, 40)
-        d.text((226, cy), e["winner"], font=get_font(20, True), fill=TEXT, anchor="lm")
+        d.text((226, cy), e["winner"], font=get_font(20, True),
+               fill=MUTED if cancelled else TEXT, anchor="lm")
 
-        d.text((450, cy), e["score"], font=get_font(22, True), fill=GOLD, anchor="mm")
+        d.text((450, cy), e["score"], font=get_font(22, True),
+               fill=MUTED if cancelled else GOLD, anchor="mm")
 
         _paste_head(img, d, heads.get(e["loser_uuid"]), 494, cy - 20, 40)
         d.text((542, cy), e["loser"], font=get_font(20, True), fill=MUTED, anchor="lm")
 
         ex = WIDTH - PAD - 28
-        d.text((ex, cy - 12), f"{e['w_delta']:+d}", font=get_font(20, True), fill=GREEN, anchor="rm")
-        d.text((ex, cy + 12), f"{e['l_delta']:+d}", font=get_font(20, True), fill=RED, anchor="rm")
+        if cancelled:
+            _badge(d, ex - 50, cy, "CANCELLED", MUTED, w=100, h=26, font_size=14)
+        else:
+            d.text((ex, cy - 12), f"{e['w_delta']:+d}", font=get_font(20, True), fill=GREEN, anchor="rm")
+            d.text((ex, cy + 12), f"{e['l_delta']:+d}", font=get_font(20, True), fill=RED, anchor="rm")
 
     _footer(d, height, f"Page {page + 1}/{pages}")
     return _png(img)
@@ -527,7 +617,6 @@ def _draw_info(info):
     for i, (label, value, sub, size) in enumerate(row2):
         _stat_box(d, PAD + i * (bw3 + gap), y, bw3, box_h, label, value, sub, size)
 
-    # players per tier
     y += box_h + gap
     d.rounded_rectangle([PAD, y, WIDTH - PAD, y + panel_h], radius=16, fill=ROW_BG)
     d.text((PAD + 24, y + 28), "PLAYERS PER TIER", font=get_font(16, True), fill=MUTED, anchor="lm")

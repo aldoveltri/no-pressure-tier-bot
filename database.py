@@ -3,7 +3,7 @@ import aiosqlite
 from datetime import datetime, timedelta, timezone
 from config import tier_from_elo
 
-DB_PATH = "tiers.db"
+DB_PATH = "/data/tiers.db"
 
 
 async def init_db():

@@ -267,8 +267,8 @@ async def cancel_match(m):
 # ---------- season reset ----------
 
 def backup_db() -> str:
-    """Copies the database file next to the bot and returns the new file name."""
-    name = f"backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.db"
+    """Creates a backup of the database inside the persistent volume."""
+    name = f"/data/backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.db"
     shutil.copy2(DB_PATH, name)
     return name
 

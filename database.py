@@ -10,6 +10,10 @@ DB_PATH = (os.getenv("DB_PATH")
            or os.path.join(os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or ".", "tiers.db"))
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript("""
@@ -68,6 +72,111 @@ async def init_extras():
         await db.commit()
 
 
+async def init_seasons():
+    """Creates the year / season structure and migrates existing matches
+    (existing matches go to season 1 of year 1). Safe to run every start."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.executescript("""
+        CREATE TABLE IF NOT EXISTS years (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS seasons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            year_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS season_players (
+            season_id INTEGER NOT NULL,
+            uuid TEXT NOT NULL,
+            elo INTEGER NOT NULL DEFAULT 0,
+            general_tier TEXT,
+            PRIMARY KEY (season_id, uuid)
+        );
+        CREATE TABLE IF NOT EXISTS year_players (
+            year_id INTEGER NOT NULL,
+            uuid TEXT NOT NULL,
+            ign TEXT NOT NULL,
+            tier TEXT,
+            elo INTEGER NOT NULL DEFAULT 0,
+            wins INTEGER NOT NULL DEFAULT 0,
+            losses INTEGER NOT NULL DEFAULT 0,
+            forfeits INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (year_id, uuid)
+        );
+        """)
+        for sql in ("ALTER TABLE matches ADD COLUMN season_id INTEGER",
+                    "ALTER TABLE matches ADD COLUMN year_id INTEGER",
+                    "ALTER TABLE matches ADD COLUMN w_season_before INTEGER",
+                    "ALTER TABLE matches ADD COLUMN w_season_after INTEGER",
+                    "ALTER TABLE matches ADD COLUMN l_season_before INTEGER",
+                    "ALTER TABLE matches ADD COLUMN l_season_after INTEGER"):
+            try:
+                await db.execute(sql)
+            except aiosqlite.OperationalError:
+                pass
+
+        cur = await db.execute("SELECT COUNT(*) FROM years")
+        if (await cur.fetchone())[0] == 0:
+            now = _now()
+            await db.execute("INSERT INTO years (id, started_at) VALUES (1, ?)", (now,))
+            await db.execute("INSERT INTO seasons (id, year_id, started_at) VALUES (1, 1, ?)", (now,))
+            await db.execute("UPDATE matches SET season_id = 1, year_id = 1")
+
+            # rebuild the season elo of season 1 by replaying the existing matches
+            season_elo = {}
+            cur = await db.execute(
+                "SELECT id, winner_uuid, loser_uuid, winner_elo_before, winner_elo_after, "
+                "loser_elo_before, loser_elo_after FROM matches WHERE cancelled = 0 ORDER BY id ASC")
+            for m in await cur.fetchall():
+                wb = season_elo.get(m["winner_uuid"], 0)
+                lb = season_elo.get(m["loser_uuid"], 0)
+                wa = max(0, wb + (m["winner_elo_after"] - m["winner_elo_before"]))
+                la = max(0, lb + (m["loser_elo_after"] - m["loser_elo_before"]))
+                season_elo[m["winner_uuid"]] = wa
+                season_elo[m["loser_uuid"]] = la
+                await db.execute(
+                    "UPDATE matches SET w_season_before = ?, w_season_after = ?, "
+                    "l_season_before = ?, l_season_after = ? WHERE id = ?",
+                    (wb, wa, lb, la, m["id"]))
+            for uuid, e in season_elo.items():
+                await db.execute(
+                    "INSERT INTO season_players (season_id, uuid, elo) VALUES (1, ?, ?)", (uuid, e))
+        await db.commit()
+
+
+async def _current(db):
+    """(current year id, current season id) using an open connection."""
+    cur = await db.execute("SELECT id FROM years WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1")
+    year_id = (await cur.fetchone())[0]
+    cur = await db.execute("SELECT id FROM seasons WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1")
+    season_id = (await cur.fetchone())[0]
+    return year_id, season_id
+
+
+async def get_current():
+    async with aiosqlite.connect(DB_PATH) as db:
+        return await _current(db)
+
+
+async def list_seasons():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT id, year_id, ended_at FROM seasons ORDER BY id DESC")
+        return await cur.fetchall()
+
+
+async def list_years():
+    """Years that have ended (their final leaderboard is archived)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT id FROM years WHERE ended_at IS NOT NULL ORDER BY id DESC")
+        return await cur.fetchall()
+
+
 # ---------- players ----------
 
 async def get_player(uuid: str, include_removed: bool = False):
@@ -97,7 +206,7 @@ async def upsert_player(uuid: str, ign: str, elo: int | None = None):
 
 
 async def remove_player(uuid: str) -> int:
-    """Hides a player from leaderboard and profile and unlinks their Discord account.
+    """Hides a player from leaderboards and profile and unlinks their Discord account.
     Matches are kept. Returns how many matches involve the player."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE players SET removed = 1 WHERE uuid = ?", (uuid,))
@@ -156,41 +265,73 @@ async def verified_owner(uuid: str):
 
 async def save_match(w_uuid, l_uuid, w_before, w_after, l_before, l_after, score,
                      played_at=None, forfeit=False):
-    played_at = played_at or datetime.now(timezone.utc).isoformat()
+    """Saves a match, updates general elo and the elo of the current season."""
+    played_at = played_at or _now()
     async with aiosqlite.connect(DB_PATH) as db:
+        year_id, season_id = await _current(db)
+
+        async def season_elo(uuid):
+            cur = await db.execute(
+                "SELECT elo FROM season_players WHERE season_id = ? AND uuid = ?", (season_id, uuid))
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+        ws_b = await season_elo(w_uuid)
+        ls_b = await season_elo(l_uuid)
+        ws_a = max(0, ws_b + (w_after - w_before))
+        ls_a = max(0, ls_b + (l_after - l_before))
+
         await db.execute("UPDATE players SET elo = ?, tier = ? WHERE uuid = ?",
                          (w_after, tier_from_elo(w_after), w_uuid))
         await db.execute("UPDATE players SET elo = ?, tier = ? WHERE uuid = ?",
                          (l_after, tier_from_elo(l_after), l_uuid))
+        for uuid, e in ((w_uuid, ws_a), (l_uuid, ls_a)):
+            await db.execute(
+                "INSERT INTO season_players (season_id, uuid, elo) VALUES (?, ?, ?) "
+                "ON CONFLICT(season_id, uuid) DO UPDATE SET elo = excluded.elo",
+                (season_id, uuid, e))
         cur = await db.execute(
             "INSERT INTO matches (played_at, winner_uuid, loser_uuid, "
-            "winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after, score, forfeit) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after, score, forfeit, "
+            "season_id, year_id, w_season_before, w_season_after, l_season_before, l_season_after) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (played_at, w_uuid, l_uuid, w_before, w_after, l_before, l_after, score,
-             1 if forfeit else 0),
+             1 if forfeit else 0, season_id, year_id, ws_b, ws_a, ls_b, ls_a),
         )
         await db.commit()
         return cur.lastrowid
 
 
-async def get_stats(uuid: str):
+async def _scope(db, season_id=None):
+    """SQL condition for the matches to count: one season, or (default) the current year."""
+    if season_id is not None:
+        return "season_id = ?", (season_id,)
+    year_id, _ = await _current(db)
+    return "year_id = ?", (year_id,)
+
+
+async def get_stats(uuid: str, season_id: int | None = None):
     """Returns (wins, losses). Cancelled matches don't count."""
     async with aiosqlite.connect(DB_PATH) as db:
+        cond, params = await _scope(db, season_id)
         cur = await db.execute(
-            "SELECT COUNT(*) FROM matches WHERE winner_uuid = ? AND cancelled = 0", (uuid,))
+            f"SELECT COUNT(*) FROM matches WHERE winner_uuid = ? AND cancelled = 0 AND {cond}",
+            (uuid, *params))
         wins = (await cur.fetchone())[0]
         cur = await db.execute(
-            "SELECT COUNT(*) FROM matches WHERE loser_uuid = ? AND cancelled = 0", (uuid,))
+            f"SELECT COUNT(*) FROM matches WHERE loser_uuid = ? AND cancelled = 0 AND {cond}",
+            (uuid, *params))
         losses = (await cur.fetchone())[0]
     return wins, losses
 
 
-async def count_forfeits(uuid: str) -> int:
+async def count_forfeits(uuid: str, season_id: int | None = None) -> int:
     """How many (non-cancelled) matches this player forfeited."""
     async with aiosqlite.connect(DB_PATH) as db:
+        cond, params = await _scope(db, season_id)
         cur = await db.execute(
-            "SELECT COUNT(*) FROM matches WHERE loser_uuid = ? AND forfeit = 1 AND cancelled = 0",
-            (uuid,))
+            f"SELECT COUNT(*) FROM matches WHERE loser_uuid = ? AND forfeit = 1 AND cancelled = 0 AND {cond}",
+            (uuid, *params))
         return (await cur.fetchone())[0]
 
 
@@ -202,22 +343,105 @@ async def get_rank(elo: int):
         return (await cur.fetchone())[0] + 1
 
 
+# ---------- leaderboards ----------
+
+def _finish(r: dict) -> dict:
+    matches = r["wins"] + r["losses"]
+    r["matches"] = matches
+    r["winrate"] = (r["wins"] / matches) if matches else 0.0
+    return r
+
+
+def sort_rows(rows, sort: str):
+    """Sorts leaderboard rows. sort: elo, wins, losses, winrate or matches."""
+    keys = {
+        "elo": lambda r: (-r["elo"], -r["wins"], r["ign"].lower()),
+        "wins": lambda r: (-r["wins"], -r["elo"], r["ign"].lower()),
+        "losses": lambda r: (-r["losses"], -r["elo"], r["ign"].lower()),
+        "winrate": lambda r: (-r["winrate"], -r["matches"], -r["elo"], r["ign"].lower()),
+        "matches": lambda r: (-r["matches"], -r["elo"], r["ign"].lower()),
+    }
+    return sorted(rows, key=keys.get(sort, keys["elo"]))
+
+
 async def get_leaderboard():
+    """General leaderboard (current year). Rows are dicts with uuid, ign, elo, tier, wins, losses,
+    matches, winrate (not sorted: use sort_rows)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        year_id, _ = await _current(db)
         cur = await db.execute(
-            "SELECT uuid, ign, elo, tier FROM players WHERE removed = 0 "
-            "ORDER BY elo DESC, ign ASC")
-        return await cur.fetchall()
+            "SELECT p.uuid, p.ign, p.elo, p.tier, COALESCE(w.n, 0) AS wins, COALESCE(l.n, 0) AS losses "
+            "FROM players p "
+            "LEFT JOIN (SELECT winner_uuid AS uuid, COUNT(*) AS n FROM matches "
+            "           WHERE cancelled = 0 AND year_id = ? GROUP BY winner_uuid) w ON w.uuid = p.uuid "
+            "LEFT JOIN (SELECT loser_uuid AS uuid, COUNT(*) AS n FROM matches "
+            "           WHERE cancelled = 0 AND year_id = ? GROUP BY loser_uuid) l ON l.uuid = p.uuid "
+            "WHERE p.removed = 0",
+            (year_id, year_id),
+        )
+        return [_finish(dict(r)) for r in await cur.fetchall()]
 
 
-# history and match log INCLUDE cancelled matches (they are shown with a CANCELLED label)
+async def get_season_leaderboard(season_id: int):
+    """Returns (rows, is_current) or None if the season doesn't exist.
+    elo = season elo, tier = general tier, tier2 = tier computed from the season elo."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT ended_at FROM seasons WHERE id = ?", (season_id,))
+        s = await cur.fetchone()
+        if s is None:
+            return None
+        is_current = s["ended_at"] is None
+        cur = await db.execute(
+            "SELECT sp.uuid, p.ign, sp.elo, sp.general_tier, p.tier AS live_tier, p.removed, "
+            "COALESCE(w.n, 0) AS wins, COALESCE(l.n, 0) AS losses "
+            "FROM season_players sp "
+            "JOIN players p ON p.uuid = sp.uuid "
+            "LEFT JOIN (SELECT winner_uuid AS uuid, COUNT(*) AS n FROM matches "
+            "           WHERE cancelled = 0 AND season_id = ? GROUP BY winner_uuid) w ON w.uuid = sp.uuid "
+            "LEFT JOIN (SELECT loser_uuid AS uuid, COUNT(*) AS n FROM matches "
+            "           WHERE cancelled = 0 AND season_id = ? GROUP BY loser_uuid) l ON l.uuid = sp.uuid "
+            "WHERE sp.season_id = ?",
+            (season_id, season_id, season_id),
+        )
+        rows = []
+        for r in await cur.fetchall():
+            r = dict(r)
+            if is_current and r["removed"]:
+                continue
+            r = _finish(r)
+            if r["matches"] == 0:
+                continue
+            r["tier"] = r["live_tier"] if is_current else (r["general_tier"] or r["live_tier"])
+            r["tier2"] = tier_from_elo(r["elo"])
+            rows.append(r)
+        return rows, is_current
+
+
+async def get_year_leaderboard(year_id: int):
+    """Archived final leaderboard of a year that has ended, or None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT ended_at FROM years WHERE id = ?", (year_id,))
+        y = await cur.fetchone()
+        if y is None or y["ended_at"] is None:
+            return None
+        cur = await db.execute(
+            "SELECT uuid, ign, tier, elo, wins, losses, forfeits FROM year_players WHERE year_id = ?",
+            (year_id,))
+        return [_finish(dict(r)) for r in await cur.fetchall()]
+
+
+# history and match logs show the current year only; cancelled matches are included
+# in the player history and in the cancelled list
 
 async def count_history(uuid: str):
     async with aiosqlite.connect(DB_PATH) as db:
+        year_id, _ = await _current(db)
         cur = await db.execute(
-            "SELECT COUNT(*) FROM matches WHERE winner_uuid = ? OR loser_uuid = ?",
-            (uuid, uuid),
+            "SELECT COUNT(*) FROM matches WHERE (winner_uuid = ? OR loser_uuid = ?) AND year_id = ?",
+            (uuid, uuid, year_id),
         )
         return (await cur.fetchone())[0]
 
@@ -225,56 +449,63 @@ async def count_history(uuid: str):
 async def get_history(uuid: str, limit: int = 10, offset: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        year_id, _ = await _current(db)
         cur = await db.execute(
             "SELECT m.*, w.ign AS winner_ign, l.ign AS loser_ign "
             "FROM matches m "
             "JOIN players w ON w.uuid = m.winner_uuid "
             "JOIN players l ON l.uuid = m.loser_uuid "
-            "WHERE m.winner_uuid = ? OR m.loser_uuid = ? "
+            "WHERE (m.winner_uuid = ? OR m.loser_uuid = ?) AND m.year_id = ? "
             "ORDER BY m.id DESC LIMIT ? OFFSET ?",
-            (uuid, uuid, limit, offset),
+            (uuid, uuid, year_id, limit, offset),
         )
         return await cur.fetchall()
 
 
 async def count_all_matches():
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM matches WHERE cancelled = 0")
+        year_id, _ = await _current(db)
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM matches WHERE cancelled = 0 AND year_id = ?", (year_id,))
         return (await cur.fetchone())[0]
 
 
 async def get_all_matches(limit: int = 10, offset: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        year_id, _ = await _current(db)
         cur = await db.execute(
             "SELECT m.*, w.ign AS winner_ign, l.ign AS loser_ign "
             "FROM matches m "
             "JOIN players w ON w.uuid = m.winner_uuid "
             "JOIN players l ON l.uuid = m.loser_uuid "
-            "WHERE m.cancelled = 0 "
+            "WHERE m.cancelled = 0 AND m.year_id = ? "
             "ORDER BY m.id DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            (year_id, limit, offset),
         )
         return await cur.fetchall()
 
 
 async def count_cancelled_matches():
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM matches WHERE cancelled = 1")
+        year_id, _ = await _current(db)
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM matches WHERE cancelled = 1 AND year_id = ?", (year_id,))
         return (await cur.fetchone())[0]
 
 
 async def get_cancelled_matches(limit: int = 10, offset: int = 0):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        year_id, _ = await _current(db)
         cur = await db.execute(
             "SELECT m.*, w.ign AS winner_ign, l.ign AS loser_ign "
             "FROM matches m "
             "JOIN players w ON w.uuid = m.winner_uuid "
             "JOIN players l ON l.uuid = m.loser_uuid "
-            "WHERE m.cancelled = 1 "
+            "WHERE m.cancelled = 1 AND m.year_id = ? "
             "ORDER BY m.id DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            (year_id, limit, offset),
         )
         return await cur.fetchall()
 
@@ -307,17 +538,23 @@ async def last_match_id(uuid: str):
 
 
 async def cancel_match(m):
-    """Restores both players' elo/tier from before the match and marks it cancelled."""
+    """Restores both players' general elo/tier and season elo from before the match,
+    and marks the match as cancelled."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE players SET elo = ?, tier = ? WHERE uuid = ?",
                          (m["winner_elo_before"], tier_from_elo(m["winner_elo_before"]), m["winner_uuid"]))
         await db.execute("UPDATE players SET elo = ?, tier = ? WHERE uuid = ?",
                          (m["loser_elo_before"], tier_from_elo(m["loser_elo_before"]), m["loser_uuid"]))
+        if m["season_id"] is not None and m["w_season_before"] is not None:
+            await db.execute("UPDATE season_players SET elo = ? WHERE season_id = ? AND uuid = ?",
+                             (m["w_season_before"], m["season_id"], m["winner_uuid"]))
+            await db.execute("UPDATE season_players SET elo = ? WHERE season_id = ? AND uuid = ?",
+                             (m["l_season_before"], m["season_id"], m["loser_uuid"]))
         await db.execute("UPDATE matches SET cancelled = 1 WHERE id = ?", (m["id"],))
         await db.commit()
 
 
-# ---------- season reset ----------
+# ---------- end of season / end of year ----------
 
 def backup_db() -> str:
     """Copies the database next to itself (so, inside the volume on Railway). Returns the file name."""
@@ -326,10 +563,26 @@ def backup_db() -> str:
     return name
 
 
-async def apply_season_reset(penalty: int) -> int:
-    """Removes 'penalty' elo from every active player (minimum 0). Returns how many were updated."""
+async def _snapshot_tiers(db, season_id: int):
+    """Saves the general tier of every player of a season (kept when the season is archived)."""
+    await db.execute(
+        "UPDATE season_players SET general_tier = "
+        "(SELECT tier FROM players WHERE players.uuid = season_players.uuid) "
+        "WHERE season_id = ?", (season_id,))
+
+
+async def end_season(penalty: int):
+    """Closes the current season, opens the next one and removes 'penalty' general elo
+    from every active player (minimum 0). Returns (closed_id, new_id, players_updated)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        year_id, season_id = await _current(db)
+        now = _now()
+        await _snapshot_tiers(db, season_id)
+        await db.execute("UPDATE seasons SET ended_at = ? WHERE id = ?", (now, season_id))
+        cur = await db.execute("INSERT INTO seasons (year_id, started_at) VALUES (?, ?)", (year_id, now))
+        new_id = cur.lastrowid
+
         cur = await db.execute("SELECT uuid, elo FROM players WHERE removed = 0")
         rows = await cur.fetchall()
         for r in rows:
@@ -337,7 +590,52 @@ async def apply_season_reset(penalty: int) -> int:
             await db.execute("UPDATE players SET elo = ?, tier = ? WHERE uuid = ?",
                              (new_elo, tier_from_elo(new_elo), r["uuid"]))
         await db.commit()
-        return len(rows)
+        return season_id, new_id, len(rows)
+
+
+async def end_year():
+    """Archives the final leaderboard of the year, closes the current season and year,
+    opens a new year and season, and resets every player to 0 elo (tier D).
+    Discord links are kept. Returns (closed_year, new_year, new_season, players_archived)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        year_id, season_id = await _current(db)
+        now = _now()
+
+        await _snapshot_tiers(db, season_id)
+        await db.execute("UPDATE seasons SET ended_at = ? WHERE id = ?", (now, season_id))
+
+        cur = await db.execute(
+            "SELECT p.uuid, p.ign, p.tier, p.elo, "
+            "COALESCE(w.n, 0) AS wins, COALESCE(l.n, 0) AS losses, COALESCE(f.n, 0) AS forfeits "
+            "FROM players p "
+            "LEFT JOIN (SELECT winner_uuid AS uuid, COUNT(*) AS n FROM matches "
+            "           WHERE cancelled = 0 AND year_id = ? GROUP BY winner_uuid) w ON w.uuid = p.uuid "
+            "LEFT JOIN (SELECT loser_uuid AS uuid, COUNT(*) AS n FROM matches "
+            "           WHERE cancelled = 0 AND year_id = ? GROUP BY loser_uuid) l ON l.uuid = p.uuid "
+            "LEFT JOIN (SELECT loser_uuid AS uuid, COUNT(*) AS n FROM matches "
+            "           WHERE cancelled = 0 AND forfeit = 1 AND year_id = ? GROUP BY loser_uuid) f "
+            "ON f.uuid = p.uuid "
+            "WHERE p.removed = 0",
+            (year_id, year_id, year_id),
+        )
+        rows = await cur.fetchall()
+        for r in rows:
+            await db.execute(
+                "INSERT INTO year_players (year_id, uuid, ign, tier, elo, wins, losses, forfeits) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (year_id, r["uuid"], r["ign"], r["tier"], r["elo"], r["wins"], r["losses"], r["forfeits"]))
+
+        await db.execute("UPDATE years SET ended_at = ? WHERE id = ?", (now, year_id))
+        cur = await db.execute("INSERT INTO years (started_at) VALUES (?)", (now,))
+        new_year = cur.lastrowid
+        cur = await db.execute("INSERT INTO seasons (year_id, started_at) VALUES (?, ?)", (new_year, now))
+        new_season = cur.lastrowid
+
+        await db.execute("UPDATE players SET elo = 0, tier = ?", (tier_from_elo(0),))
+        await db.execute("UPDATE paused_matches SET status = 'dropped' WHERE status = 'open'")
+        await db.commit()
+        return year_id, new_year, new_season, len(rows)
 
 
 # ---------- server info ----------
@@ -346,6 +644,7 @@ async def get_info():
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        year_id, season_id = await _current(db)
 
         async def one(sql, params=()):
             cur = await db.execute(sql, params)
@@ -353,9 +652,11 @@ async def get_info():
 
         players = await one("SELECT COUNT(*) FROM players WHERE removed = 0")
         avg_elo = await one("SELECT AVG(elo) FROM players WHERE removed = 0")
-        matches = await one("SELECT COUNT(*) FROM matches WHERE cancelled = 0")
+        matches = await one(
+            "SELECT COUNT(*) FROM matches WHERE cancelled = 0 AND year_id = ?", (year_id,))
         recent = await one(
-            "SELECT COUNT(*) FROM matches WHERE cancelled = 0 AND played_at >= ?", (week_ago,))
+            "SELECT COUNT(*) FROM matches WHERE cancelled = 0 AND year_id = ? AND played_at >= ?",
+            (year_id, week_ago))
         linked = await one("SELECT COUNT(*) FROM links")
         verified = await one("SELECT COUNT(*) FROM links WHERE verified = 1")
 
@@ -369,7 +670,8 @@ async def get_info():
         tiers = {r["tier"]: r["n"] for r in await cur.fetchall()}
 
     return {"players": players, "avg_elo": avg_elo, "matches": matches, "recent": recent,
-            "linked": linked, "verified": verified, "top": top, "tiers": tiers}
+            "linked": linked, "verified": verified, "top": top, "tiers": tiers,
+            "season": season_id, "year": year_id}
 
 
 # ---------- username refresh ----------
@@ -404,7 +706,7 @@ async def create_pause(p1_uuid, p2_uuid, p1_games, p2_games) -> int:
         cur = await db.execute(
             "INSERT INTO paused_matches (created_at, p1_uuid, p2_uuid, p1_games, p2_games) "
             "VALUES (?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), p1_uuid, p2_uuid, p1_games, p2_games),
+            (_now(), p1_uuid, p2_uuid, p1_games, p2_games),
         )
         await db.commit()
         return cur.lastrowid

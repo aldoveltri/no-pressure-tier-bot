@@ -263,29 +263,34 @@ def _match_panel(img, d, x0, y0, p, accent, label, head_data):
     d.text((cx, y0 + 314), f"{p['before']} → {p['after']} elo", font=get_font(20), fill=MUTED, anchor="mm")
 
 
-def _draw_match(w, l, score, match_id, date, heads, title):
+def _draw_match(w, l, score, match_id, date, heads, title, forfeit):
     top = HEADER_H + 24
     height = top + PANEL_H + 20 + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
     d = ImageDraw.Draw(img)
-    subtitle = (f"{GUILD_NAME} · first to 3" if title == "MATCH RESULT"
-                else f"{GUILD_NAME} · elo restored")
+    if title == "MATCH RESULT":
+        subtitle = f"{GUILD_NAME} · " + ("forfeit" if forfeit else "first to 3")
+    else:
+        subtitle = f"{GUILD_NAME} · elo restored"
     _header(d, title, subtitle)
 
     _match_panel(img, d, PAD, top, w, GOLD, "WINNER", heads.get(w["uuid"]))
-    _match_panel(img, d, WIDTH - PAD - PANEL_W, top, l, RED, "LOSER", heads.get(l["uuid"]))
+    _match_panel(img, d, WIDTH - PAD - PANEL_W, top, l, RED,
+                 "FORFEIT" if forfeit else "LOSER", heads.get(l["uuid"]))
 
     mid = top + PANEL_H // 2
     d.text((WIDTH // 2, mid - 40), "VS", font=get_font(34, True), fill=MUTED, anchor="mm")
     d.text((WIDTH // 2, mid + 20), score, font=get_font(54, True), fill=GOLD, anchor="mm")
+    if forfeit:
+        d.text((WIDTH // 2, mid + 62), "by forfeit", font=get_font(16, True), fill=RED, anchor="mm")
 
     _footer(d, height, f"Match #{match_id} · {date}")
     return _png(img)
 
 
-async def build_match_image(winner, loser, score, match_id, date, title="MATCH RESULT"):
+async def build_match_image(winner, loser, score, match_id, date, title="MATCH RESULT", forfeit=False):
     heads = await _fetch_heads([(winner["uuid"], winner["name"]), (loser["uuid"], loser["name"])])
-    return await asyncio.to_thread(_draw_match, winner, loser, score, match_id, date, heads, title)
+    return await asyncio.to_thread(_draw_match, winner, loser, score, match_id, date, heads, title, forfeit)
 
 
 # ---------- paused match (side by side) ----------
@@ -369,7 +374,7 @@ async def build_paused_list_image(entries, total):
 
 # ---------- player profile ----------
 
-def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, heads):
+def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, heads):
     id_h, box_h, gap = 170, 110, 14
     height = HEADER_H + 16 + id_h + gap + box_h + 16 + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
@@ -385,6 +390,12 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, heads):
     d.text((nx, y0 + 62), name, font=get_font(46, True), fill=TEXT, anchor="lm")
     _badge(d, nx + 48, y0 + 120, tier, color, w=96, h=42, font_size=26)
 
+    # forfeits counter (right side of the identity panel)
+    fx = WIDTH - PAD - 40
+    d.text((fx, y0 + 62), "FORFEITS", font=get_font(16, True), fill=MUTED, anchor="rm")
+    d.text((fx, y0 + 108), str(forfeits), font=get_font(44, True),
+           fill=RED if forfeits > 0 else TEXT, anchor="rm")
+
     by = y0 + id_h + gap
     bw = (WIDTH - 2 * PAD - 3 * gap) // 4
     stats = [("ELO", str(elo)), ("GLOBAL RANK", f"#{rank}"),
@@ -399,9 +410,10 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, heads):
     return _png(img)
 
 
-async def build_profile_image(uuid, name, tier, elo, rank, wins, losses, winrate):
+async def build_profile_image(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits):
     heads = await _fetch_heads([(uuid, name)])
-    return await asyncio.to_thread(_draw_profile, uuid, name, tier, elo, rank, wins, losses, winrate, heads)
+    return await asyncio.to_thread(_draw_profile, uuid, name, tier, elo, rank, wins, losses,
+                                   winrate, forfeits, heads)
 
 
 # ---------- player match history (paged, cancelled matches included) ----------
@@ -416,6 +428,7 @@ def _draw_history(name, entries, heads, page, pages, total):
         y0 = HEADER_H + 10 + i * ROW_H
         cy = y0 + (ROW_H - 8) // 2
         cancelled = e.get("cancelled", False)
+        forfeit = e.get("forfeit", False)
         color = MUTED if cancelled else (GREEN if e["win"] else RED)
         label = "CANCELLED" if cancelled else ("WIN" if e["win"] else "LOSS")
 
@@ -431,7 +444,11 @@ def _draw_history(name, entries, heads, page, pages, total):
                fill=MUTED if cancelled else TEXT, anchor="lm")
         d.text((tx, cy + 17), f"Match #{e['id']} · {e['date']}", font=get_font(16), fill=MUTED, anchor="lm")
 
-        d.text((620, cy), e["score"], font=get_font(24, True), fill=MUTED, anchor="mm")
+        d.text((620, cy - 7 if forfeit else cy), e["score"], font=get_font(24, True),
+               fill=MUTED, anchor="mm")
+        if forfeit:
+            d.text((620, cy + 16), "FORFEIT", font=get_font(13, True),
+                   fill=RED if (not e["win"] and not cancelled) else MUTED, anchor="mm")
 
         ex = WIDTH - PAD - 28
         d.text((ex, cy), "elo", font=get_font(18), fill=MUTED, anchor="rm")
@@ -460,6 +477,7 @@ def _draw_matchlog(entries, heads, page, pages, total):
         y0 = HEADER_H + 10 + i * ROW_H
         cy = y0 + (ROW_H - 8) // 2
         cancelled = e.get("cancelled", False)
+        forfeit = e.get("forfeit", False)
 
         d.rounded_rectangle([PAD, y0, WIDTH - PAD, y0 + ROW_H - 8], radius=14, fill=ROW_BG)
         d.rounded_rectangle([PAD, y0, PAD + 8, y0 + ROW_H - 8], radius=4, fill=MUTED if cancelled else GOLD)
@@ -471,8 +489,11 @@ def _draw_matchlog(entries, heads, page, pages, total):
         d.text((226, cy), e["winner"], font=get_font(20, True),
                fill=MUTED if cancelled else TEXT, anchor="lm")
 
-        d.text((450, cy), e["score"], font=get_font(22, True),
+        d.text((450, cy - 7 if forfeit else cy), e["score"], font=get_font(22, True),
                fill=MUTED if cancelled else GOLD, anchor="mm")
+        if forfeit:
+            d.text((450, cy + 16), "FORFEIT", font=get_font(13, True),
+                   fill=MUTED if cancelled else RED, anchor="mm")
 
         _paste_head(img, d, heads.get(e["loser_uuid"]), 494, cy - 20, 40)
         d.text((542, cy), e["loser"], font=get_font(20, True), fill=MUTED, anchor="lm")

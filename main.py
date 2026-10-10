@@ -12,14 +12,17 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from database import (init_db, init_extras, upsert_player, get_player, save_match,
+from database import (init_db, init_extras, init_seasons, upsert_player, get_player, save_match,
                       get_stats, count_forfeits, get_rank, get_leaderboard,
                       get_history, count_history, get_all_matches, count_all_matches,
                       count_cancelled_matches, get_cancelled_matches,
                       get_link, remove_link, link_account,
                       get_match, last_match_id, cancel_match,
-                      backup_db, apply_season_reset, remove_player, get_info,
-                      create_pause, get_pause, list_open_pauses, count_open_pauses, close_pause)
+                      backup_db, remove_player, get_info,
+                      create_pause, get_pause, list_open_pauses, count_open_pauses, close_pause,
+                      get_current, list_seasons, list_years,
+                      get_season_leaderboard, get_year_leaderboard, sort_rows,
+                      end_season, end_year)
 from mojang import get_uuid
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, tier_from_elo
@@ -51,6 +54,10 @@ SCORE_CHOICES = [
     app_commands.Choice(name="3-1", value=1),
     app_commands.Choice(name="3-2", value=2),
 ]
+
+SORT_OPTIONS = [("elo", "Elo"), ("wins", "Wins"), ("losses", "Losses"),
+                ("winrate", "Win rate"), ("matches", "Matches played")]
+SORT_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in SORT_OPTIONS]
 
 
 # ---------- small helpers ----------
@@ -215,11 +222,11 @@ class PagedView(BaseView):
         self.update_buttons()
         await interaction.edit_original_response(attachments=[await self.make_file()], view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=0)
     async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.change_page(interaction, -1)
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=0)
     async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.change_page(interaction, 1)
 
@@ -229,6 +236,7 @@ class PagedView(BaseView):
 async def setup_hook():
     await init_db()
     await init_extras()
+    await init_seasons()
     await bot.load_extension("namesync")
 
 bot.setup_hook = setup_hook
@@ -268,6 +276,27 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @bot.tree.command(name="ping", description="Check if the bot is online")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong!")
+
+
+# ---------- season / year suggestions for the commands ----------
+
+async def season_choices(current: str):
+    out = []
+    for r in await list_seasons():
+        if current and current not in str(r["id"]):
+            continue
+        label = f"Season {r['id']}" + (" (current)" if r["ended_at"] is None else "")
+        out.append(app_commands.Choice(name=label, value=r["id"]))
+    return out[:25]
+
+
+async def year_choices(current: str):
+    out = []
+    for r in await list_years():
+        if current and current not in str(r["id"]):
+            continue
+        out.append(app_commands.Choice(name=f"Year {r['id']}", value=r["id"]))
+    return out[:25]
 
 
 # ---------- linking (always verified on Hypixel) ----------
@@ -464,6 +493,12 @@ async def undo(interaction: discord.Interaction, match_id: int):
         await interaction.followup.send(f"Match #{match_id} is already cancelled.")
         return
 
+    _year, current_season = await get_current()
+    if m["season_id"] != current_season:
+        await interaction.followup.send(
+            f"Match #{match_id} belongs to a season that is already over, so it can't be cancelled.")
+        return
+
     # the match must be the most recent one for both players
     for uuid in (m["winner_uuid"], m["loser_uuid"]):
         last = await last_match_id(uuid)
@@ -473,13 +508,13 @@ async def undo(interaction: discord.Interaction, match_id: int):
                 f"match (#{last}). Cancel the newer one first.")
             return
 
-    # and their elo must not have changed since (new /settier, /setelo, season reset...)
+    # and their elo must not have changed since (new /settier, /setelo...)
     p_w = await get_player(m["winner_uuid"], include_removed=True)
     p_l = await get_player(m["loser_uuid"], include_removed=True)
     if p_w["elo"] != m["winner_elo_after"] or p_l["elo"] != m["loser_elo_after"]:
         await interaction.followup.send(
             f"Match #{match_id} can't be cancelled: the elo of one of the players changed "
-            f"after it (for example a manual change or a season reset).")
+            f"after it (for example a manual change).")
         return
 
     await cancel_match(m)
@@ -531,26 +566,59 @@ async def removeplayer(interaction: discord.Interaction, ign: str):
         view=ConfirmView(interaction.user.id, do_remove), ephemeral=True)
 
 
-@bot.tree.command(name="endseason", description="End the season: every player loses 100 elo (staff only)")
+# ---------- end of season / end of year ----------
+
+@bot.tree.command(name="endseason", description="End the current season and start a new one (staff only)")
 @staff_only()
 async def endseason(interaction: discord.Interaction):
     async def do_season(i: discord.Interaction):
         backup = backup_db()
-        count = await apply_season_reset(SEASON_ELO_LOSS)
+        closed, new, count = await end_season(SEASON_ELO_LOSS)
         await i.edit_original_response(content="Done.")
         await i.followup.send(
-            f"🏁 **Season ended.** {count} players lost {SEASON_ELO_LOSS} elo.\n"
-            f"Backup saved as `{backup}`.")
-        rows = await get_leaderboard()
-        if rows:
-            lb = LeaderboardView(rows)
+            f"🏁 **Season {closed} ended.** Season {new} has started: the season leaderboard starts "
+            f"from 0 for everyone. The {count} players lost {SEASON_ELO_LOSS} elo in the general "
+            f"leaderboard.\nBackup saved as `{backup}`.")
+        res = await get_season_leaderboard(closed)
+        if res and res[0]:
+            lb = LeaderboardView(res[0], "elo", f"SEASON {closed} LEADERBOARD",
+                                 f"Season {closed} (ended)", True)
             lb.message = await i.followup.send(file=await lb.make_file(), view=lb)
 
+    current_year, current_season = await get_current()
     await interaction.response.send_message(
-        f"⚠️ This will remove **{SEASON_ELO_LOSS} elo** from **every player** (minimum 0) "
-        f"and update their tiers. A backup of the database is saved first.\n"
-        f"Do you want to continue?",
+        f"⚠️ This will end **season {current_season}**: its leaderboard is saved, a new season starts "
+        f"from 0, and **every player loses {SEASON_ELO_LOSS} general elo** (minimum 0). "
+        f"A backup of the database is saved first.\nDo you want to continue?",
         view=ConfirmView(interaction.user.id, do_season), ephemeral=True)
+
+
+@bot.tree.command(name="endyear", description="End the year: save everything and start from scratch (staff only)")
+@staff_only()
+async def endyear(interaction: discord.Interaction):
+    async def do_year(i: discord.Interaction):
+        backup = backup_db()
+        old_year, new_year, new_season, count = await end_year()
+        await i.edit_original_response(content="Done.")
+        await i.followup.send(
+            f"🎆 **Year {old_year} ended.** The final leaderboard and the profiles of {count} players "
+            f"were saved: see them with `/leaderboard year:{old_year}` and `/profile year:{old_year}`.\n"
+            f"Year {new_year} (season {new_season}) has started: everyone is back to 0 elo (tier D). "
+            f"Discord links were kept.\nBackup saved as `{backup}`.")
+        rows = await get_year_leaderboard(old_year)
+        if rows:
+            lb = LeaderboardView(rows, "elo", f"YEAR {old_year} FINAL LEADERBOARD",
+                                 f"Year {old_year} (final)", False)
+            lb.message = await i.followup.send(file=await lb.make_file(), view=lb)
+
+    current_year, current_season = await get_current()
+    await interaction.response.send_message(
+        f"⚠️ **This will end year {current_year}.** The final leaderboard and the profiles are saved, "
+        f"then **every player goes back to 0 elo (tier D)**, the current season ends, open paused "
+        f"matches are discarded and this year's matches disappear from `/history` and `/matches`. "
+        f"Discord links are kept. A backup of the database is saved first.\n"
+        f"Are you sure you want to continue?",
+        view=ConfirmView(interaction.user.id, do_year), ephemeral=True)
 
 
 # ---------- paused matches ----------
@@ -666,19 +734,68 @@ async def droppause(interaction: discord.Interaction, pause_id: int):
         f"{pm['p1_games']}-{pm['p2_games']} {discord.utils.escape_markdown(pm['p2_ign'])}) was discarded.")
 
 
-# ---------- player commands ----------
+# ---------- profile ----------
 
-@bot.tree.command(name="profile", description="Show a player's tier, elo and record")
+@bot.tree.command(name="profile", description="Show a player's profile (general, or of a season / past year)")
 @app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
-                       user="Show the linked account of another member")
+                       user="Show the linked account of another member",
+                       season="Show the profile of a season",
+                       year="Show the profile of a past year")
 async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
-                  user: Optional[discord.Member] = None):
+                  user: Optional[discord.Member] = None,
+                  season: Optional[int] = None, year: Optional[int] = None):
     await interaction.response.defer()
+    if season is not None and year is not None:
+        await interaction.followup.send("Choose either a season or a year, not both.")
+        return
     target = await resolve_target(interaction, ign, user)
     if target is None:
         return
     uuid, name, fresh = target
 
+    # ----- season profile -----
+    if season is not None:
+        res = await get_season_leaderboard(season)
+        if res is None:
+            await interaction.followup.send(f"Season {season} does not exist.")
+            return
+        by_elo = sort_rows(res[0], "elo")
+        idx = next((i for i, r in enumerate(by_elo) if r["uuid"] == uuid), None)
+        if idx is None:
+            await interaction.followup.send(
+                f"**{discord.utils.escape_markdown(name)}** didn't play any match in season {season}.")
+            return
+        r = by_elo[idx]
+        forfeits = await count_forfeits(uuid, season_id=season)
+        winrate = f"{r['wins'] / r['matches'] * 100:.0f}%" if r["matches"] else "-"
+        data = await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1,
+                                         r["wins"], r["losses"], winrate, forfeits,
+                                         title=f"SEASON {season} PROFILE", scope=f"Season {season}",
+                                         tier2=r["tier2"], elo_label="SEASON ELO")
+        await interaction.followup.send(file=png_file(data, "profile.png"))
+        return
+
+    # ----- archived year profile -----
+    if year is not None:
+        rows = await get_year_leaderboard(year)
+        if rows is None:
+            await interaction.followup.send(f"Year {year} does not exist or hasn't ended yet.")
+            return
+        by_elo = sort_rows(rows, "elo")
+        idx = next((i for i, r in enumerate(by_elo) if r["uuid"] == uuid), None)
+        if idx is None:
+            await interaction.followup.send(
+                f"**{discord.utils.escape_markdown(name)}** is not in the final leaderboard of year {year}.")
+            return
+        r = by_elo[idx]
+        winrate = f"{r['wins'] / r['matches'] * 100:.0f}%" if r["matches"] else "-"
+        data = await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1,
+                                         r["wins"], r["losses"], winrate, r["forfeits"],
+                                         title=f"YEAR {year} PROFILE", scope=f"Year {year} (final)")
+        await interaction.followup.send(file=png_file(data, "profile.png"))
+        return
+
+    # ----- general profile (current year) -----
     p = await get_player(uuid)
     if p is None:
         await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** doesn't have a tier yet.")
@@ -699,6 +816,18 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
                                      winrate, forfeits)
     await interaction.followup.send(file=png_file(data, "profile.png"))
 
+
+@profile.autocomplete("season")
+async def profile_season_ac(interaction: discord.Interaction, current: str):
+    return await season_choices(current)
+
+
+@profile.autocomplete("year")
+async def profile_year_ac(interaction: discord.Interaction, current: str):
+    return await year_choices(current)
+
+
+# ---------- player match history ----------
 
 def history_entries(rows, uuid):
     entries = []
@@ -735,7 +864,7 @@ class HistoryView(PagedView):
         return png_file(data, "history.png")
 
 
-@bot.tree.command(name="history", description="Show a player's match history")
+@bot.tree.command(name="history", description="Show a player's match history (current year)")
 @app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
                        user="Show the linked account of another member")
 async def history(interaction: discord.Interaction, ign: Optional[str] = None,
@@ -766,7 +895,7 @@ async def history(interaction: discord.Interaction, ign: Optional[str] = None,
         await interaction.followup.send(file=file)
 
 
-# ---------- guild-wide match log ----------
+# ---------- guild-wide match log and cancelled matches ----------
 
 def log_entries(rows):
     entries = []
@@ -834,29 +963,104 @@ async def cancelled_cmd(interaction: discord.Interaction):
     else:
         await interaction.followup.send(file=file)
 
+
+# ---------- leaderboard (general, season, archived year) ----------
+
+class SortSelect(discord.ui.Select):
+    def __init__(self, current: str):
+        options = [discord.SelectOption(label=label, value=key, default=(key == current))
+                   for key, label in SORT_OPTIONS]
+        super().__init__(placeholder="Sort by...", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "LeaderboardView" = self.view
+        await interaction.response.defer()
+        view.set_sort(self.values[0])
+        await interaction.edit_original_response(attachments=[await view.make_file()], view=view)
+
+
 class LeaderboardView(PagedView):
     PER_PAGE = 10
 
-    def __init__(self, rows):
-        super().__init__(timeout=180)
-        self.rows = rows
-        self.pages = max(1, (len(rows) + self.PER_PAGE - 1) // self.PER_PAGE)
+    def __init__(self, rows, sort="elo", title="GLOBAL LEADERBOARD", scope="", dual=False):
+        super().__init__(timeout=300)
+        self.base_rows = rows
+        self.sort = sort
+        self.title = title
+        self.scope = scope
+        self.dual = dual
+        self.rows = sort_rows(rows, sort)
+        self.pages = max(1, (len(self.rows) + self.PER_PAGE - 1) // self.PER_PAGE)
+        self.select = SortSelect(sort)
+        self.add_item(self.select)
+        self.update_buttons()
+
+    def set_sort(self, sort: str):
+        self.sort = sort
+        self.rows = sort_rows(self.base_rows, sort)
+        self.page = 0
+        for option in self.select.options:
+            option.default = (option.value == sort)
         self.update_buttons()
 
     async def make_file(self) -> discord.File:
-        data = await build_leaderboard_image(self.rows, self.page, self.PER_PAGE)
+        data = await build_leaderboard_image(self.rows, self.page, self.PER_PAGE, sort=self.sort,
+                                             title=self.title, scope=self.scope, dual=self.dual)
         return png_file(data, "leaderboard.png")
 
 
-@bot.tree.command(name="leaderboard", description="Show the global leaderboard")
-async def leaderboard(interaction: discord.Interaction):
+@bot.tree.command(name="leaderboard", description="Show the leaderboard (general, or of a season / past year)")
+@app_commands.describe(sort="What to sort by (you can also change it with the menu)",
+                       season="Show the leaderboard of a season",
+                       year="Show the final leaderboard of a past year")
+@app_commands.choices(sort=SORT_CHOICES)
+async def leaderboard(interaction: discord.Interaction,
+                      sort: Optional[app_commands.Choice[str]] = None,
+                      season: Optional[int] = None, year: Optional[int] = None):
     await interaction.response.defer()
-    rows = await get_leaderboard()
-    if not rows:
-        await interaction.followup.send("There are no players yet.")
+    if season is not None and year is not None:
+        await interaction.followup.send("Choose either a season or a year, not both.")
         return
-    view = LeaderboardView(rows)
+    key = sort.value if sort else "elo"
+
+    if season is not None:
+        res = await get_season_leaderboard(season)
+        if res is None:
+            await interaction.followup.send(f"Season {season} does not exist.")
+            return
+        rows, is_current = res
+        if not rows:
+            await interaction.followup.send(f"No matches have been played in season {season} yet.")
+            return
+        scope = f"Season {season} " + ("(current)" if is_current else "(ended)")
+        view = LeaderboardView(rows, key, f"SEASON {season} LEADERBOARD", scope, True)
+    elif year is not None:
+        rows = await get_year_leaderboard(year)
+        if rows is None:
+            await interaction.followup.send(f"Year {year} does not exist or hasn't ended yet.")
+            return
+        if not rows:
+            await interaction.followup.send(f"Year {year} has no players in its final leaderboard.")
+            return
+        view = LeaderboardView(rows, key, f"YEAR {year} FINAL LEADERBOARD", f"Year {year} (final)", False)
+    else:
+        rows = await get_leaderboard()
+        if not rows:
+            await interaction.followup.send("There are no players yet.")
+            return
+        view = LeaderboardView(rows, key, "GLOBAL LEADERBOARD", "", False)
+
     view.message = await interaction.followup.send(file=await view.make_file(), view=view)
+
+
+@leaderboard.autocomplete("season")
+async def leaderboard_season_ac(interaction: discord.Interaction, current: str):
+    return await season_choices(current)
+
+
+@leaderboard.autocomplete("year")
+async def leaderboard_year_ac(interaction: discord.Interaction, current: str):
+    return await year_choices(current)
 
 
 @bot.tree.command(name="info", description="Show general stats about players, matches and tiers")

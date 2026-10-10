@@ -25,12 +25,13 @@ from database import (init_db, init_extras, init_seasons, upsert_player, get_pla
                       end_season, end_year)
 from mojang import get_uuid
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
-from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, tier_from_elo
+from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, tier_from_elo
 from elo import calcola
+from guide import GUIDE_PAGES
 from graphics import (build_leaderboard_image, build_match_image, build_profile_image,
                       build_history_image, build_settier_image, build_matchlog_image,
                       build_setelo_image, build_info_image,
-                      build_pause_image, build_paused_list_image)
+                      build_pause_image, build_paused_list_image, build_text_image)
 
 load_dotenv()
 
@@ -102,9 +103,9 @@ async def lookup_ign(interaction: discord.Interaction, ign: str):
     return result
 
 
-async def resolve_target(interaction: discord.Interaction, ign, user):
-    """Works out which player a command is about.
-    Priority: typed username > linked account of the mentioned member > caller's linked account.
+async def resolve_target(interaction: discord.Interaction, ign):
+    """Works out which player a command is about: the typed Minecraft username, or the
+    caller's linked account when no username is given.
     Returns (uuid, name, fresh) or None (an error message has already been sent).
     'fresh' is True when the name comes straight from Mojang."""
     if ign:
@@ -113,14 +114,10 @@ async def resolve_target(interaction: discord.Interaction, ign, user):
             return None
         return result[0], result[1], True
 
-    target = user or interaction.user
-    link_row = await get_link(target.id)
+    link_row = await get_link(interaction.user.id)
     if link_row is None:
-        if user:
-            msg = f"{user.display_name} hasn't linked a Minecraft account yet."
-        else:
-            msg = "You haven't linked a Minecraft account yet. Use `/link` or type a username."
-        await interaction.followup.send(msg, allowed_mentions=NO_MENTIONS)
+        await interaction.followup.send(
+            "You haven't linked a Minecraft account yet. Use `/link` or type a username.")
         return None
     return link_row["uuid"], link_row["ign"], False
 
@@ -276,6 +273,73 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @bot.tree.command(name="ping", description="Check if the bot is online")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong!")
+
+
+# ---------- rules ----------
+
+@bot.tree.command(name="rules", description="Show the rules for 1v1s and tier tests")
+async def rules(interaction: discord.Interaction):
+    await interaction.response.defer()
+    blocks = []
+    for heading, lines in RULES:
+        blocks.append({"type": "heading", "text": heading})
+        for line in lines:
+            blocks.append({"type": "bullet", "text": line})
+    data = await build_text_image("1V1 & TIER TEST RULES", GUILD_NAME, blocks)
+    await interaction.followup.send(file=png_file(data, "rules.png"))
+
+
+# ---------- guide ----------
+
+_guide_cache = {}
+
+
+class GuideSelect(discord.ui.Select):
+    def __init__(self, current: int):
+        options = [discord.SelectOption(label=f"{i + 1}. {p['title']}", value=str(i), default=(i == current))
+                   for i, p in enumerate(GUIDE_PAGES)]
+        super().__init__(placeholder="Jump to a section...", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "GuideView" = self.view
+        await interaction.response.defer()
+        view.set_page(int(self.values[0]))
+        await interaction.edit_original_response(attachments=[await view.make_file()], view=view)
+
+
+class GuideView(PagedView):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.pages = len(GUIDE_PAGES)
+        self.select = GuideSelect(0)
+        self.add_item(self.select)
+        self.update_buttons()
+
+    def set_page(self, index: int):
+        self.page = index
+        for option in self.select.options:
+            option.default = (option.value == str(index))
+        self.update_buttons()
+
+    async def change_page(self, interaction: discord.Interaction, delta: int):
+        await interaction.response.defer()
+        self.set_page(self.page + delta)
+        await interaction.edit_original_response(attachments=[await self.make_file()], view=self)
+
+    async def make_file(self) -> discord.File:
+        if self.page not in _guide_cache:
+            p = GUIDE_PAGES[self.page]
+            _guide_cache[self.page] = await build_text_image(
+                p["title"].upper(), f"{GUILD_NAME} · Bot guide", p["blocks"],
+                footer=f"Page {self.page + 1}/{len(GUIDE_PAGES)}")
+        return png_file(_guide_cache[self.page], "guide.png")
+
+
+@bot.tree.command(name="guide", description="A complete guide to the bot and all its commands")
+async def guide(interaction: discord.Interaction):
+    await interaction.response.defer()
+    view = GuideView()
+    view.message = await interaction.followup.send(file=await view.make_file(), view=view)
 
 
 # ---------- season / year suggestions for the commands ----------
@@ -576,9 +640,9 @@ async def endseason(interaction: discord.Interaction):
         closed, new, count = await end_season(SEASON_ELO_LOSS)
         await i.edit_original_response(content="Done.")
         await i.followup.send(
-            f"🏁 **Season {closed} ended.** Season {new} has started: the season leaderboard starts "
-            f"from 0 for everyone. The {count} players lost {SEASON_ELO_LOSS} elo in the general "
-            f"leaderboard.\nBackup saved as `{backup}`.")
+            f"🏁 **Season {closed} ended.** Season {new} has started. "
+            f"The {count} players lost {SEASON_ELO_LOSS} elo in the general leaderboard.\n"
+            f"Backup saved as `{backup}`.")
         res = await get_season_leaderboard(closed)
         if res and res[0]:
             lb = LeaderboardView(res[0], "elo", f"SEASON {closed} LEADERBOARD",
@@ -587,8 +651,8 @@ async def endseason(interaction: discord.Interaction):
 
     current_year, current_season = await get_current()
     await interaction.response.send_message(
-        f"⚠️ This will end **season {current_season}**: its leaderboard is saved, a new season starts "
-        f"from 0, and **every player loses {SEASON_ELO_LOSS} general elo** (minimum 0). "
+        f"⚠️ This will end **season {current_season}**: its leaderboard is saved, a new season starts, "
+        f"and **every player loses {SEASON_ELO_LOSS} general elo** (minimum 0). "
         f"A backup of the database is saved first.\nDo you want to continue?",
         view=ConfirmView(interaction.user.id, do_season), ephemeral=True)
 
@@ -738,17 +802,15 @@ async def droppause(interaction: discord.Interaction, pause_id: int):
 
 @bot.tree.command(name="profile", description="Show a player's profile (general, or of a season / past year)")
 @app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
-                       user="Show the linked account of another member",
                        season="Show the profile of a season",
                        year="Show the profile of a past year")
 async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
-                  user: Optional[discord.Member] = None,
                   season: Optional[int] = None, year: Optional[int] = None):
     await interaction.response.defer()
     if season is not None and year is not None:
         await interaction.followup.send("Choose either a season or a year, not both.")
         return
-    target = await resolve_target(interaction, ign, user)
+    target = await resolve_target(interaction, ign)
     if target is None:
         return
     uuid, name, fresh = target
@@ -864,12 +926,10 @@ class HistoryView(PagedView):
 
 
 @bot.tree.command(name="history", description="Show a player's match history (current year)")
-@app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
-                       user="Show the linked account of another member")
-async def history(interaction: discord.Interaction, ign: Optional[str] = None,
-                  user: Optional[discord.Member] = None):
+@app_commands.describe(ign="Minecraft username (leave empty for your linked account)")
+async def history(interaction: discord.Interaction, ign: Optional[str] = None):
     await interaction.response.defer()
-    target = await resolve_target(interaction, ign, user)
+    target = await resolve_target(interaction, ign)
     if target is None:
         return
     uuid, name, fresh = target

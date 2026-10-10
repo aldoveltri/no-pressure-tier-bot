@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from database import (init_db, init_extras, upsert_player, get_player, save_match,
                       get_stats, count_forfeits, get_rank, get_leaderboard,
                       get_history, count_history, get_all_matches, count_all_matches,
+                      count_cancelled_matches, get_cancelled_matches,
                       get_link, remove_link, link_account,
                       get_match, last_match_id, cancel_match,
                       backup_db, apply_season_reset, remove_player, get_info,

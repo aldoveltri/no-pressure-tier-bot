@@ -385,7 +385,9 @@ async def get_leaderboard():
 
 async def get_season_leaderboard(season_id: int):
     """Returns (rows, is_current) or None if the season doesn't exist.
-    elo = season elo, tier = general tier, tier2 = tier computed from the season elo."""
+    elo / tier are the player's GENERAL elo and tier (live for the current season; for a closed
+    season, the elo after the player's last match of that season).
+    wins / losses / matches / winrate count only the matches of that season."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT ended_at FROM seasons WHERE id = ?", (season_id,))
@@ -394,7 +396,11 @@ async def get_season_leaderboard(season_id: int):
             return None
         is_current = s["ended_at"] is None
         cur = await db.execute(
-            "SELECT sp.uuid, p.ign, sp.elo, sp.general_tier, p.tier AS live_tier, p.removed, "
+            "SELECT sp.uuid, p.ign, p.elo AS live_elo, p.removed, "
+            "(SELECT CASE WHEN m.winner_uuid = sp.uuid THEN m.winner_elo_after ELSE m.loser_elo_after END "
+            "   FROM matches m WHERE m.season_id = sp.season_id AND m.cancelled = 0 "
+            "   AND (m.winner_uuid = sp.uuid OR m.loser_uuid = sp.uuid) "
+            "   ORDER BY m.id DESC LIMIT 1) AS end_elo, "
             "COALESCE(w.n, 0) AS wins, COALESCE(l.n, 0) AS losses "
             "FROM season_players sp "
             "JOIN players p ON p.uuid = sp.uuid "
@@ -413,8 +419,11 @@ async def get_season_leaderboard(season_id: int):
             r = _finish(r)
             if r["matches"] == 0:
                 continue
-            r["tier"] = r["live_tier"] if is_current else (r["general_tier"] or r["live_tier"])
-            r["tier2"] = tier_from_elo(r["elo"])
+            if is_current or r["end_elo"] is None:
+                r["elo"] = r["live_elo"]
+            else:
+                r["elo"] = r["end_elo"]
+            r["tier"] = tier_from_elo(r["elo"])
             rows.append(r)
         return rows, is_current
 

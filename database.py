@@ -239,7 +239,7 @@ async def get_history(uuid: str, limit: int = 10, offset: int = 0):
 
 async def count_all_matches():
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM matches")
+        cur = await db.execute("SELECT COUNT(*) FROM matches WHERE cancelled = 0")
         return (await cur.fetchone())[0]
 
 
@@ -251,6 +251,28 @@ async def get_all_matches(limit: int = 10, offset: int = 0):
             "FROM matches m "
             "JOIN players w ON w.uuid = m.winner_uuid "
             "JOIN players l ON l.uuid = m.loser_uuid "
+            "WHERE m.cancelled = 0 "
+            "ORDER BY m.id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return await cur.fetchall()
+
+
+async def count_cancelled_matches():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM matches WHERE cancelled = 1")
+        return (await cur.fetchone())[0]
+
+
+async def get_cancelled_matches(limit: int = 10, offset: int = 0):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT m.*, w.ign AS winner_ign, l.ign AS loser_ign "
+            "FROM matches m "
+            "JOIN players w ON w.uuid = m.winner_uuid "
+            "JOIN players l ON l.uuid = m.loser_uuid "
+            "WHERE m.cancelled = 1 "
             "ORDER BY m.id DESC LIMIT ? OFFSET ?",
             (limit, offset),
         )

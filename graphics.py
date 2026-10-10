@@ -697,3 +697,105 @@ def _draw_info(info):
 
 async def build_info_image(info):
     return await asyncio.to_thread(_draw_info, info)
+
+
+
+# ---------- generic text card (rules, guide) ----------
+
+SOFT = (210, 214, 224)
+_CELL_COLORS = {"text": TEXT, "green": GREEN, "red": RED, "gold": GOLD, "muted": MUTED}
+
+
+def _wrap(d, text, font, max_w):
+    lines, cur = [], ""
+    for word in text.split():
+        test = f"{cur} {word}".strip()
+        if cur and d.textlength(test, font=font) > max_w:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = test
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _render_blocks(d, blocks, x0, y0, width, draw):
+    """Draws (or only measures, when draw=False) a list of text blocks. Returns the final y."""
+    y = y0
+    for b in blocks:
+        kind = b["type"]
+        if kind == "heading":
+            if y > y0:
+                y += 16
+            if draw:
+                d.rounded_rectangle([x0, y + 4, x0 + 6, y + 30], radius=3, fill=GOLD)
+                d.text((x0 + 18, y + 17), b["text"], font=get_font(24, True), fill=TEXT, anchor="lm")
+            y += 44
+        elif kind == "paragraph":
+            font = get_font(19)
+            for line in _wrap(d, b["text"], font, width):
+                if draw:
+                    d.text((x0, y), line, font=font, fill=SOFT, anchor="lt")
+                y += 28
+            y += 8
+        elif kind == "bullet":
+            font = get_font(19)
+            if draw:
+                d.ellipse([x0 + 4, y + 10, x0 + 12, y + 18], fill=GOLD)
+            for line in _wrap(d, b["text"], font, width - 28):
+                if draw:
+                    d.text((x0 + 28, y), line, font=font, fill=TEXT, anchor="lt")
+                y += 28
+            y += 6
+        elif kind == "command":
+            if draw:
+                d.text((x0, y), b["cmd"], font=get_font(20, True), fill=GOLD, anchor="lt")
+            y += 30
+            font = get_font(18)
+            for line in _wrap(d, b["text"], font, width - 20):
+                if draw:
+                    d.text((x0 + 20, y), line, font=font, fill=SOFT, anchor="lt")
+                y += 26
+            y += 14
+        elif kind == "table":
+            widths = [int(width * w) for w in b["widths"]]
+            col_x = [x0 + sum(widths[:i]) for i in range(len(widths))]
+            hfont = get_font(14, True)
+            cfont = get_font(17, True)
+            if draw:
+                for i, text in enumerate(b["cols"]):
+                    d.text((col_x[i] + widths[i] // 2, y + 14), text, font=hfont, fill=MUTED, anchor="mm")
+            y += 32
+            colors = b.get("colors") or ["text"] * len(widths)
+            for r, row in enumerate(b["rows"]):
+                if draw:
+                    if r % 2 == 0:
+                        d.rounded_rectangle([x0, y, x0 + width, y + 34], radius=8, fill=(46, 48, 56))
+                    for i, text in enumerate(row):
+                        d.text((col_x[i] + widths[i] // 2, y + 17), text, font=cfont,
+                               fill=_CELL_COLORS.get(colors[i], TEXT), anchor="mm")
+                y += 38
+            y += 10
+    return y
+
+def _draw_text_card(title, subtitle, blocks, footer):
+    inner_x = PAD + 28
+    inner_w = WIDTH - 2 * (PAD + 28)
+    tmp = ImageDraw.Draw(Image.new("RGB", (WIDTH, 10)))
+    body_h = _render_blocks(tmp, blocks, inner_x, 0, inner_w, False)
+    panel_h = body_h + 56
+    top = HEADER_H + 16
+    height = top + panel_h + 16 + FOOTER_H
+
+    img = Image.new("RGB", (WIDTH, height), BG)
+    d = ImageDraw.Draw(img)
+    _header(d, title, subtitle)
+    d.rounded_rectangle([PAD, top, WIDTH - PAD, top + panel_h], radius=16, fill=ROW_BG)
+    _render_blocks(d, blocks, inner_x, top + 28, inner_w, True)
+    _footer(d, height, footer)
+    return _png(img)
+
+
+async def build_text_image(title, subtitle, blocks, footer=None):
+    return await asyncio.to_thread(_draw_text_card, title, subtitle, blocks, footer)

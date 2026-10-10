@@ -22,3 +22,23 @@ def tier_from_elo(elo: int) -> str:
         if elo >= minimum:
             return name
     return "D"
+
+# Rules shown by /rules: (section title, [lines]). Edit the text here to change what the bot shows.
+RULES = [
+    ("Format", [
+        "Matches are first to 3 (3-0, 3-1 or 3-2).",
+        "1v1s are side rush on the Dia rush maps.",
+        "Normally Red vs Blue. Red vs Gray is used only rarely.",
+    ]),
+    ("Islands", [
+        "Only adjacent islands can be used.",
+        "Red vs Blue: Green and Gray islands.",
+        "Red vs Gray: Pink and Blue islands.",
+    ]),
+    ("Items and resources", [
+        "Emeralds can only be used after you have lost your bed.",
+        "Bows are not allowed.",
+        "Rotational items are not allowed.",
+        "Obsidian is not allowed.",
+    ]),
+]

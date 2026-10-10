@@ -27,8 +27,8 @@ def tier_from_elo(elo: int) -> str:
 RULES = [
     ("Format", [
         "Matches are first to 3 (3-0, 3-1 or 3-2).",
-        "1v1s are side rush on the Dia rush maps.",
-        "Normally Red vs Blue. Red vs Gray is used only rarely.",
+        "1v1s are normally Red vs Blue on side rush maps",
+        "And Red vs Gray on dia rush maps",
     ]),
     ("Islands", [
         "Only adjacent islands can be used.",

@@ -47,7 +47,8 @@ async def init_extras():
     """Adds columns/tables introduced after the first version (safe to run every start)."""
     async with aiosqlite.connect(DB_PATH) as db:
         for sql in ("ALTER TABLE links ADD COLUMN verified INTEGER NOT NULL DEFAULT 0",
-                    "ALTER TABLE players ADD COLUMN removed INTEGER NOT NULL DEFAULT 0"):
+                    "ALTER TABLE players ADD COLUMN removed INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE matches ADD COLUMN forfeit INTEGER NOT NULL DEFAULT 0"):
             try:
                 await db.execute(sql)
             except aiosqlite.OperationalError:
@@ -153,7 +154,8 @@ async def verified_owner(uuid: str):
 
 # ---------- matches ----------
 
-async def save_match(w_uuid, l_uuid, w_before, w_after, l_before, l_after, score, played_at=None):
+async def save_match(w_uuid, l_uuid, w_before, w_after, l_before, l_after, score,
+                     played_at=None, forfeit=False):
     played_at = played_at or datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE players SET elo = ?, tier = ? WHERE uuid = ?",
@@ -162,9 +164,10 @@ async def save_match(w_uuid, l_uuid, w_before, w_after, l_before, l_after, score
                          (l_after, tier_from_elo(l_after), l_uuid))
         cur = await db.execute(
             "INSERT INTO matches (played_at, winner_uuid, loser_uuid, "
-            "winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after, score) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (played_at, w_uuid, l_uuid, w_before, w_after, l_before, l_after, score),
+            "winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after, score, forfeit) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (played_at, w_uuid, l_uuid, w_before, w_after, l_before, l_after, score,
+             1 if forfeit else 0),
         )
         await db.commit()
         return cur.lastrowid
@@ -180,6 +183,15 @@ async def get_stats(uuid: str):
             "SELECT COUNT(*) FROM matches WHERE loser_uuid = ? AND cancelled = 0", (uuid,))
         losses = (await cur.fetchone())[0]
     return wins, losses
+
+
+async def count_forfeits(uuid: str) -> int:
+    """How many (non-cancelled) matches this player forfeited."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM matches WHERE loser_uuid = ? AND forfeit = 1 AND cancelled = 0",
+            (uuid,))
+        return (await cur.fetchone())[0]
 
 
 async def get_rank(elo: int):
@@ -398,7 +410,7 @@ async def count_open_pauses() -> int:
 
 
 async def close_pause(pause_id: int, status: str):
-    """status: 'resumed' or 'dropped'."""
+    """status: 'resumed', 'dropped' or 'forfeited'."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE paused_matches SET status = ? WHERE id = ?", (status, pause_id))
         await db.commit()

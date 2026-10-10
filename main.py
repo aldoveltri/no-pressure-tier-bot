@@ -786,18 +786,23 @@ def log_entries(rows):
 class MatchLogView(PagedView):
     PER_PAGE = 10
 
-    def __init__(self, total):
+    def __init__(self, total, cancelled=False):
         super().__init__(timeout=180)
         self.total = total          # already capped by MATCH_LOG_LIMIT
+        self.cancelled = cancelled
         self.pages = max(1, (total + self.PER_PAGE - 1) // self.PER_PAGE)
         self.update_buttons()
 
     async def make_file(self) -> discord.File:
         offset = self.page * self.PER_PAGE
         limit = min(self.PER_PAGE, self.total - offset)
-        rows = await get_all_matches(limit, offset)
-        data = await build_matchlog_image(log_entries(rows), self.page, self.pages, self.total)
-        return png_file(data, "matches.png")
+        if self.cancelled:
+            rows = await get_cancelled_matches(limit, offset)
+        else:
+            rows = await get_all_matches(limit, offset)
+        data = await build_matchlog_image(log_entries(rows), self.page, self.pages, self.total,
+                                          cancelled_view=self.cancelled)
+        return png_file(data, "cancelled.png" if self.cancelled else "matches.png")
 
 
 @bot.tree.command(name="matches", description="Show the latest matches of the guild")
@@ -815,7 +820,19 @@ async def matches(interaction: discord.Interaction):
         await interaction.followup.send(file=file)
 
 
-# ---------- leaderboard and info ----------
+@bot.tree.command(name="cancelled", description="Show the latest cancelled matches")
+async def cancelled_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    total = min(await count_cancelled_matches(), MATCH_LOG_LIMIT)
+    if total == 0:
+        await interaction.followup.send("No matches have been cancelled.")
+        return
+    view = MatchLogView(total, cancelled=True)
+    file = await view.make_file()
+    if view.pages > 1:
+        view.message = await interaction.followup.send(file=file, view=view)
+    else:
+        await interaction.followup.send(file=file)
 
 class LeaderboardView(PagedView):
     PER_PAGE = 10

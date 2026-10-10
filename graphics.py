@@ -189,12 +189,13 @@ def _png(img):
 
 # ---------- leaderboard (general, season or archived year) ----------
 
-# (sort key, column label, right edge x)
-SORT_COLUMNS = [("elo", "ELO", 612), ("wins", "W", 676), ("losses", "L", 740),
-                ("winrate", "WR", 812), ("matches", "MP", 872)]
+# (sort key, column label, right edge x). The last column keeps 28 px of padding
+# from the right edge of the row (872).
+SORT_COLUMNS = [("elo", "ELO", 584), ("wins", "W", 648), ("losses", "L", 712),
+                ("winrate", "WR", 784), ("matches", "MP", 844)]
 
 
-def _draw_leaderboard(chunk, heads, start_rank, page, pages, total, sort, title, scope, dual):
+def _draw_leaderboard(chunk, heads, start_rank, page, pages, total, sort, title, scope, dual=False):
     top = HEADER_H + 40
     height = top + len(chunk) * ROW_H + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
@@ -206,11 +207,7 @@ def _draw_leaderboard(chunk, heads, start_rank, page, pages, total, sort, title,
     sy = HEADER_H + 22
     for key, label, x in SORT_COLUMNS:
         d.text((x, sy), label, font=get_font(15, True), fill=GOLD if key == sort else MUTED, anchor="rm")
-    if dual:
-        d.text((450, sy), "GENERAL", font=get_font(12, True), fill=MUTED, anchor="mm")
-        d.text((512, sy), "SEASON", font=get_font(12, True), fill=MUTED, anchor="mm")
-    else:
-        d.text((470, sy), "TIER", font=get_font(12, True), fill=MUTED, anchor="mm")
+    d.text((470, sy), "TIER", font=get_font(12, True), fill=MUTED, anchor="mm")
 
     for i, row in enumerate(chunk):
         rank = start_rank + i
@@ -234,12 +231,7 @@ def _draw_leaderboard(chunk, heads, start_rank, page, pages, total, sort, title,
         d.text((hx + HEAD + 10, cy), row["ign"], font=get_font(24, True), fill=TEXT, anchor="lm")
 
         tier = row["tier"] or "-"
-        if dual:
-            tier2 = row.get("tier2") or "-"
-            _badge(d, 450, cy, tier, _tier_color(tier), w=56, h=30, font_size=18)
-            _badge(d, 512, cy, tier2, _tier_color(tier2), w=56, h=30, font_size=18)
-        else:
-            _badge(d, 470, cy, tier, _tier_color(tier), w=64, h=32, font_size=20)
+        _badge(d, 470, cy, tier, _tier_color(tier), w=64, h=32, font_size=20)
 
         values = {
             "elo": str(row["elo"]),
@@ -258,14 +250,13 @@ def _draw_leaderboard(chunk, heads, start_rank, page, pages, total, sort, title,
 
 async def build_leaderboard_image(rows, page, per_page, sort="elo", title="GLOBAL LEADERBOARD",
                                   scope="", dual=False):
-    """rows must already be sorted."""
+    """rows must already be sorted. 'dual' is kept only for compatibility and is ignored."""
     start = page * per_page
     chunk = rows[start:start + per_page]
     pages = max(1, (len(rows) + per_page - 1) // per_page)
     heads = await _fetch_heads([(r["uuid"], r["ign"]) for r in chunk])
     return await asyncio.to_thread(_draw_leaderboard, chunk, heads, start + 1, page, pages,
-                                   len(rows), sort, title, scope, dual)
-
+                                   len(rows), sort, title, scope)
 
 # ---------- match result (side by side) ----------
 

@@ -13,7 +13,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from database import (init_db, init_extras, upsert_player, get_player, save_match,
-                      get_stats, get_rank, get_leaderboard,
+                      get_stats, count_forfeits, get_rank, get_leaderboard,
                       get_history, count_history, get_all_matches, count_all_matches,
                       get_link, remove_link, link_account,
                       get_match, last_match_id, cancel_match,
@@ -118,7 +118,7 @@ async def resolve_target(interaction: discord.Interaction, ign, user):
 
 
 async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, name_l,
-                    score_name: str, loser_games: int) -> bool:
+                    score_name: str, loser_games: int, forfeit: bool = False) -> bool:
     """Registers a finished match, updates the elo and sends the result card.
     Returns False if the match could not be logged (a message has been sent)."""
     p_w = await get_player(uuid_w)
@@ -134,7 +134,7 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
 
     now = datetime.now(timezone.utc)
     match_id = await save_match(uuid_w, uuid_l, p_w["elo"], new_w, p_l["elo"], new_l,
-                                score_name, played_at=now.isoformat())
+                                score_name, played_at=now.isoformat(), forfeit=forfeit)
 
     w = {"uuid": uuid_w, "name": name_w, "before": p_w["elo"], "after": new_w, "delta": gain,
          "tier_before": tier_from_elo(p_w["elo"]), "tier_after": tier_from_elo(new_w)}
@@ -142,7 +142,8 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
          "delta": new_l - p_l["elo"],
          "tier_before": tier_from_elo(p_l["elo"]), "tier_after": tier_from_elo(new_l)}
 
-    data = await build_match_image(w, l, score_name, match_id, now.strftime("%m/%d/%Y"))
+    data = await build_match_image(w, l, score_name, match_id, now.strftime("%m/%d/%Y"),
+                                   forfeit=forfeit)
     await interaction.followup.send(file=png_file(data, "match.png"))
     return True
 
@@ -408,6 +409,47 @@ async def match(interaction: discord.Interaction, winner: str, loser: str,
     await log_match(interaction, uuid_w, name_w, uuid_l, name_l, score.name, score.value)
 
 
+@bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses 3-0 (staff only)")
+@app_commands.describe(player="Username of the player who left the match",
+                       opponent="Username of the opponent (wins 3-0)",
+                       pause_id="Optional: number of the paused match this forfeit closes")
+@staff_only()
+async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: str,
+                      pause_id: Optional[int] = None):
+    await interaction.response.defer()
+    r_l = await lookup_ign(interaction, player)
+    if r_l is None:
+        return
+    r_w = await lookup_ign(interaction, opponent)
+    if r_w is None:
+        return
+
+    uuid_l, name_l = r_l
+    uuid_w, name_w = r_w
+    if uuid_l == uuid_w:
+        await interaction.followup.send("The player and the opponent can't be the same person.")
+        return
+
+    pm = None
+    if pause_id is not None:
+        pm = await get_pause(pause_id)
+        if pm is None:
+            await interaction.followup.send(f"Paused match #{pause_id} does not exist.")
+            return
+        if pm["status"] != "open":
+            await interaction.followup.send(f"Paused match #{pause_id} was already {pm['status']}.")
+            return
+        if {pm["p1_uuid"], pm["p2_uuid"]} != {uuid_l, uuid_w}:
+            await interaction.followup.send(
+                f"Paused match #{pause_id} is not between these two players.")
+            return
+
+    # whatever the situation was, the player who left loses 3-0
+    ok = await log_match(interaction, uuid_w, name_w, uuid_l, name_l, "3-0", 0, forfeit=True)
+    if ok and pm is not None:
+        await close_pause(pause_id, "forfeited")
+
+
 @bot.tree.command(name="undo", description="Cancel a logged match (staff only)")
 @app_commands.describe(match_id="Match number (the # shown on the match card)")
 @staff_only()
@@ -453,7 +495,8 @@ async def undo(interaction: discord.Interaction, match_id: int):
          "tier_after": tier_from_elo(m["loser_elo_before"])}
 
     data = await build_match_image(w, l, m["score"] or "-", match_id,
-                                   fmt_date(m["played_at"]), title="MATCH CANCELLED")
+                                   fmt_date(m["played_at"]), title="MATCH CANCELLED",
+                                   forfeit=bool(m["forfeit"]))
     await interaction.followup.send(file=png_file(data, "undo.png"))
 
 
@@ -646,11 +689,13 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
         name = p["ign"]
 
     wins, losses = await get_stats(uuid)
+    forfeits = await count_forfeits(uuid)
     total = wins + losses
     winrate = f"{wins / total * 100:.0f}%" if total else "-"
     rank = await get_rank(p["elo"])
 
-    data = await build_profile_image(uuid, name, p["tier"], p["elo"], rank, wins, losses, winrate)
+    data = await build_profile_image(uuid, name, p["tier"], p["elo"], rank, wins, losses,
+                                     winrate, forfeits)
     await interaction.followup.send(file=png_file(data, "profile.png"))
 
 
@@ -659,7 +704,7 @@ def history_entries(rows, uuid):
     for m in rows:
         cancelled = bool(m["cancelled"])
         base = {"id": m["id"], "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
-                "cancelled": cancelled}
+                "cancelled": cancelled, "forfeit": bool(m["forfeit"])}
         if m["winner_uuid"] == uuid:
             delta = 0 if cancelled else m["winner_elo_after"] - m["winner_elo_before"]
             entries.append({**base, "win": True, "opp": m["loser_ign"], "opp_uuid": m["loser_uuid"],
@@ -728,7 +773,7 @@ def log_entries(rows):
         cancelled = bool(m["cancelled"])
         entries.append({
             "id": m["id"], "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
-            "cancelled": cancelled,
+            "cancelled": cancelled, "forfeit": bool(m["forfeit"]),
             "winner": m["winner_ign"], "winner_uuid": m["winner_uuid"],
             "loser": m["loser_ign"], "loser_uuid": m["loser_uuid"],
             "w_delta": 0 if cancelled else m["winner_elo_after"] - m["winner_elo_before"],

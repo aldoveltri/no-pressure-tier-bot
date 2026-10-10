@@ -465,13 +465,16 @@ async def build_history_image(name, entries, page, pages, total):
     return await asyncio.to_thread(_draw_history, name, entries, heads, page, pages, total)
 
 
-# ---------- guild-wide match log (paged, cancelled matches included) ----------
+# ---------- guild-wide match log (paged) ----------
 
-def _draw_matchlog(entries, heads, page, pages, total):
+def _draw_matchlog(entries, heads, page, pages, total, cancelled_view):
     height = HEADER_H + 10 + len(entries) * ROW_H + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
     d = ImageDraw.Draw(img)
-    _header(d, "MATCH LOG", f"{GUILD_NAME} · latest {total} matches")
+    if cancelled_view:
+        _header(d, "CANCELLED MATCHES", f"{GUILD_NAME} · latest {total} cancelled matches")
+    else:
+        _header(d, "MATCH LOG", f"{GUILD_NAME} · latest {total} matches")
 
     for i, e in enumerate(entries):
         y0 = HEADER_H + 10 + i * ROW_H
@@ -509,13 +512,13 @@ def _draw_matchlog(entries, heads, page, pages, total):
     return _png(img)
 
 
-async def build_matchlog_image(entries, page, pages, total):
+async def build_matchlog_image(entries, page, pages, total, cancelled_view=False):
     items = []
     for e in entries:
         items.append((e["winner_uuid"], e["winner"]))
         items.append((e["loser_uuid"], e["loser"]))
     heads = await _fetch_heads(items)
-    return await asyncio.to_thread(_draw_matchlog, entries, heads, page, pages, total)
+    return await asyncio.to_thread(_draw_matchlog, entries, heads, page, pages, total, cancelled_view)
 
 
 # ---------- tier assigned ----------

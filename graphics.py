@@ -187,17 +187,34 @@ def _png(img):
     return buf.getvalue()
 
 
-# ---------- leaderboard ----------
+# ---------- leaderboard (general, season or archived year) ----------
 
-def _draw_leaderboard(chunk, heads, start_rank, page, pages, total):
-    height = HEADER_H + 10 + len(chunk) * ROW_H + FOOTER_H
+# (sort key, column label, right edge x)
+SORT_COLUMNS = [("elo", "ELO", 612), ("wins", "W", 676), ("losses", "L", 740),
+                ("winrate", "WR", 812), ("matches", "MP", 872)]
+
+
+def _draw_leaderboard(chunk, heads, start_rank, page, pages, total, sort, title, scope, dual):
+    top = HEADER_H + 40
+    height = top + len(chunk) * ROW_H + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
     d = ImageDraw.Draw(img)
-    _header(d, "GLOBAL LEADERBOARD", f"{GUILD_NAME} · {total} players · ranked by elo")
+    parts = [GUILD_NAME] + ([scope] if scope else []) + [f"{total} players"]
+    _header(d, title, " · ".join(parts))
+
+    # column labels (the column used for sorting is highlighted)
+    sy = HEADER_H + 22
+    for key, label, x in SORT_COLUMNS:
+        d.text((x, sy), label, font=get_font(15, True), fill=GOLD if key == sort else MUTED, anchor="rm")
+    if dual:
+        d.text((450, sy), "GENERAL", font=get_font(12, True), fill=MUTED, anchor="mm")
+        d.text((512, sy), "SEASON", font=get_font(12, True), fill=MUTED, anchor="mm")
+    else:
+        d.text((470, sy), "TIER", font=get_font(12, True), fill=MUTED, anchor="mm")
 
     for i, row in enumerate(chunk):
         rank = start_rank + i
-        y0 = HEADER_H + 10 + i * ROW_H
+        y0 = top + i * ROW_H
         cy = y0 + (ROW_H - 8) // 2
 
         d.rounded_rectangle([PAD, y0, WIDTH - PAD, y0 + ROW_H - 8], radius=14, fill=ROW_BG)
@@ -214,26 +231,40 @@ def _draw_leaderboard(chunk, heads, start_rank, page, pages, total):
 
         hx = PAD + 100
         _paste_head(img, d, heads.get(row["uuid"]), hx, cy - HEAD // 2, HEAD)
-        d.text((hx + HEAD + 18, cy), row["ign"], font=get_font(28, True), fill=TEXT, anchor="lm")
+        d.text((hx + HEAD + 10, cy), row["ign"], font=get_font(24, True), fill=TEXT, anchor="lm")
 
         tier = row["tier"] or "-"
-        _badge(d, 599, cy, tier, _tier_color(tier))
+        if dual:
+            tier2 = row.get("tier2") or "-"
+            _badge(d, 450, cy, tier, _tier_color(tier), w=56, h=30, font_size=18)
+            _badge(d, 512, cy, tier2, _tier_color(tier2), w=56, h=30, font_size=18)
+        else:
+            _badge(d, 470, cy, tier, _tier_color(tier), w=64, h=32, font_size=20)
 
-        ex = WIDTH - PAD - 28
-        d.text((ex, cy), "elo", font=get_font(18), fill=MUTED, anchor="rm")
-        w = d.textlength("elo", font=get_font(18))
-        d.text((ex - w - 8, cy), str(row["elo"]), font=get_font(30, True), fill=TEXT, anchor="rm")
+        values = {
+            "elo": str(row["elo"]),
+            "wins": str(row["wins"]),
+            "losses": str(row["losses"]),
+            "winrate": f"{row['winrate'] * 100:.0f}%" if row["matches"] else "-",
+            "matches": str(row["matches"]),
+        }
+        for key, _label, x in SORT_COLUMNS:
+            d.text((x, cy), values[key], font=get_font(22, True),
+                   fill=GOLD if key == sort else TEXT, anchor="rm")
 
     _footer(d, height, f"Page {page + 1}/{pages}")
     return _png(img)
 
 
-async def build_leaderboard_image(rows, page, per_page):
+async def build_leaderboard_image(rows, page, per_page, sort="elo", title="GLOBAL LEADERBOARD",
+                                  scope="", dual=False):
+    """rows must already be sorted."""
     start = page * per_page
     chunk = rows[start:start + per_page]
     pages = max(1, (len(rows) + per_page - 1) // per_page)
     heads = await _fetch_heads([(r["uuid"], r["ign"]) for r in chunk])
-    return await asyncio.to_thread(_draw_leaderboard, chunk, heads, start + 1, page, pages, len(rows))
+    return await asyncio.to_thread(_draw_leaderboard, chunk, heads, start + 1, page, pages,
+                                   len(rows), sort, title, scope, dual)
 
 
 # ---------- match result (side by side) ----------
@@ -372,14 +403,15 @@ async def build_paused_list_image(entries, total):
     return await asyncio.to_thread(_draw_paused_list, entries, total, heads)
 
 
-# ---------- player profile ----------
+# ---------- player profile (general, season or archived year) ----------
 
-def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, heads):
+def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, heads,
+                  title, scope, tier2, elo_label):
     id_h, box_h, gap = 170, 110, 14
     height = HEADER_H + 16 + id_h + gap + box_h + 16 + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
     d = ImageDraw.Draw(img)
-    _header(d, "PLAYER PROFILE", GUILD_NAME)
+    _header(d, title, f"{GUILD_NAME} · {scope}" if scope else GUILD_NAME)
 
     y0 = HEADER_H + 16
     color = _tier_color(tier)
@@ -388,7 +420,14 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, 
     _paste_head(img, d, heads.get(uuid), PAD + 34, y0 + 20, 130, radius=14)
     nx = PAD + 34 + 130 + 28
     d.text((nx, y0 + 62), name, font=get_font(46, True), fill=TEXT, anchor="lm")
-    _badge(d, nx + 48, y0 + 120, tier, color, w=96, h=42, font_size=26)
+
+    if tier2:
+        _badge(d, nx + 48, y0 + 116, tier, color, w=96, h=40, font_size=24)
+        _badge(d, nx + 160, y0 + 116, tier2, _tier_color(tier2), w=96, h=40, font_size=24)
+        d.text((nx + 48, y0 + 148), "GENERAL", font=get_font(12, True), fill=MUTED, anchor="mm")
+        d.text((nx + 160, y0 + 148), "SEASON", font=get_font(12, True), fill=MUTED, anchor="mm")
+    else:
+        _badge(d, nx + 48, y0 + 120, tier, color, w=96, h=42, font_size=26)
 
     # forfeits counter (right side of the identity panel)
     fx = WIDTH - PAD - 40
@@ -398,7 +437,7 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, 
 
     by = y0 + id_h + gap
     bw = (WIDTH - 2 * PAD - 3 * gap) // 4
-    stats = [("ELO", str(elo)), ("GLOBAL RANK", f"#{rank}"),
+    stats = [(elo_label, str(elo)), ("RANK", f"#{rank}"),
              ("RECORD", f"{wins}W - {losses}L"), ("WIN RATE", winrate)]
     for i, (label, value) in enumerate(stats):
         bx = PAD + i * (bw + gap)
@@ -410,10 +449,11 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, 
     return _png(img)
 
 
-async def build_profile_image(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits):
+async def build_profile_image(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits,
+                              title="PLAYER PROFILE", scope="", tier2=None, elo_label="ELO"):
     heads = await _fetch_heads([(uuid, name)])
     return await asyncio.to_thread(_draw_profile, uuid, name, tier, elo, rank, wins, losses,
-                                   winrate, forfeits, heads)
+                                   winrate, forfeits, heads, title, scope, tier2, elo_label)
 
 
 # ---------- player match history (paged, cancelled matches included) ----------
@@ -465,7 +505,7 @@ async def build_history_image(name, entries, page, pages, total):
     return await asyncio.to_thread(_draw_history, name, entries, heads, page, pages, total)
 
 
-# ---------- guild-wide match log (paged) ----------
+# ---------- guild-wide match log / cancelled list (paged) ----------
 
 def _draw_matchlog(entries, heads, page, pages, total, cancelled_view):
     height = HEADER_H + 10 + len(entries) * ROW_H + FOOTER_H
@@ -622,7 +662,7 @@ def _draw_info(info):
     height = HEADER_H + 16 + box_h + gap + box_h + gap + panel_h + 16 + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
     d = ImageDraw.Draw(img)
-    _header(d, "SERVER INFO", f"{GUILD_NAME} · overview")
+    _header(d, "SERVER INFO", f"{GUILD_NAME} · season {info['season']} · year {info['year']}")
 
     y = HEADER_H + 16
     bw4 = (WIDTH - 2 * PAD - 3 * gap) // 4

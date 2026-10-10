@@ -770,8 +770,7 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
         winrate = f"{r['wins'] / r['matches'] * 100:.0f}%" if r["matches"] else "-"
         data = await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1,
                                          r["wins"], r["losses"], winrate, forfeits,
-                                         title=f"SEASON {season} PROFILE", scope=f"Season {season}",
-                                         tier2=r["tier2"], elo_label="SEASON ELO")
+                                         title=f"SEASON {season} PROFILE", scope=f"Season {season}")
         await interaction.followup.send(file=png_file(data, "profile.png"))
         return
 

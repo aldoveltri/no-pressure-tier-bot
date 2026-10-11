@@ -20,6 +20,7 @@ BG = (22, 23, 27)
 HEADER_BG = (30, 32, 38)
 ROW_BG = (38, 40, 47)
 TEXT = (242, 243, 247)
+SOFT = (210, 214, 224)
 MUTED = (140, 146, 160)
 GOLD = (255, 199, 44)
 GREEN = (67, 201, 130)
@@ -36,6 +37,7 @@ TIER_COLORS = {
     "D": (140, 145, 155),
 }
 PODIUM = [GOLD, (196, 202, 214), (205, 127, 50)]
+_CELL_COLORS = {"text": TEXT, "green": GREEN, "red": RED, "gold": GOLD, "muted": MUTED}
 
 _fonts = {}
 
@@ -258,6 +260,7 @@ async def build_leaderboard_image(rows, page, per_page, sort="elo", title="GLOBA
     heads = await _fetch_heads([(r["uuid"], r["ign"]) for r in chunk])
     return await asyncio.to_thread(_draw_leaderboard, chunk, heads, start + 1, page, pages,
                                    len(rows), sort, title, scope)
+
 
 # ---------- match result (side by side) ----------
 
@@ -699,12 +702,7 @@ async def build_info_image(info):
     return await asyncio.to_thread(_draw_info, info)
 
 
-
 # ---------- generic text card (rules, guide) ----------
-
-SOFT = (210, 214, 224)
-_CELL_COLORS = {"text": TEXT, "green": GREEN, "red": RED, "gold": GOLD, "muted": MUTED}
-
 
 def _wrap(d, text, font, max_w):
     lines, cur = [], ""
@@ -718,6 +716,17 @@ def _wrap(d, text, font, max_w):
     if cur:
         lines.append(cur)
     return lines
+
+
+def _bullet_metrics(font):
+    """Vertical metrics used to center the bullet dot on the text, whatever font is available."""
+    try:
+        asc, desc = font.getmetrics()
+        x_top = font.getbbox("x", anchor="ls")[1]
+        h_top = font.getbbox("H", anchor="ls")[1]
+        return asc, desc, (x_top + h_top) / 4
+    except Exception:
+        return 16, 4, -6.5
 
 
 def _render_blocks(d, blocks, x0, y0, width, draw):
@@ -741,11 +750,14 @@ def _render_blocks(d, blocks, x0, y0, width, draw):
             y += 8
         elif kind == "bullet":
             font = get_font(19)
-            if draw:
-                d.ellipse([x0 + 4, y + 10, x0 + 12, y + 18], fill=GOLD)
-            for line in _wrap(d, b["text"], font, width - 28):
+            asc, desc, dot_offset = _bullet_metrics(font)
+            for idx, line in enumerate(_wrap(d, b["text"], font, width - 28)):
+                base = y + (28 - (asc + desc)) // 2 + asc      # baseline of this line
                 if draw:
-                    d.text((x0 + 28, y), line, font=font, fill=TEXT, anchor="lt")
+                    if idx == 0:
+                        cy_dot = base + dot_offset
+                        d.ellipse([x0 + 4, cy_dot - 4, x0 + 12, cy_dot + 4], fill=GOLD)
+                    d.text((x0 + 28, base), line, font=font, fill=TEXT, anchor="ls")
                 y += 28
             y += 6
         elif kind == "command":
@@ -778,6 +790,7 @@ def _render_blocks(d, blocks, x0, y0, width, draw):
                 y += 38
             y += 10
     return y
+
 
 def _draw_text_card(title, subtitle, blocks, footer):
     inner_x = PAD + 28

@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Optional
@@ -12,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from database import (init_db, init_extras, init_seasons, upsert_player, get_player, save_match,
+from database import (init_db, init_extras, init_seasons, init_modes, upsert_player, get_player, save_match,
                       get_stats, count_forfeits, get_rank, get_leaderboard,
                       get_history, count_history, get_all_matches, count_all_matches,
                       count_cancelled_matches, get_cancelled_matches,
@@ -22,7 +23,8 @@ from database import (init_db, init_extras, init_seasons, upsert_player, get_pla
                       create_pause, get_pause, list_open_pauses, count_open_pauses, close_pause,
                       get_current, list_seasons, list_years,
                       get_season_leaderboard, get_year_leaderboard, sort_rows,
-                      end_season, end_year)
+                      end_season, end_year,
+                      list_modes, get_mode_by_name, get_mode, add_mode, deactivate_mode)
 from mojang import get_uuid
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, tier_from_elo
@@ -60,6 +62,8 @@ SORT_OPTIONS = [("elo", "Elo"), ("wins", "Wins"), ("losses", "Losses"),
                 ("winrate", "Win rate"), ("matches", "Matches played")]
 SORT_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in SORT_OPTIONS]
 
+MODE_NAME_RE = re.compile(r"^[A-Za-z0-9 _'\-]+$")
+
 
 # ---------- small helpers ----------
 
@@ -72,6 +76,10 @@ def fmt_date(iso: str) -> str:
         return datetime.fromisoformat(iso).strftime("%m/%d/%Y")
     except Exception:
         return "-"
+
+
+def esc(text: str) -> str:
+    return discord.utils.escape_markdown(text)
 
 
 def is_staff(member) -> bool:
@@ -88,6 +96,12 @@ def staff_only():
     return app_commands.check(predicate)
 
 
+async def send_card(interaction: discord.Interaction, data: bytes, filename: str, md=None, **kwargs):
+    """Sends an image card. For a game mode, the mode name is written above the image."""
+    content = f"**{esc(md['name'])}**" if md else None
+    return await interaction.followup.send(content=content, file=png_file(data, filename), **kwargs)
+
+
 async def lookup_ign(interaction: discord.Interaction, ign: str):
     """Username -> (uuid, name). Sends a clear error message and returns None on failure."""
     try:
@@ -101,6 +115,27 @@ async def lookup_ign(interaction: discord.Interaction, ign: str):
             f"(3-16 characters: letters, numbers and underscores).")
         return None
     return result
+
+
+async def resolve_mode(interaction: discord.Interaction, mode_name):
+    """Returns (ok, mode row). No mode name = the main mode (None). Sends an error if not found."""
+    if not mode_name:
+        return True, None
+    md = await get_mode_by_name(mode_name)
+    if md is None:
+        await interaction.followup.send(
+            f"The mode `{mode_name}` does not exist. Use `/modes` to see the available modes.")
+        return False, None
+    return True, md
+
+
+async def mode_autocomplete(interaction: discord.Interaction, current: str):
+    out = []
+    for r in await list_modes():
+        if current and current.lower() not in r["name"].lower():
+            continue
+        out.append(app_commands.Choice(name=r["name"], value=r["name"]))
+    return out[:25]
 
 
 async def resolve_target(interaction: discord.Interaction, ign):
@@ -123,15 +158,21 @@ async def resolve_target(interaction: discord.Interaction, ign):
 
 
 async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, name_l,
-                    score_name: str, loser_games: int, forfeit: bool = False) -> bool:
+                    score_name: str, loser_games: int, forfeit: bool = False, md=None) -> bool:
     """Registers a finished match, updates the elo and sends the result card.
     Returns False if the match could not be logged (a message has been sent)."""
-    p_w = await get_player(uuid_w)
-    p_l = await get_player(uuid_l)
+    mode_id = md["id"] if md else None
+    p_w = await get_player(uuid_w, mode_id=mode_id)
+    p_l = await get_player(uuid_l, mode_id=mode_id)
     if p_w is None or p_l is None:
-        missing = discord.utils.escape_markdown(name_w if p_w is None else name_l)
-        await interaction.followup.send(
-            f"**{missing}** doesn't have a tier yet: use `/settier` first.")
+        missing = esc(name_w if p_w is None else name_l)
+        if md:
+            await interaction.followup.send(
+                f"**{missing}** doesn't have a tier in **{esc(md['name'])}** yet: "
+                f"use `/settier` with `mode:{md['name']}` first.")
+        else:
+            await interaction.followup.send(
+                f"**{missing}** doesn't have a tier yet: use `/settier` first.")
         return False
 
     gain, loss = calcola(p_w["elo"], p_l["elo"], loser_games)
@@ -139,7 +180,7 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
 
     now = datetime.now(timezone.utc)
     match_id = await save_match(uuid_w, uuid_l, p_w["elo"], new_w, p_l["elo"], new_l,
-                                score_name, played_at=now.isoformat(), forfeit=forfeit)
+                                score_name, played_at=now.isoformat(), forfeit=forfeit, mode_id=mode_id)
 
     w = {"uuid": uuid_w, "name": name_w, "before": p_w["elo"], "after": new_w, "delta": gain,
          "tier_before": tier_from_elo(p_w["elo"]), "tier_after": tier_from_elo(new_w)}
@@ -147,9 +188,9 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
          "delta": new_l - p_l["elo"],
          "tier_before": tier_from_elo(p_l["elo"]), "tier_after": tier_from_elo(new_l)}
 
-    data = await build_match_image(w, l, score_name, match_id, now.strftime("%m/%d/%Y"),
-                                   forfeit=forfeit)
-    await interaction.followup.send(file=png_file(data, "match.png"))
+    date = now.strftime("%m/%d/%Y") + (f" · {md['name']}" if md else "")
+    data = await build_match_image(w, l, score_name, match_id, date, forfeit=forfeit)
+    await send_card(interaction, data, "match.png", md)
     return True
 
 
@@ -234,6 +275,7 @@ async def setup_hook():
     await init_db()
     await init_extras()
     await init_seasons()
+    await init_modes()
     await bot.load_extension("namesync")
 
 bot.setup_hook = setup_hook
@@ -342,6 +384,77 @@ async def guide(interaction: discord.Interaction):
     view.message = await interaction.followup.send(file=await view.make_file(), view=view)
 
 
+# ---------- game modes ----------
+
+@bot.tree.command(name="modes", description="Show the available game modes")
+async def modes(interaction: discord.Interaction):
+    await interaction.response.defer()
+    rows = await list_modes()
+    blocks = [
+        {"type": "heading", "text": "Main mode"},
+        {"type": "bullet", "text": "Side rush. It is used when you don't choose a mode, and it has seasons and years."},
+        {"type": "heading", "text": "Other modes"},
+    ]
+    if rows:
+        for r in rows:
+            blocks.append({"type": "bullet", "text": r["name"]})
+        blocks.append({"type": "paragraph", "text":
+                       "Add mode:NAME to /profile, /history, /leaderboard and the other commands. "
+                       "Each mode has its own elo, tiers and leaderboard, only lifetime (no seasons), "
+                       "and resets at the end of the year like the main one."})
+    else:
+        blocks.append({"type": "paragraph", "text":
+                       "There are no other modes yet. The staff can create one with /addmode."})
+    data = await build_text_image("GAME MODES", GUILD_NAME, blocks)
+    await interaction.followup.send(file=png_file(data, "modes.png"))
+
+
+@bot.tree.command(name="addmode", description="Create a new game mode (staff only)")
+@app_commands.describe(name="Name of the mode, for example Bridge (2-20 characters)")
+@staff_only()
+async def addmode(interaction: discord.Interaction, name: str):
+    name = " ".join(name.split())
+    if not (2 <= len(name) <= 20) or not MODE_NAME_RE.match(name):
+        await interaction.response.send_message(
+            "The name must have 2-20 characters: letters, numbers, spaces, `-`, `_` or `'`.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    md, created = await add_mode(name)
+    if not created:
+        await interaction.followup.send(f"The mode **{esc(md['name'])}** already exists.")
+        return
+    await interaction.followup.send(
+        f"✅ Mode **{esc(md['name'])}** created. Use `mode:{md['name']}` in `/settier` to give players "
+        f"a tier in it, then `/match`, `/leaderboard`, `/profile`...")
+
+
+@bot.tree.command(name="removemode", description="Hide a game mode (staff only)")
+@app_commands.describe(name="Name of the mode to hide")
+@staff_only()
+async def removemode(interaction: discord.Interaction, name: str):
+    await interaction.response.defer(ephemeral=True)
+    md = await get_mode_by_name(name)
+    if md is None:
+        await interaction.followup.send(f"The mode `{name}` does not exist.")
+        return
+
+    async def do_remove(i: discord.Interaction):
+        await deactivate_mode(md["id"])
+        await i.edit_original_response(content="Done.")
+        await i.followup.send(f"🗑️ The mode **{esc(md['name'])}** was hidden. Its data is kept.")
+
+    await interaction.followup.send(
+        f"⚠️ This will hide the mode **{esc(md['name'])}**: it disappears from the commands and "
+        f"the leaderboards. Its data is kept, and creating a mode with the same name brings it back. "
+        f"Do you want to continue?",
+        view=ConfirmView(interaction.user.id, do_remove), ephemeral=True)
+
+
+@removemode.autocomplete("name")
+async def removemode_name_ac(interaction: discord.Interaction, current: str):
+    return await mode_autocomplete(interaction, current)
+
+
 # ---------- season / year suggestions for the commands ----------
 
 async def season_choices(current: str):
@@ -443,50 +556,65 @@ async def unlink(interaction: discord.Interaction):
 # ---------- staff commands ----------
 
 @bot.tree.command(name="settier", description="Assign a tier to a player (staff only)")
-@app_commands.describe(ign="Minecraft username of the player", tier="Tier to assign")
+@app_commands.describe(ign="Minecraft username of the player", tier="Tier to assign",
+                       mode="Game mode (leave empty for the main mode)")
 @app_commands.choices(tier=[app_commands.Choice(name=t, value=t) for t in TIERS])
 @staff_only()
-async def settier(interaction: discord.Interaction, ign: str, tier: app_commands.Choice[str]):
+async def settier(interaction: discord.Interaction, ign: str, tier: app_commands.Choice[str],
+                  mode: Optional[str] = None):
     await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    mode_id = md["id"] if md else None
     result = await lookup_ign(interaction, ign)
     if result is None:
         return
     uuid, name = result
 
-    old = await get_player(uuid)
+    old = await get_player(uuid, mode_id=mode_id)
     old_tier = old["tier"] if old else None
-    await upsert_player(uuid, name, TIER_MIN[tier.value])
+    await upsert_player(uuid, name, TIER_MIN[tier.value], mode_id=mode_id)
 
     data = await build_settier_image(uuid, name, old_tier, tier.value, TIER_MIN[tier.value])
-    await interaction.followup.send(file=png_file(data, "tier.png"))
+    await send_card(interaction, data, "tier.png", md)
 
 
 @bot.tree.command(name="setelo", description="Set a player's elo manually (staff only)")
-@app_commands.describe(ign="Minecraft username of the player", elo="New elo (0-5000)")
+@app_commands.describe(ign="Minecraft username of the player", elo="New elo (0-5000)",
+                       mode="Game mode (leave empty for the main mode)")
 @staff_only()
-async def setelo(interaction: discord.Interaction, ign: str, elo: app_commands.Range[int, 0, 5000]):
+async def setelo(interaction: discord.Interaction, ign: str, elo: app_commands.Range[int, 0, 5000],
+                 mode: Optional[str] = None):
     await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    mode_id = md["id"] if md else None
     result = await lookup_ign(interaction, ign)
     if result is None:
         return
     uuid, name = result
 
-    old = await get_player(uuid)
+    old = await get_player(uuid, mode_id=mode_id)
     old_elo = old["elo"] if old else None
-    await upsert_player(uuid, name, elo)
+    await upsert_player(uuid, name, elo, mode_id=mode_id)
 
     data = await build_setelo_image(uuid, name, old_elo, elo)
-    await interaction.followup.send(file=png_file(data, "elo.png"))
+    await send_card(interaction, data, "elo.png", md)
 
 
 @bot.tree.command(name="match", description="Log a 1v1 result (staff only)")
 @app_commands.describe(winner="Username of the winner", loser="Username of the loser",
-                       score="Match score")
+                       score="Match score", mode="Game mode (leave empty for the main mode)")
 @app_commands.choices(score=SCORE_CHOICES)
 @staff_only()
 async def match(interaction: discord.Interaction, winner: str, loser: str,
-                score: app_commands.Choice[int]):
+                score: app_commands.Choice[int], mode: Optional[str] = None):
     await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
     r_w = await lookup_ign(interaction, winner)
     if r_w is None:
         return
@@ -500,17 +628,24 @@ async def match(interaction: discord.Interaction, winner: str, loser: str,
         await interaction.followup.send("The winner and the loser can't be the same player.")
         return
 
-    await log_match(interaction, uuid_w, name_w, uuid_l, name_l, score.name, score.value)
+    await log_match(interaction, uuid_w, name_w, uuid_l, name_l, score.name, score.value, md=md)
 
 
 @bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses 3-0 (staff only)")
 @app_commands.describe(player="Username of the player who left the match",
                        opponent="Username of the opponent (wins 3-0)",
-                       pause_id="Optional: number of the paused match this forfeit closes")
+                       pause_id="Optional: number of the paused match this forfeit closes",
+                       mode="Game mode (leave empty for the main mode)")
 @staff_only()
 async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: str,
-                      pause_id: Optional[int] = None):
+                      pause_id: Optional[int] = None, mode: Optional[str] = None):
     await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    if md and pause_id is not None:
+        await interaction.followup.send("Paused matches only exist in the main mode.")
+        return
     r_l = await lookup_ign(interaction, player)
     if r_l is None:
         return
@@ -539,8 +674,8 @@ async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: s
             return
 
     # whatever the situation was, the player who left loses 3-0
-    ok = await log_match(interaction, uuid_w, name_w, uuid_l, name_l, "3-0", 0, forfeit=True)
-    if ok and pm is not None:
+    done = await log_match(interaction, uuid_w, name_w, uuid_l, name_l, "3-0", 0, forfeit=True, md=md)
+    if done and pm is not None:
         await close_pause(pause_id, "forfeited")
 
 
@@ -557,15 +692,22 @@ async def undo(interaction: discord.Interaction, match_id: int):
         await interaction.followup.send(f"Match #{match_id} is already cancelled.")
         return
 
-    _year, current_season = await get_current()
-    if m["season_id"] != current_season:
+    mode_id = m["mode_id"]
+    md = await get_mode(mode_id) if mode_id is not None else None
+    current_year, current_season = await get_current()
+    if mode_id is None:
+        if m["season_id"] != current_season:
+            await interaction.followup.send(
+                f"Match #{match_id} belongs to a season that is already over, so it can't be cancelled.")
+            return
+    elif m["mode_year_id"] != current_year:
         await interaction.followup.send(
-            f"Match #{match_id} belongs to a season that is already over, so it can't be cancelled.")
+            f"Match #{match_id} belongs to a year that is already over, so it can't be cancelled.")
         return
 
-    # the match must be the most recent one for both players
+    # the match must be the most recent one for both players (in the same mode)
     for uuid in (m["winner_uuid"], m["loser_uuid"]):
-        last = await last_match_id(uuid)
+        last = await last_match_id(uuid, mode_id)
         if last != match_id:
             await interaction.followup.send(
                 f"Match #{match_id} can't be cancelled yet: one of the players has a newer "
@@ -573,8 +715,8 @@ async def undo(interaction: discord.Interaction, match_id: int):
             return
 
     # and their elo must not have changed since (new /settier, /setelo...)
-    p_w = await get_player(m["winner_uuid"], include_removed=True)
-    p_l = await get_player(m["loser_uuid"], include_removed=True)
+    p_w = await get_player(m["winner_uuid"], include_removed=True, mode_id=mode_id)
+    p_l = await get_player(m["loser_uuid"], include_removed=True, mode_id=mode_id)
     if p_w["elo"] != m["winner_elo_after"] or p_l["elo"] != m["loser_elo_after"]:
         await interaction.followup.send(
             f"Match #{match_id} can't be cancelled: the elo of one of the players changed "
@@ -594,40 +736,53 @@ async def undo(interaction: discord.Interaction, match_id: int):
          "tier_before": tier_from_elo(m["loser_elo_after"]),
          "tier_after": tier_from_elo(m["loser_elo_before"])}
 
-    data = await build_match_image(w, l, m["score"] or "-", match_id,
-                                   fmt_date(m["played_at"]), title="MATCH CANCELLED",
-                                   forfeit=bool(m["forfeit"]))
-    await interaction.followup.send(file=png_file(data, "undo.png"))
+    date = fmt_date(m["played_at"]) + (f" · {md['name']}" if md else "")
+    data = await build_match_image(w, l, m["score"] or "-", match_id, date,
+                                   title="MATCH CANCELLED", forfeit=bool(m["forfeit"]))
+    await send_card(interaction, data, "undo.png", md)
 
 
 @bot.tree.command(name="removeplayer", description="Remove a player from the leaderboard and profiles (staff only)")
-@app_commands.describe(ign="Minecraft username of the player to remove")
+@app_commands.describe(ign="Minecraft username of the player to remove",
+                       mode="Game mode (leave empty for the main mode)")
 @staff_only()
-async def removeplayer(interaction: discord.Interaction, ign: str):
+async def removeplayer(interaction: discord.Interaction, ign: str, mode: Optional[str] = None):
     await interaction.response.defer(ephemeral=True)
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    mode_id = md["id"] if md else None
     result = await lookup_ign(interaction, ign)
     if result is None:
         return
     uuid, name = result
 
-    player = await get_player(uuid)
+    player = await get_player(uuid, mode_id=mode_id)
     if player is None:
-        await interaction.followup.send(f"**{name}** is not in the leaderboard.")
+        where = f"the {esc(md['name'])} leaderboard" if md else "the leaderboard"
+        await interaction.followup.send(f"**{name}** is not in {where}.")
         return
-    safe_name = discord.utils.escape_markdown(name)
+    safe_name = esc(name)
 
     async def do_remove(i: discord.Interaction):
-        kept = await remove_player(uuid)
+        kept = await remove_player(uuid, mode_id=mode_id)
         await i.edit_original_response(content="Done.")
+        where = f" ({esc(md['name'])})" if md else ""
         await i.followup.send(
-            f"🗑️ **{safe_name}** was removed from the leaderboard and profiles. "
+            f"🗑️ **{safe_name}** was removed from the leaderboard and profiles{where}. "
             f"Their {kept} matches were kept in the history.")
 
+    if md:
+        text = (f"⚠️ This will remove **{safe_name}** (elo {player['elo']}) from the **{esc(md['name'])}** "
+                f"leaderboard and `/profile`. Their matches **stay** in the history. "
+                f"You can bring them back later with `/settier` or `/setelo`. Do you want to continue?")
+    else:
+        text = (f"⚠️ This will remove **{safe_name}** (elo {player['elo']}) from the leaderboard and "
+                f"`/profile`, and unlink their Discord account. Their matches **stay** in the history and "
+                f"match log. You can bring them back later with `/settier` or `/setelo`. "
+                f"Do you want to continue?")
     await interaction.followup.send(
-        f"⚠️ This will remove **{safe_name}** (elo {player['elo']}) from the leaderboard and `/profile`, "
-        f"and unlink their Discord account. Their matches **stay** in the history and match log. "
-        f"You can bring them back later with `/settier` or `/setelo`. Do you want to continue?",
-        view=ConfirmView(interaction.user.id, do_remove), ephemeral=True)
+        text, view=ConfirmView(interaction.user.id, do_remove), ephemeral=True)
 
 
 # ---------- end of season / end of year ----------
@@ -666,9 +821,10 @@ async def endyear(interaction: discord.Interaction):
         await i.edit_original_response(content="Done.")
         await i.followup.send(
             f"🎆 **Year {old_year} ended.** The final leaderboard and the profiles of {count} players "
-            f"were saved: see them with `/leaderboard year:{old_year}` and `/profile year:{old_year}`.\n"
-            f"Year {new_year} (season {new_season}) has started: everyone is back to 0 elo (tier D). "
-            f"Discord links were kept.\nBackup saved as `{backup}`.")
+            f"were saved: see them with `/leaderboard year:{old_year}` and `/profile year:{old_year}`. "
+            f"The game modes were saved too (add `mode:NAME`).\n"
+            f"Year {new_year} (season {new_season}) has started: everyone is back to 0 elo (tier D), "
+            f"in every mode. Discord links were kept.\nBackup saved as `{backup}`.")
         rows = await get_year_leaderboard(old_year)
         if rows:
             lb = LeaderboardView(rows, "elo", f"YEAR {old_year} FINAL LEADERBOARD",
@@ -677,15 +833,15 @@ async def endyear(interaction: discord.Interaction):
 
     current_year, current_season = await get_current()
     await interaction.response.send_message(
-        f"⚠️ **This will end year {current_year}.** The final leaderboard and the profiles are saved, "
-        f"then **every player goes back to 0 elo (tier D)**, the current season ends, open paused "
-        f"matches are discarded and this year's matches disappear from `/history` and `/matches`. "
-        f"Discord links are kept. A backup of the database is saved first.\n"
-        f"Are you sure you want to continue?",
+        f"⚠️ **This will end year {current_year}.** The final leaderboards and the profiles are saved "
+        f"(main mode and every game mode), then **every player goes back to 0 elo (tier D)** in all of "
+        f"them, the current season ends, open paused matches are discarded and this year's matches "
+        f"disappear from `/history` and `/matches`. Discord links are kept. A backup of the database "
+        f"is saved first.\nAre you sure you want to continue?",
         view=ConfirmView(interaction.user.id, do_year), ephemeral=True)
 
 
-# ---------- paused matches ----------
+# ---------- paused matches (main mode only) ----------
 
 @bot.tree.command(name="pause", description="Save an interrupted match to be continued later (staff only)")
 @app_commands.describe(player1="Username of player 1", player2="Username of player 2",
@@ -714,7 +870,7 @@ async def pause_cmd(interaction: discord.Interaction, player1: str, player2: str
     p1 = await get_player(uuid1)
     p2 = await get_player(uuid2)
     if p1 is None or p2 is None:
-        missing = discord.utils.escape_markdown(name1 if p1 is None else name2)
+        missing = esc(name1 if p1 is None else name2)
         await interaction.followup.send(f"**{missing}** doesn't have a tier yet: use `/settier` first.")
         return
 
@@ -767,12 +923,12 @@ async def resume_cmd(interaction: discord.Interaction, pause_id: int, winner: st
         uuid_l, name_l, loser_games_before = pm["p1_uuid"], pm["p1_ign"], pm["p1_games"]
     else:
         await interaction.followup.send(
-            f"**{discord.utils.escape_markdown(name_w)}** is not part of paused match #{pause_id}.")
+            f"**{esc(name_w)}** is not part of paused match #{pause_id}.")
         return
 
     if score.value < loser_games_before:
         await interaction.followup.send(
-            f"**{discord.utils.escape_markdown(name_l)}** already had {loser_games_before} games, "
+            f"**{esc(name_l)}** already had {loser_games_before} games, "
             f"so the final score can't be {score.name}.")
         return
 
@@ -794,28 +950,39 @@ async def droppause(interaction: discord.Interaction, pause_id: int):
         return
     await close_pause(pause_id, "dropped")
     await interaction.followup.send(
-        f"🗑️ Paused match #{pause_id} ({discord.utils.escape_markdown(pm['p1_ign'])} "
-        f"{pm['p1_games']}-{pm['p2_games']} {discord.utils.escape_markdown(pm['p2_ign'])}) was discarded.")
+        f"🗑️ Paused match #{pause_id} ({esc(pm['p1_ign'])} "
+        f"{pm['p1_games']}-{pm['p2_games']} {esc(pm['p2_ign'])}) was discarded.")
 
 
 # ---------- profile ----------
 
-@bot.tree.command(name="profile", description="Show a player's profile (general, or of a season / past year)")
+@bot.tree.command(name="profile", description="Show a player's profile (general, or of a season / past year / mode)")
 @app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
                        season="Show the profile of a season",
-                       year="Show the profile of a past year")
+                       year="Show the profile of a past year",
+                       mode="Game mode (leave empty for the main mode)")
 async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
-                  season: Optional[int] = None, year: Optional[int] = None):
+                  season: Optional[int] = None, year: Optional[int] = None,
+                  mode: Optional[str] = None):
     await interaction.response.defer()
     if season is not None and year is not None:
         await interaction.followup.send("Choose either a season or a year, not both.")
         return
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    if md and season is not None:
+        await interaction.followup.send("Game modes don't have seasons.")
+        return
+    mode_id = md["id"] if md else None
+    mode_up = md["name"].upper() if md else None
+
     target = await resolve_target(interaction, ign)
     if target is None:
         return
     uuid, name, fresh = target
 
-    # ----- season profile -----
+    # ----- season profile (main mode) -----
     if season is not None:
         res = await get_season_leaderboard(season)
         if res is None:
@@ -825,7 +992,7 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
         idx = next((i for i, r in enumerate(by_elo) if r["uuid"] == uuid), None)
         if idx is None:
             await interaction.followup.send(
-                f"**{discord.utils.escape_markdown(name)}** didn't play any match in season {season}.")
+                f"**{esc(name)}** didn't play any match in season {season}.")
             return
         r = by_elo[idx]
         forfeits = await count_forfeits(uuid, season_id=season)
@@ -838,7 +1005,7 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
 
     # ----- archived year profile -----
     if year is not None:
-        rows = await get_year_leaderboard(year)
+        rows = await get_year_leaderboard(year, mode_id=mode_id)
         if rows is None:
             await interaction.followup.send(f"Year {year} does not exist or hasn't ended yet.")
             return
@@ -846,35 +1013,40 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
         idx = next((i for i, r in enumerate(by_elo) if r["uuid"] == uuid), None)
         if idx is None:
             await interaction.followup.send(
-                f"**{discord.utils.escape_markdown(name)}** is not in the final leaderboard of year {year}.")
+                f"**{esc(name)}** is not in the final leaderboard of year {year}.")
             return
         r = by_elo[idx]
         winrate = f"{r['wins'] / r['matches'] * 100:.0f}%" if r["matches"] else "-"
+        title = f"{mode_up} YEAR {year} PROFILE" if md else f"YEAR {year} PROFILE"
+        scope = f"{md['name']} · Year {year} (final)" if md else f"Year {year} (final)"
         data = await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1,
                                          r["wins"], r["losses"], winrate, r["forfeits"],
-                                         title=f"YEAR {year} PROFILE", scope=f"Year {year} (final)")
+                                         title=title, scope=scope)
         await interaction.followup.send(file=png_file(data, "profile.png"))
         return
 
-    # ----- general profile (current year) -----
-    p = await get_player(uuid)
+    # ----- current profile (main mode or an extra mode) -----
+    p = await get_player(uuid, mode_id=mode_id)
     if p is None:
-        await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** doesn't have a tier yet.")
+        where = f" in **{esc(md['name'])}**" if md else ""
+        await interaction.followup.send(f"**{esc(name)}** doesn't have a tier{where} yet.")
         return
 
     if fresh:
-        await upsert_player(uuid, name)   # keeps the stored name up to date
+        await upsert_player(uuid, name, mode_id=mode_id)   # keeps the stored name up to date
     else:
         name = p["ign"]
 
-    wins, losses = await get_stats(uuid)
-    forfeits = await count_forfeits(uuid)
+    wins, losses = await get_stats(uuid, mode_id=mode_id)
+    forfeits = await count_forfeits(uuid, mode_id=mode_id)
     total = wins + losses
     winrate = f"{wins / total * 100:.0f}%" if total else "-"
-    rank = await get_rank(p["elo"])
+    rank = await get_rank(p["elo"], mode_id=mode_id)
 
     data = await build_profile_image(uuid, name, p["tier"], p["elo"], rank, wins, losses,
-                                     winrate, forfeits)
+                                     winrate, forfeits,
+                                     title=f"{mode_up} PROFILE" if md else "PLAYER PROFILE",
+                                     scope=md["name"] if md else "")
     await interaction.followup.send(file=png_file(data, "profile.png"))
 
 
@@ -910,48 +1082,58 @@ def history_entries(rows, uuid):
 class HistoryView(PagedView):
     PER_PAGE = 10
 
-    def __init__(self, uuid, name, total):
+    def __init__(self, uuid, name, total, mode_id=None):
         super().__init__(timeout=180)
         self.uuid = uuid
         self.name = name
         self.total = total
+        self.mode_id = mode_id
         self.pages = max(1, (total + self.PER_PAGE - 1) // self.PER_PAGE)
         self.update_buttons()
 
     async def make_file(self) -> discord.File:
-        rows = await get_history(self.uuid, self.PER_PAGE, self.page * self.PER_PAGE)
+        rows = await get_history(self.uuid, self.PER_PAGE, self.page * self.PER_PAGE, mode_id=self.mode_id)
         entries = history_entries(rows, self.uuid)
         data = await build_history_image(self.name, entries, self.page, self.pages, self.total)
         return png_file(data, "history.png")
 
 
 @bot.tree.command(name="history", description="Show a player's match history (current year)")
-@app_commands.describe(ign="Minecraft username (leave empty for your linked account)")
-async def history(interaction: discord.Interaction, ign: Optional[str] = None):
+@app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
+                       mode="Game mode (leave empty for the main mode)")
+async def history(interaction: discord.Interaction, ign: Optional[str] = None,
+                  mode: Optional[str] = None):
     await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    mode_id = md["id"] if md else None
     target = await resolve_target(interaction, ign)
     if target is None:
         return
     uuid, name, fresh = target
 
-    p = await get_player(uuid, include_removed=True)
+    p = await get_player(uuid, include_removed=True, mode_id=mode_id)
     if p is None:
-        await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** doesn't have a tier yet.")
+        where = f" in **{esc(md['name'])}**" if md else ""
+        await interaction.followup.send(f"**{esc(name)}** doesn't have a tier{where} yet.")
         return
     if not fresh:
         name = p["ign"]
 
-    total = await count_history(uuid)
+    total = await count_history(uuid, mode_id=mode_id)
     if total == 0:
-        await interaction.followup.send(f"**{discord.utils.escape_markdown(name)}** hasn't played any matches yet.")
+        await interaction.followup.send(f"**{esc(name)}** hasn't played any matches yet.")
         return
 
-    view = HistoryView(uuid, name, total)
+    shown = f"{name} ({md['name']})" if md else name
+    view = HistoryView(uuid, shown, total, mode_id)
     file = await view.make_file()
+    content = f"**{esc(md['name'])}**" if md else None
     if view.pages > 1:
-        view.message = await interaction.followup.send(file=file, view=view)
+        view.message = await interaction.followup.send(content=content, file=file, view=view)
     else:
-        await interaction.followup.send(file=file)
+        await interaction.followup.send(content=content, file=file)
 
 
 # ---------- guild-wide match log and cancelled matches ----------
@@ -974,10 +1156,11 @@ def log_entries(rows):
 class MatchLogView(PagedView):
     PER_PAGE = 10
 
-    def __init__(self, total, cancelled=False):
+    def __init__(self, total, cancelled=False, mode_id=None):
         super().__init__(timeout=180)
         self.total = total          # already capped by MATCH_LOG_LIMIT
         self.cancelled = cancelled
+        self.mode_id = mode_id
         self.pages = max(1, (total + self.PER_PAGE - 1) // self.PER_PAGE)
         self.update_buttons()
 
@@ -985,45 +1168,48 @@ class MatchLogView(PagedView):
         offset = self.page * self.PER_PAGE
         limit = min(self.PER_PAGE, self.total - offset)
         if self.cancelled:
-            rows = await get_cancelled_matches(limit, offset)
+            rows = await get_cancelled_matches(limit, offset, mode_id=self.mode_id)
         else:
-            rows = await get_all_matches(limit, offset)
+            rows = await get_all_matches(limit, offset, mode_id=self.mode_id)
         data = await build_matchlog_image(log_entries(rows), self.page, self.pages, self.total,
                                           cancelled_view=self.cancelled)
         return png_file(data, "cancelled.png" if self.cancelled else "matches.png")
 
 
-@bot.tree.command(name="matches", description="Show the latest matches of the guild")
-async def matches(interaction: discord.Interaction):
+async def send_match_list(interaction: discord.Interaction, cancelled: bool, mode: Optional[str]):
     await interaction.response.defer()
-    total = min(await count_all_matches(), MATCH_LOG_LIMIT)
-    if total == 0:
-        await interaction.followup.send("No matches have been logged yet.")
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
         return
-    view = MatchLogView(total)
+    mode_id = md["id"] if md else None
+    counter = count_cancelled_matches if cancelled else count_all_matches
+    total = min(await counter(mode_id=mode_id), MATCH_LOG_LIMIT)
+    if total == 0:
+        await interaction.followup.send(
+            "No matches have been cancelled." if cancelled else "No matches have been logged yet.")
+        return
+    view = MatchLogView(total, cancelled=cancelled, mode_id=mode_id)
     file = await view.make_file()
+    content = f"**{esc(md['name'])}**" if md else None
     if view.pages > 1:
-        view.message = await interaction.followup.send(file=file, view=view)
+        view.message = await interaction.followup.send(content=content, file=file, view=view)
     else:
-        await interaction.followup.send(file=file)
+        await interaction.followup.send(content=content, file=file)
+
+
+@bot.tree.command(name="matches", description="Show the latest matches of the guild")
+@app_commands.describe(mode="Game mode (leave empty for the main mode)")
+async def matches(interaction: discord.Interaction, mode: Optional[str] = None):
+    await send_match_list(interaction, False, mode)
 
 
 @bot.tree.command(name="cancelled", description="Show the latest cancelled matches")
-async def cancelled_cmd(interaction: discord.Interaction):
-    await interaction.response.defer()
-    total = min(await count_cancelled_matches(), MATCH_LOG_LIMIT)
-    if total == 0:
-        await interaction.followup.send("No matches have been cancelled.")
-        return
-    view = MatchLogView(total, cancelled=True)
-    file = await view.make_file()
-    if view.pages > 1:
-        view.message = await interaction.followup.send(file=file, view=view)
-    else:
-        await interaction.followup.send(file=file)
+@app_commands.describe(mode="Game mode (leave empty for the main mode)")
+async def cancelled_cmd(interaction: discord.Interaction, mode: Optional[str] = None):
+    await send_match_list(interaction, True, mode)
 
 
-# ---------- leaderboard (general, season, archived year) ----------
+# ---------- leaderboard (general, season, archived year, game modes) ----------
 
 class SortSelect(discord.ui.Select):
     def __init__(self, current: str):
@@ -1068,18 +1254,28 @@ class LeaderboardView(PagedView):
         return png_file(data, "leaderboard.png")
 
 
-@bot.tree.command(name="leaderboard", description="Show the leaderboard (general, or of a season / past year)")
+@bot.tree.command(name="leaderboard", description="Show the leaderboard (general, season, past year or game mode)")
 @app_commands.describe(sort="What to sort by (you can also change it with the menu)",
                        season="Show the leaderboard of a season",
-                       year="Show the final leaderboard of a past year")
+                       year="Show the final leaderboard of a past year",
+                       mode="Game mode (leave empty for the main mode)")
 @app_commands.choices(sort=SORT_CHOICES)
 async def leaderboard(interaction: discord.Interaction,
                       sort: Optional[app_commands.Choice[str]] = None,
-                      season: Optional[int] = None, year: Optional[int] = None):
+                      season: Optional[int] = None, year: Optional[int] = None,
+                      mode: Optional[str] = None):
     await interaction.response.defer()
     if season is not None and year is not None:
         await interaction.followup.send("Choose either a season or a year, not both.")
         return
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    if md and season is not None:
+        await interaction.followup.send("Game modes don't have seasons.")
+        return
+    mode_id = md["id"] if md else None
+    mode_up = md["name"].upper() if md else None
     key = sort.value if sort else "elo"
 
     if season is not None:
@@ -1094,20 +1290,23 @@ async def leaderboard(interaction: discord.Interaction,
         scope = f"Season {season} " + ("(current)" if is_current else "(ended)")
         view = LeaderboardView(rows, key, f"SEASON {season} LEADERBOARD", scope, True)
     elif year is not None:
-        rows = await get_year_leaderboard(year)
+        rows = await get_year_leaderboard(year, mode_id=mode_id)
         if rows is None:
             await interaction.followup.send(f"Year {year} does not exist or hasn't ended yet.")
             return
         if not rows:
             await interaction.followup.send(f"Year {year} has no players in its final leaderboard.")
             return
-        view = LeaderboardView(rows, key, f"YEAR {year} FINAL LEADERBOARD", f"Year {year} (final)", False)
+        title = f"{mode_up} LEADERBOARD" if md else f"YEAR {year} FINAL LEADERBOARD"
+        view = LeaderboardView(rows, key, title, f"Year {year} (final)", False)
     else:
-        rows = await get_leaderboard()
+        rows = await get_leaderboard(mode_id=mode_id)
         if not rows:
-            await interaction.followup.send("There are no players yet.")
+            await interaction.followup.send(
+                f"There are no players in **{esc(md['name'])}** yet." if md else "There are no players yet.")
             return
-        view = LeaderboardView(rows, key, "GLOBAL LEADERBOARD", "", False)
+        title = f"{mode_up} LEADERBOARD" if md else "GLOBAL LEADERBOARD"
+        view = LeaderboardView(rows, key, title, "", False)
 
     view.message = await interaction.followup.send(file=await view.make_file(), view=view)
 
@@ -1127,6 +1326,12 @@ async def info(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await build_info_image(await get_info())
     await interaction.followup.send(file=png_file(data, "info.png"))
+
+
+# the "mode" option suggests the existing game modes
+for _cmd in (settier, setelo, match, forfeit_cmd, removeplayer, profile, history,
+             matches, cancelled_cmd, leaderboard):
+    _cmd.autocomplete("mode")(mode_autocomplete)
 
 
 bot.run(os.getenv("TOKEN"))

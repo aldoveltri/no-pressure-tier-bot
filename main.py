@@ -24,11 +24,11 @@ from database import (init_db, init_extras, init_seasons, init_modes, upsert_pla
                       get_current, list_seasons, list_years,
                       get_season_leaderboard, get_year_leaderboard, sort_rows,
                       end_season, end_year,
-                      list_modes, get_mode_by_name, get_mode, add_mode, deactivate_mode)
+                      get_mode_by_name, get_mode, seed_modes)
 from mojang import get_uuid
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
-from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, tier_from_elo
-from elo import calcola
+from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, MODES, tier_from_elo
+from elo import calcola, FIRST_TO
 from guide import GUIDE_PAGES
 from graphics import (build_leaderboard_image, build_match_image, build_profile_image,
                       build_history_image, build_settier_image, build_matchlog_image,
@@ -52,7 +52,7 @@ SEASON_ELO_LOSS = 100
 GENERIC_ERROR = ("Something went wrong while running this command. "
                  "Please try again in a moment, and tell the staff if it keeps happening.")
 
-SCORE_CHOICES = [
+SCORE_CHOICES = [   # used by /resume (normal mode, first to 3)
     app_commands.Choice(name="3-0", value=0),
     app_commands.Choice(name="3-1", value=1),
     app_commands.Choice(name="3-2", value=2),
@@ -62,7 +62,7 @@ SORT_OPTIONS = [("elo", "Elo"), ("wins", "Wins"), ("losses", "Losses"),
                 ("winrate", "Win rate"), ("matches", "Matches played")]
 SORT_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in SORT_OPTIONS]
 
-MODE_NAME_RE = re.compile(r"^[A-Za-z0-9 _'\-]+$")
+SCORE_RE = re.compile(r"^\s*(\d+)\s*[-–:]\s*(\d+)\s*$")
 
 
 # ---------- small helpers ----------
@@ -117,25 +117,70 @@ async def lookup_ign(interaction: discord.Interaction, ign: str):
     return result
 
 
+# ---------- game modes (fixed list in config.py) ----------
+
+def find_config_mode(text):
+    """Finds a configured mode from its name or its short key (also partial text)."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    for m in MODES:
+        if t == m["key"] or t == m["name"].lower():
+            return m
+    for m in MODES:
+        if t in m["name"].lower() or t in m["key"]:
+            return m
+    return None
+
+
+def mode_system(md) -> str:
+    """'ft3' or 'ft5' for a mode row (None = the normal mode = ft3)."""
+    if md is not None:
+        cfg = find_config_mode(md["name"])
+        if cfg:
+            return cfg["system"]
+    return "ft3"
+
+
+def parse_score(text, first_to: int):
+    """'5-3' -> 3 (the games won by the loser), or None if the score isn't valid."""
+    m = SCORE_RE.match(text or "")
+    if not m:
+        return None
+    w, l = int(m.group(1)), int(m.group(2))
+    if w != first_to or not (0 <= l < first_to):
+        return None
+    return l
+
+
 async def resolve_mode(interaction: discord.Interaction, mode_name):
-    """Returns (ok, mode row). No mode name = the main mode (None). Sends an error if not found."""
+    """Returns (ok, mode row). No mode name = the normal mode (None). Sends an error if not found."""
     if not mode_name:
         return True, None
-    md = await get_mode_by_name(mode_name)
+    cfg = find_config_mode(mode_name)
+    md = await get_mode_by_name(cfg["name"]) if cfg else None
     if md is None:
+        names = ", ".join(m["name"] for m in MODES)
         await interaction.followup.send(
-            f"The mode `{mode_name}` does not exist. Use `/modes` to see the available modes.")
+            f"The mode `{mode_name}` does not exist. Available modes: {names}. "
+            f"Leave it empty for the normal mode.")
         return False, None
     return True, md
 
 
 async def mode_autocomplete(interaction: discord.Interaction, current: str):
-    out = []
-    for r in await list_modes():
-        if current and current.lower() not in r["name"].lower():
-            continue
-        out.append(app_commands.Choice(name=r["name"], value=r["name"]))
-    return out[:25]
+    cur = current.strip().lower()
+    return [app_commands.Choice(name=m["name"], value=m["name"]) for m in MODES
+            if not cur or cur in m["name"].lower() or cur in m["key"]]
+
+
+async def score_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggests the valid scores of the selected mode."""
+    mode_name = getattr(interaction.namespace, "mode", None)
+    cfg = find_config_mode(mode_name) if mode_name else None
+    first_to = FIRST_TO[cfg["system"]] if cfg else 3
+    scores = [f"{first_to}-{k}" for k in range(first_to)]
+    return [app_commands.Choice(name=s, value=s) for s in scores if current.strip() in s]
 
 
 async def resolve_target(interaction: discord.Interaction, ign):
@@ -162,6 +207,7 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
     """Registers a finished match, updates the elo and sends the result card.
     Returns False if the match could not be logged (a message has been sent)."""
     mode_id = md["id"] if md else None
+    system = mode_system(md)
     p_w = await get_player(uuid_w, mode_id=mode_id)
     p_l = await get_player(uuid_l, mode_id=mode_id)
     if p_w is None or p_l is None:
@@ -175,7 +221,7 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
                 f"**{missing}** doesn't have a tier yet: use `/settier` first.")
         return False
 
-    gain, loss = calcola(p_w["elo"], p_l["elo"], loser_games)
+    gain, loss = calcola(p_w["elo"], p_l["elo"], loser_games, system)
     new_w, new_l = p_w["elo"] + gain, p_l["elo"] + loss
 
     now = datetime.now(timezone.utc)
@@ -189,7 +235,8 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
          "tier_before": tier_from_elo(p_l["elo"]), "tier_after": tier_from_elo(new_l)}
 
     date = now.strftime("%m/%d/%Y") + (f" · {md['name']}" if md else "")
-    data = await build_match_image(w, l, score_name, match_id, date, forfeit=forfeit)
+    data = await build_match_image(w, l, score_name, match_id, date, forfeit=forfeit,
+                                   first_to=FIRST_TO[system])
     await send_card(interaction, data, "match.png", md)
     return True
 
@@ -276,6 +323,7 @@ async def setup_hook():
     await init_extras()
     await init_seasons()
     await init_modes()
+    await seed_modes([m["name"] for m in MODES])
     await bot.load_extension("namesync")
 
 bot.setup_hook = setup_hook
@@ -386,73 +434,25 @@ async def guide(interaction: discord.Interaction):
 
 # ---------- game modes ----------
 
-@bot.tree.command(name="modes", description="Show the available game modes")
+@bot.tree.command(name="modes", description="Show the game modes")
 async def modes(interaction: discord.Interaction):
     await interaction.response.defer()
-    rows = await list_modes()
     blocks = [
-        {"type": "heading", "text": "Main mode"},
-        {"type": "bullet", "text": "Side rush. It is used when you don't choose a mode, and it has seasons and years."},
+        {"type": "heading", "text": "Normal (default)"},
+        {"type": "bullet", "text":
+         "The base mode: first to 3, with seasons and years. It is used when you don't choose a mode."},
         {"type": "heading", "text": "Other modes"},
     ]
-    if rows:
-        for r in rows:
-            blocks.append({"type": "bullet", "text": r["name"]})
-        blocks.append({"type": "paragraph", "text":
-                       "Add mode:NAME to /profile, /history, /leaderboard and the other commands. "
-                       "Each mode has its own elo, tiers and leaderboard, only lifetime (no seasons), "
-                       "and resets at the end of the year like the main one."})
-    else:
-        blocks.append({"type": "paragraph", "text":
-                       "There are no other modes yet. The staff can create one with /addmode."})
+    for m in MODES:
+        n = FIRST_TO[m["system"]]
+        extra = " (with its own elo system)" if m["system"] == "ft5" else ""
+        blocks.append({"type": "bullet", "text": f"{m['name']}: first to {n}{extra}"})
+    blocks.append({"type": "paragraph", "text":
+                   "Add mode:NAME to /profile, /history, /leaderboard and the other commands. "
+                   "Each mode has its own elo, tiers and leaderboard, only lifetime (no seasons), "
+                   "and resets at the end of the year like the normal one."})
     data = await build_text_image("GAME MODES", GUILD_NAME, blocks)
     await interaction.followup.send(file=png_file(data, "modes.png"))
-
-
-@bot.tree.command(name="addmode", description="Create a new game mode (staff only)")
-@app_commands.describe(name="Name of the mode, for example Bridge (2-20 characters)")
-@staff_only()
-async def addmode(interaction: discord.Interaction, name: str):
-    name = " ".join(name.split())
-    if not (2 <= len(name) <= 20) or not MODE_NAME_RE.match(name):
-        await interaction.response.send_message(
-            "The name must have 2-20 characters: letters, numbers, spaces, `-`, `_` or `'`.", ephemeral=True)
-        return
-    await interaction.response.defer()
-    md, created = await add_mode(name)
-    if not created:
-        await interaction.followup.send(f"The mode **{esc(md['name'])}** already exists.")
-        return
-    await interaction.followup.send(
-        f"✅ Mode **{esc(md['name'])}** created. Use `mode:{md['name']}` in `/settier` to give players "
-        f"a tier in it, then `/match`, `/leaderboard`, `/profile`...")
-
-
-@bot.tree.command(name="removemode", description="Hide a game mode (staff only)")
-@app_commands.describe(name="Name of the mode to hide")
-@staff_only()
-async def removemode(interaction: discord.Interaction, name: str):
-    await interaction.response.defer(ephemeral=True)
-    md = await get_mode_by_name(name)
-    if md is None:
-        await interaction.followup.send(f"The mode `{name}` does not exist.")
-        return
-
-    async def do_remove(i: discord.Interaction):
-        await deactivate_mode(md["id"])
-        await i.edit_original_response(content="Done.")
-        await i.followup.send(f"🗑️ The mode **{esc(md['name'])}** was hidden. Its data is kept.")
-
-    await interaction.followup.send(
-        f"⚠️ This will hide the mode **{esc(md['name'])}**: it disappears from the commands and "
-        f"the leaderboards. Its data is kept, and creating a mode with the same name brings it back. "
-        f"Do you want to continue?",
-        view=ConfirmView(interaction.user.id, do_remove), ephemeral=True)
-
-
-@removemode.autocomplete("name")
-async def removemode_name_ac(interaction: discord.Interaction, current: str):
-    return await mode_autocomplete(interaction, current)
 
 
 # ---------- season / year suggestions for the commands ----------
@@ -557,7 +557,7 @@ async def unlink(interaction: discord.Interaction):
 
 @bot.tree.command(name="settier", description="Assign a tier to a player (staff only)")
 @app_commands.describe(ign="Minecraft username of the player", tier="Tier to assign",
-                       mode="Game mode (leave empty for the main mode)")
+                       mode="Game mode (leave empty for the normal mode)")
 @app_commands.choices(tier=[app_commands.Choice(name=t, value=t) for t in TIERS])
 @staff_only()
 async def settier(interaction: discord.Interaction, ign: str, tier: app_commands.Choice[str],
@@ -582,7 +582,7 @@ async def settier(interaction: discord.Interaction, ign: str, tier: app_commands
 
 @bot.tree.command(name="setelo", description="Set a player's elo manually (staff only)")
 @app_commands.describe(ign="Minecraft username of the player", elo="New elo (0-5000)",
-                       mode="Game mode (leave empty for the main mode)")
+                       mode="Game mode (leave empty for the normal mode)")
 @staff_only()
 async def setelo(interaction: discord.Interaction, ign: str, elo: app_commands.Range[int, 0, 5000],
                  mode: Optional[str] = None):
@@ -606,15 +606,23 @@ async def setelo(interaction: discord.Interaction, ign: str, elo: app_commands.R
 
 @bot.tree.command(name="match", description="Log a 1v1 result (staff only)")
 @app_commands.describe(winner="Username of the winner", loser="Username of the loser",
-                       score="Match score", mode="Game mode (leave empty for the main mode)")
-@app_commands.choices(score=SCORE_CHOICES)
+                       score="Final score, for example 3-1 (in Classic 1v1 a match is first to 5: 5-3)",
+                       mode="Game mode (leave empty for the normal mode)")
 @staff_only()
-async def match(interaction: discord.Interaction, winner: str, loser: str,
-                score: app_commands.Choice[int], mode: Optional[str] = None):
+async def match(interaction: discord.Interaction, winner: str, loser: str, score: str,
+                mode: Optional[str] = None):
     await interaction.response.defer()
     ok, md = await resolve_mode(interaction, mode)
     if not ok:
         return
+    first_to = FIRST_TO[mode_system(md)]
+    loser_games = parse_score(score, first_to)
+    if loser_games is None:
+        await interaction.followup.send(
+            f"The score must be {first_to}-0 up to {first_to}-{first_to - 1}: "
+            f"in this mode a match is first to {first_to}.")
+        return
+
     r_w = await lookup_ign(interaction, winner)
     if r_w is None:
         return
@@ -628,14 +636,15 @@ async def match(interaction: discord.Interaction, winner: str, loser: str,
         await interaction.followup.send("The winner and the loser can't be the same player.")
         return
 
-    await log_match(interaction, uuid_w, name_w, uuid_l, name_l, score.name, score.value, md=md)
+    await log_match(interaction, uuid_w, name_w, uuid_l, name_l,
+                    f"{first_to}-{loser_games}", loser_games, md=md)
 
 
-@bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses 3-0 (staff only)")
+@bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses 3-0 (5-0 in Classic 1v1)")
 @app_commands.describe(player="Username of the player who left the match",
-                       opponent="Username of the opponent (wins 3-0)",
+                       opponent="Username of the opponent (wins by forfeit)",
                        pause_id="Optional: number of the paused match this forfeit closes",
-                       mode="Game mode (leave empty for the main mode)")
+                       mode="Game mode (leave empty for the normal mode)")
 @staff_only()
 async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: str,
                       pause_id: Optional[int] = None, mode: Optional[str] = None):
@@ -644,8 +653,9 @@ async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: s
     if not ok:
         return
     if md and pause_id is not None:
-        await interaction.followup.send("Paused matches only exist in the main mode.")
+        await interaction.followup.send("Paused matches only exist in the normal mode.")
         return
+    first_to = FIRST_TO[mode_system(md)]
     r_l = await lookup_ign(interaction, player)
     if r_l is None:
         return
@@ -673,8 +683,9 @@ async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: s
                 f"Paused match #{pause_id} is not between these two players.")
             return
 
-    # whatever the situation was, the player who left loses 3-0
-    done = await log_match(interaction, uuid_w, name_w, uuid_l, name_l, "3-0", 0, forfeit=True, md=md)
+    # whatever the situation was, the player who left loses by the maximum score (3-0, or 5-0)
+    done = await log_match(interaction, uuid_w, name_w, uuid_l, name_l, f"{first_to}-0", 0,
+                           forfeit=True, md=md)
     if done and pm is not None:
         await close_pause(pause_id, "forfeited")
 
@@ -744,7 +755,7 @@ async def undo(interaction: discord.Interaction, match_id: int):
 
 @bot.tree.command(name="removeplayer", description="Remove a player from the leaderboard and profiles (staff only)")
 @app_commands.describe(ign="Minecraft username of the player to remove",
-                       mode="Game mode (leave empty for the main mode)")
+                       mode="Game mode (leave empty for the normal mode)")
 @staff_only()
 async def removeplayer(interaction: discord.Interaction, ign: str, mode: Optional[str] = None):
     await interaction.response.defer(ephemeral=True)
@@ -834,14 +845,14 @@ async def endyear(interaction: discord.Interaction):
     current_year, current_season = await get_current()
     await interaction.response.send_message(
         f"⚠️ **This will end year {current_year}.** The final leaderboards and the profiles are saved "
-        f"(main mode and every game mode), then **every player goes back to 0 elo (tier D)** in all of "
+        f"(normal mode and every game mode), then **every player goes back to 0 elo (tier D)** in all of "
         f"them, the current season ends, open paused matches are discarded and this year's matches "
         f"disappear from `/history` and `/matches`. Discord links are kept. A backup of the database "
         f"is saved first.\nAre you sure you want to continue?",
         view=ConfirmView(interaction.user.id, do_year), ephemeral=True)
 
 
-# ---------- paused matches (main mode only) ----------
+# ---------- paused matches (normal mode only) ----------
 
 @bot.tree.command(name="pause", description="Save an interrupted match to be continued later (staff only)")
 @app_commands.describe(player1="Username of player 1", player2="Username of player 2",
@@ -960,7 +971,7 @@ async def droppause(interaction: discord.Interaction, pause_id: int):
 @app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
                        season="Show the profile of a season",
                        year="Show the profile of a past year",
-                       mode="Game mode (leave empty for the main mode)")
+                       mode="Game mode (leave empty for the normal mode)")
 async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
                   season: Optional[int] = None, year: Optional[int] = None,
                   mode: Optional[str] = None):
@@ -982,7 +993,7 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
         return
     uuid, name, fresh = target
 
-    # ----- season profile (main mode) -----
+    # ----- season profile (normal mode) -----
     if season is not None:
         res = await get_season_leaderboard(season)
         if res is None:
@@ -1025,7 +1036,7 @@ async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
         await interaction.followup.send(file=png_file(data, "profile.png"))
         return
 
-    # ----- current profile (main mode or an extra mode) -----
+    # ----- current profile (normal mode or a game mode) -----
     p = await get_player(uuid, mode_id=mode_id)
     if p is None:
         where = f" in **{esc(md['name'])}**" if md else ""
@@ -1100,7 +1111,7 @@ class HistoryView(PagedView):
 
 @bot.tree.command(name="history", description="Show a player's match history (current year)")
 @app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
-                       mode="Game mode (leave empty for the main mode)")
+                       mode="Game mode (leave empty for the normal mode)")
 async def history(interaction: discord.Interaction, ign: Optional[str] = None,
                   mode: Optional[str] = None):
     await interaction.response.defer()
@@ -1198,13 +1209,13 @@ async def send_match_list(interaction: discord.Interaction, cancelled: bool, mod
 
 
 @bot.tree.command(name="matches", description="Show the latest matches of the guild")
-@app_commands.describe(mode="Game mode (leave empty for the main mode)")
+@app_commands.describe(mode="Game mode (leave empty for the normal mode)")
 async def matches(interaction: discord.Interaction, mode: Optional[str] = None):
     await send_match_list(interaction, False, mode)
 
 
 @bot.tree.command(name="cancelled", description="Show the latest cancelled matches")
-@app_commands.describe(mode="Game mode (leave empty for the main mode)")
+@app_commands.describe(mode="Game mode (leave empty for the normal mode)")
 async def cancelled_cmd(interaction: discord.Interaction, mode: Optional[str] = None):
     await send_match_list(interaction, True, mode)
 
@@ -1258,7 +1269,7 @@ class LeaderboardView(PagedView):
 @app_commands.describe(sort="What to sort by (you can also change it with the menu)",
                        season="Show the leaderboard of a season",
                        year="Show the final leaderboard of a past year",
-                       mode="Game mode (leave empty for the main mode)")
+                       mode="Game mode (leave empty for the normal mode)")
 @app_commands.choices(sort=SORT_CHOICES)
 async def leaderboard(interaction: discord.Interaction,
                       sort: Optional[app_commands.Choice[str]] = None,
@@ -1328,10 +1339,11 @@ async def info(interaction: discord.Interaction):
     await interaction.followup.send(file=png_file(data, "info.png"))
 
 
-# the "mode" option suggests the existing game modes
+# the "mode" option suggests the game modes; the score of /match suggests the valid scores
 for _cmd in (settier, setelo, match, forfeit_cmd, removeplayer, profile, history,
              matches, cancelled_cmd, leaderboard):
     _cmd.autocomplete("mode")(mode_autocomplete)
+match.autocomplete("score")(score_autocomplete)
 
 
 bot.run(os.getenv("TOKEN"))

@@ -248,28 +248,17 @@ async def get_mode(mode_id: int):
         return await cur.fetchone()
 
 
-async def add_mode(name: str):
-    """Creates a mode (or brings back a removed one). Returns (mode dict, created)."""
+async def seed_modes(names):
+    """Makes the game modes match the fixed list in config: creates the missing ones, activates the
+    listed ones and hides any other (its data is kept)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM modes WHERE name = ?", (name,))
-        row = await cur.fetchone()
-        if row is not None:
-            if row["active"]:
-                return dict(row), False
-            await db.execute("UPDATE modes SET active = 1 WHERE id = ?", (row["id"],))
-            await db.commit()
-            return {**dict(row), "active": 1}, True
-        cur = await db.execute("INSERT INTO modes (name, created_at) VALUES (?, ?)", (name, _now()))
+        for name in names:
+            await db.execute("INSERT OR IGNORE INTO modes (name, active, created_at) VALUES (?, 1, ?)",
+                             (name, _now()))
+            await db.execute("UPDATE modes SET active = 1 WHERE name = ?", (name,))
+        marks = ",".join("?" for _ in names)
+        await db.execute(f"UPDATE modes SET active = 0 WHERE name NOT IN ({marks})", list(names))
         await db.commit()
-        return {"id": cur.lastrowid, "name": name, "active": 1}, True
-
-
-async def deactivate_mode(mode_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE modes SET active = 0 WHERE id = ?", (mode_id,))
-        await db.commit()
-
 
 # ---------- players (main mode: mode_id=None) ----------
 

@@ -42,3 +42,11 @@ RULES = [
         "Obsidian is not allowed.",
     ]),
 ]
+
+# Fixed game modes (besides the Normal mode).
+# "system" decides the match format and the elo table: "ft3" = first to 3, "ft5" = first to 5.
+MODES = [
+    {"key": "crossmap", "name": "Bedwars Crossmap", "system": "ft3"},
+    {"key": "classic", "name": "Classic 1v1", "system": "ft5"},
+    {"key": "bridge", "name": "The Bridge", "system": "ft3"},
+]

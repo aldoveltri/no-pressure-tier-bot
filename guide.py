@@ -1,9 +1,13 @@
-from config import TIER_RANGES
-from elo import WIN, LOSS
+from config import TIER_RANGES, MODES
+from elo import WIN, LOSS, WIN5, LOSS5, FIRST_TO
 
 
 def _fmt(values):
     return " / ".join(f"{v:+d}" for v in values)
+
+
+def _fmt5(values):
+    return "/".join(f"{v:+d}" for v in values)
 
 
 def _tiers_text():
@@ -31,6 +35,17 @@ def _b(text):
 def _c(cmd, text):
     return {"type": "command", "cmd": cmd, "text": text}
 
+
+def _modes_bullets():
+    out = [_b("Normal: the base mode, used when you don't choose a mode. First to 3, with seasons and years.")]
+    for m in MODES:
+        n = FIRST_TO[m["system"]]
+        extra = " It has its own elo system (see the Classic 1v1 page)." if m["system"] == "ft5" else ""
+        out.append(_b(f"{m['name']}: first to {n}.{extra}"))
+    return out
+
+
+_ft3_names = ", ".join(["Normal"] + [m["name"] for m in MODES if m["system"] == "ft3"])
 
 GUIDE_PAGES = [
     {
@@ -93,26 +108,26 @@ GUIDE_PAGES = [
     {
         "title": "Game modes",
         "blocks": [
-            _p("Besides the main mode (side rush), the guild can have other game modes, for example "
-               "Bridge, Classic Duels or Crossmap. Each mode has its own elo, tiers, matches and leaderboard, "
-               "so you can be S in one mode and C in another."),
-            _h("How modes work"),
+            _p("Besides the normal mode, the guild plays other game modes. Each mode has its own elo, "
+               "tiers, matches and leaderboard, so you can be S in one mode and C in another."),
+            _h("The modes"),
+            *_modes_bullets(),
+            _h("How to use them"),
             _b("Add mode:NAME to /profile, /history, /leaderboard, /matches and /cancelled. "
-               "Leave it empty to use the main mode."),
-            _b("Modes only have a lifetime leaderboard: there are no seasons."),
-            _b("At the end of the year (/endyear) modes reset too, and their final leaderboards are "
+               "Leave it empty to use the normal mode. The bot suggests the modes while you type."),
+            _b("The other modes only have a lifetime leaderboard: there are no seasons."),
+            _b("At the end of the year (/endyear) every mode resets too and its final leaderboard is "
                "saved: /leaderboard mode:NAME year:N."),
-            _b("The elo points are calculated with the same table as the main mode."),
-            _b("Paused matches (/pause) only exist in the main mode."),
-            _c("/modes", "Shows the available game modes."),
+            _b("Paused matches (/pause) only exist in the normal mode."),
+            _c("/modes", "Shows the game modes."),
         ],
     },
     {
         "title": "Elo & tiers",
         "blocks": [
-            _p("Every match is first to 3. The points depend on the score and on the elo difference with "
-               "your opponent: beating a stronger player gives more points, losing to a weaker one costs "
-               "more. Elo never goes below 0."),
+            _p(f"{_ft3_names}: every match is first to 3. The points depend on the score and on the elo "
+               f"difference with your opponent: beating a stronger player gives more points, losing to a "
+               f"weaker one costs more. Elo never goes below 0."),
             {
                 "type": "table",
                 "cols": ["Opponent's elo vs yours", "You win (3-0 / 3-1 / 3-2)", "You lose (3-0 / 3-1 / 3-2)"],
@@ -127,21 +142,49 @@ GUIDE_PAGES = [
                 ],
             },
             _h("Tiers"),
-            _p("Your tier is decided by your elo:"),
+            _p("Your tier is decided by your elo (the same tiers in every mode):"),
             _p(_tiers_text()),
         ],
     },
+]
+
+if any(m["system"] == "ft5" for m in MODES):
+    _ft5_names = ", ".join(m["name"] for m in MODES if m["system"] == "ft5")
+    GUIDE_PAGES.append({
+        "title": "Classic 1v1 elo (FT5)",
+        "blocks": [
+            _p(f"{_ft5_names}: every match is first to 5. The points depend on the score (the games won "
+               f"by the loser: 0, 1, 2, 3 or 4) and on the elo difference with your opponent."),
+            {
+                "type": "table",
+                "cols": ["Opponent's elo vs yours", "You win (5-0/5-1/5-2/5-3/5-4)",
+                         "You lose (0-5/1-5/2-5/3-5/4-5)"],
+                "widths": [0.26, 0.38, 0.36],
+                "colors": ["text", "green", "red"],
+                "rows": [
+                    ["100+ higher", _fmt5(WIN5["molto_alto"]), _fmt5(LOSS5["molto_alto"])],
+                    ["35 to 99 higher", _fmt5(WIN5["alto"]), _fmt5(LOSS5["alto"])],
+                    ["within 34", _fmt5(WIN5["normale"]), _fmt5(LOSS5["normale"])],
+                    ["35 to 99 lower", _fmt5(WIN5["basso"]), _fmt5(LOSS5["basso"])],
+                    ["100+ lower", _fmt5(WIN5["molto_basso"]), _fmt5(LOSS5["molto_basso"])],
+                ],
+            },
+            _p("Elo never goes below 0."),
+        ],
+    })
+
+GUIDE_PAGES += [
     {
         "title": "Seasons & years",
         "blocks": [
             _h("Seasons"),
             _p("A season is a period of play, numbered (Season 1, Season 2...). When the staff ends it with "
                "/endseason, the season leaderboard is saved forever, a new season starts, and every player "
-               "loses 100 elo in the general leaderboard (minimum 0). Only the main mode has seasons."),
+               "loses 100 elo in the general leaderboard (minimum 0). Only the normal mode has seasons."),
             _b("See an old season: /leaderboard season:N and /profile season:N."),
             _h("Years"),
             _p("At the end of the year the staff uses /endyear: the final leaderboards and the profiles "
-               "(main mode and every other mode) are saved, then everyone goes back to 0 elo (tier D) and "
+               "(normal mode and every other mode) are saved, then everyone goes back to 0 elo (tier D) and "
                "a new year starts. Discord links are kept."),
             _b("See a past year: /leaderboard year:N and /profile year:N (add mode:NAME for another mode)."),
             _b("The matches of past years are hidden from /history and /matches."),
@@ -151,15 +194,16 @@ GUIDE_PAGES = [
         "title": "Staff: matches",
         "blocks": [
             _p("All the commands below accept mode:NAME to work on another game mode "
-               "(except /pause, /resume and /droppause, which are only for the main mode)."),
+               "(except /pause, /resume and /droppause, which are only for the normal mode)."),
             _c("/settier ign tier",
                "Assigns a tier after a tier test. The elo is set to the minimum of that tier."),
             _c("/match winner loser score",
-               "Logs a finished 1v1 (3-0, 3-1 or 3-2). Both players need a tier. The elo is calculated "
+               "Logs a finished 1v1. The score is for example 3-1 (5-3 in Classic 1v1): the bot suggests "
+               "the valid scores. Both players need a tier in that mode. The elo is calculated "
                "automatically and the result card shows the match number."),
             _c("/forfeit player opponent [pause_id]",
-               "The player who left loses 3-0, whatever the score was. It is marked as FORFEIT and counted "
-               "in the profile. Add pause_id to close a paused match."),
+               "The player who left loses 3-0 (5-0 in Classic 1v1), whatever the score was. It is marked as "
+               "FORFEIT and counted in the profile. Add pause_id to close a paused match."),
             _c("/pause player1 player2 games1 games2",
                "Saves an interrupted match (for example 2-1) to be continued later. The elo doesn't change yet."),
             _c("/resume pause_id winner score", "Finishes a paused match with the final score and logs it."),
@@ -174,11 +218,9 @@ GUIDE_PAGES = [
         "blocks": [
             _c("/setelo ign elo", "Sets a player's elo by hand (0 to 5000). Accepts mode:NAME."),
             _c("/removeplayer ign",
-               "Removes a player from the leaderboard and /profile (main mode: also unlinks their Discord "
+               "Removes a player from the leaderboard and /profile (normal mode: also unlinks their Discord "
                "account). Their matches stay in the history. /settier or /setelo brings them back. "
                "Accepts mode:NAME."),
-            _c("/addmode name", "Creates a new game mode (for example Bridge). Max 20 characters."),
-            _c("/removemode name", "Hides a game mode. Its data is kept."),
             _c("/link ign user:@member", "Links a member without the Hypixel verification."),
             _c("/endseason",
                "Ends the season: asks for confirmation and saves a backup of the database first."),

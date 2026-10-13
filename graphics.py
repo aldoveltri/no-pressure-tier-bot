@@ -289,13 +289,13 @@ def _match_panel(img, d, x0, y0, p, accent, label, head_data):
     d.text((cx, y0 + 314), f"{p['before']} → {p['after']} elo", font=get_font(20), fill=MUTED, anchor="mm")
 
 
-def _draw_match(w, l, score, match_id, date, heads, title, forfeit):
+def _draw_match(w, l, score, match_id, date, heads, title, forfeit, first_to=3):
     top = HEADER_H + 24
     height = top + PANEL_H + 20 + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
     d = ImageDraw.Draw(img)
     if title == "MATCH RESULT":
-        subtitle = f"{GUILD_NAME} · " + ("forfeit" if forfeit else "first to 3")
+        subtitle = f"{GUILD_NAME} · " + ("forfeit" if forfeit else f"first to {first_to}")
     else:
         subtitle = f"{GUILD_NAME} · elo restored"
     _header(d, title, subtitle)
@@ -314,9 +314,11 @@ def _draw_match(w, l, score, match_id, date, heads, title, forfeit):
     return _png(img)
 
 
-async def build_match_image(winner, loser, score, match_id, date, title="MATCH RESULT", forfeit=False):
+async def build_match_image(winner, loser, score, match_id, date, title="MATCH RESULT", forfeit=False,
+                            first_to=3):
     heads = await _fetch_heads([(winner["uuid"], winner["name"]), (loser["uuid"], loser["name"])])
-    return await asyncio.to_thread(_draw_match, winner, loser, score, match_id, date, heads, title, forfeit)
+    return await asyncio.to_thread(_draw_match, winner, loser, score, match_id, date, heads, title,
+                                   forfeit, first_to)
 
 
 # ---------- paused match (side by side) ----------

@@ -61,4 +61,4 @@ if __name__ == "__main__":
     print(calcola(250, 250, 0))           # expected (15, -9)
     print(calcola(100, 250, 0))           # expected (90, -36)
     print(calcola(250, 250, 0, "ft5"))    # expected (25, -15)
-    print(calcola(100, 250, 4, "ft5"))    # expected (50, -1)
+    print(calcola(100, 250, 4, "ft5"))    # expected (50, -1) 

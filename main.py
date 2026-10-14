@@ -444,13 +444,11 @@ async def modes(interaction: discord.Interaction):
         {"type": "heading", "text": "Other modes"},
     ]
     for m in MODES:
-        n = FIRST_TO[m["system"]]
-        extra = " (with its own elo system)" if m["system"] == "ft5" else ""
-        blocks.append({"type": "bullet", "text": f"{m['name']}: first to {n}{extra}"})
+        blocks.append({"type": "bullet", "text": f"{m['name']}: first to {FIRST_TO[m['system']]}"})
     blocks.append({"type": "paragraph", "text":
-                   "Add mode:NAME to /profile, /history, /leaderboard and the other commands. "
-                   "Each mode has its own elo, tiers and leaderboard, only lifetime (no seasons), "
-                   "and resets at the end of the year like the normal one."})
+                   "To use a mode, choose it in the mode option of /profile, /history, /leaderboard and the "
+                   "other commands. Each mode has its own elo, tiers and leaderboard, only lifetime "
+                   "(no seasons), and resets at the end of the year like the normal one."})
     data = await build_text_image("GAME MODES", GUILD_NAME, blocks)
     await interaction.followup.send(file=png_file(data, "modes.png"))
 

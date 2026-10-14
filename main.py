@@ -847,7 +847,7 @@ async def endyear(interaction: discord.Interaction):
         await i.followup.send(
             f"🎆 **Year {old_year} ended.** The final leaderboard and the profiles of {count} players "
             f"were saved: see them with `/leaderboard year:{old_year}` and `/profile year:{old_year}`. "
-            f"The game modes were saved too (add `mode:NAME`).\n"
+            f"The game modes were saved too (use the `mode` option.)\n"
             f"Year {new_year} (season {new_season}) has started: everyone is back to 0 elo (tier D), "
             f"in every mode. Discord links were kept.\nBackup saved as `{backup}`.")
         rows = await get_year_leaderboard(old_year)

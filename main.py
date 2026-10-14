@@ -638,13 +638,17 @@ async def match(interaction: discord.Interaction, winner: str, loser: str, score
                     f"{first_to}-{loser_games}", loser_games, md=md)
 
 
-@bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses 3-0 (5-0 in Classic 1v1)")
+@bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses (staff only)")
 @app_commands.describe(player="Username of the player who left the match",
                        opponent="Username of the opponent (wins by forfeit)",
-                       pause_id="Optional: number of the paused match this forfeit closes",
+                       player_games="Games the player who left had won before leaving (default 0)",
+                       opponent_games="Games the opponent had won before the forfeit (default 0)",
+                       pause_id="Optional: the paused match this forfeit closes (its score is used)",
                        mode="Game mode (leave empty for the normal mode)")
 @staff_only()
 async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: str,
+                      player_games: app_commands.Range[int, 0, 4] = 0,
+                      opponent_games: app_commands.Range[int, 0, 4] = 0,
                       pause_id: Optional[int] = None, mode: Optional[str] = None):
     await interaction.response.defer()
     ok, md = await resolve_mode(interaction, mode)
@@ -654,6 +658,12 @@ async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: s
         await interaction.followup.send("Paused matches only exist in the normal mode.")
         return
     first_to = FIRST_TO[mode_system(md)]
+    if pause_id is None and (player_games >= first_to or opponent_games >= first_to):
+        await interaction.followup.send(
+            f"In this mode a match is first to {first_to}, so before a forfeit nobody can have "
+            f"more than {first_to - 1} games.")
+        return
+
     r_l = await lookup_ign(interaction, player)
     if r_l is None:
         return
@@ -680,9 +690,15 @@ async def forfeit_cmd(interaction: discord.Interaction, player: str, opponent: s
             await interaction.followup.send(
                 f"Paused match #{pause_id} is not between these two players.")
             return
+        # the score of the paused match is the score before the forfeit
+        if pm["p1_uuid"] == uuid_l:
+            player_games, opponent_games = pm["p1_games"], pm["p2_games"]
+        else:
+            player_games, opponent_games = pm["p2_games"], pm["p1_games"]
 
-    # whatever the situation was, the player who left loses by the maximum score (3-0, or 5-0)
-    done = await log_match(interaction, uuid_w, name_w, uuid_l, name_l, f"{first_to}-0", 0,
+    # the elo is always that of the maximum loss (3-0, or 5-0); the score shown is the real one
+    shown = f"{opponent_games}-{player_games}"
+    done = await log_match(interaction, uuid_w, name_w, uuid_l, name_l, shown, 0,
                            forfeit=True, md=md)
     if done and pm is not None:
         await close_pause(pause_id, "forfeited")

@@ -39,9 +39,7 @@ def _c(cmd, text):
 def _modes_bullets():
     out = [_b("Normal: the base mode, used when you don't choose a mode. First to 3, with seasons and years.")]
     for m in MODES:
-        n = FIRST_TO[m["system"]]
-        extra = " It has its own elo system (see the Classic 1v1 page)." if m["system"] == "ft5" else ""
-        out.append(_b(f"{m['name']}: first to {n}.{extra}"))
+        out.append(_b(f"{m['name']}: first to {FIRST_TO[m['system']]}."))
     return out
 
 
@@ -74,8 +72,8 @@ GUIDE_PAGES = [
         "blocks": [
             _c("/profile [ign] [season] [year] [mode]",
                "Shows tier, elo, rank, record (wins and losses), win rate and number of forfeits. "
-               "Leave ign empty to see yourself. Add season:N for the stats of one season, year:N "
-               "for the final profile of a past year, or mode:NAME for another game mode."),
+               "Leave ign empty to see yourself. Use season:N for the stats of one season, year:N "
+               "for the final profile of a past year, or the mode option for another game mode."),
             _c("/history [ign] [mode]",
                "Match history of the current year, 10 per page, with match number, date, score and the "
                "elo gained or lost. Cancelled matches appear with a grey CANCELLED label."),
@@ -113,8 +111,8 @@ GUIDE_PAGES = [
             _h("The modes"),
             *_modes_bullets(),
             _h("How to use them"),
-            _b("Add mode:NAME to /profile, /history, /leaderboard, /matches and /cancelled. "
-               "Leave it empty to use the normal mode. The bot suggests the modes while you type."),
+            _b("Choose the mode in the mode option of /profile, /history, /leaderboard, /matches and "
+               "/cancelled. Leave it empty to use the normal mode. The bot suggests the modes while you type."),
             _b("The other modes only have a lifetime leaderboard: there are no seasons."),
             _b("At the end of the year (/endyear) every mode resets too and its final leaderboard is "
                "saved: /leaderboard mode:NAME year:N."),
@@ -186,14 +184,14 @@ GUIDE_PAGES += [
             _p("At the end of the year the staff uses /endyear: the final leaderboards and the profiles "
                "(normal mode and every other mode) are saved, then everyone goes back to 0 elo (tier D) and "
                "a new year starts. Discord links are kept."),
-            _b("See a past year: /leaderboard year:N and /profile year:N (add mode:NAME for another mode)."),
+            _b("See a past year: /leaderboard year:N and /profile year:N (use the mode option for another mode)."),
             _b("The matches of past years are hidden from /history and /matches."),
         ],
     },
     {
         "title": "Staff: matches",
         "blocks": [
-            _p("All the commands below accept mode:NAME to work on another game mode "
+            _p("The commands below have a mode option to work on another game mode "
                "(except /pause, /resume and /droppause, which are only for the normal mode)."),
             _c("/settier ign tier",
                "Assigns a tier after a tier test. The elo is set to the minimum of that tier."),
@@ -201,9 +199,10 @@ GUIDE_PAGES += [
                "Logs a finished 1v1. The score is for example 3-1 (5-3 in Classic 1v1): the bot suggests "
                "the valid scores. Both players need a tier in that mode. The elo is calculated "
                "automatically and the result card shows the match number."),
-            _c("/forfeit player opponent [pause_id]",
-               "The player who left loses 3-0 (5-0 in Classic 1v1), whatever the score was. It is marked as "
-               "FORFEIT and counted in the profile. Add pause_id to close a paused match."),
+            _c("/forfeit player opponent [player_games] [opponent_games] [pause_id]",
+               "The player who left loses by forfeit: the elo changes like the biggest loss (3-0, or 5-0 in "
+               "Classic 1v1), but the card shows the real score before the forfeit if you give the games "
+               "of each player (or the pause_id). It is counted in the profile as a forfeit."),
             _c("/pause player1 player2 games1 games2",
                "Saves an interrupted match (for example 2-1) to be continued later. The elo doesn't change yet."),
             _c("/resume pause_id winner score", "Finishes a paused match with the final score and logs it."),
@@ -216,11 +215,11 @@ GUIDE_PAGES += [
     {
         "title": "Staff: admin",
         "blocks": [
-            _c("/setelo ign elo", "Sets a player's elo by hand (0 to 5000). Accepts mode:NAME."),
+            _c("/setelo ign elo", "Sets a player's elo by hand (0 to 5000). It has a mode option."),
             _c("/removeplayer ign",
                "Removes a player from the leaderboard and /profile (normal mode: also unlinks their Discord "
                "account). Their matches stay in the history. /settier or /setelo brings them back. "
-               "Accepts mode:NAME."),
+               "It has a mode option."),
             _c("/link ign user:@member", "Links a member without the Hypixel verification."),
             _c("/endseason",
                "Ends the season: asks for confirmation and saves a backup of the database first."),

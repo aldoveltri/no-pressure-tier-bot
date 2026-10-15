@@ -24,7 +24,7 @@ from database import (init_db, init_extras, init_seasons, init_modes, upsert_pla
                       get_current, list_seasons, list_years,
                       get_season_leaderboard, get_year_leaderboard, sort_rows,
                       end_season, end_year,
-                      get_mode_by_name, get_mode, seed_modes)
+                      get_mode_by_name, get_mode, seed_modes, reset_all_data)
 from mojang import get_uuid
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, MODES, tier_from_elo
@@ -1352,6 +1352,20 @@ async def info(interaction: discord.Interaction):
     data = await build_info_image(await get_info())
     await interaction.followup.send(file=png_file(data, "info.png"))
 
+@bot.tree.command(name="resetall", description="TEST ONLY: delete ALL data and start from scratch (administrators)")
+@app_commands.describe(confirm="Type RESET EVERYTHING to confirm")
+async def resetall(interaction: discord.Interaction, confirm: str):
+    member = interaction.user
+    if not (isinstance(member, discord.Member) and member.guild_permissions.administrator):
+        await interaction.response.send_message("Only server administrators can use this command.", ephemeral=True)
+        return
+    if confirm.strip() != "RESET EVERYTHING":
+        await interaction.response.send_message("Type exactly `RESET EVERYTHING` in the confirm option.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    backup = backup_db()
+    await reset_all_data()
+    await interaction.followup.send(f"🗑️ Everything was deleted. A backup was saved as `{backup}`.")
 
 # the "mode" option suggests the game modes; the score of /match suggests the valid scores
 for _cmd in (settier, setelo, match, forfeit_cmd, removeplayer, profile, history,

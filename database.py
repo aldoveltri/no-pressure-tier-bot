@@ -933,3 +933,15 @@ async def close_pause(pause_id: int, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE paused_matches SET status = ? WHERE id = ?", (status, pause_id))
         await db.commit()
+
+# ---------- test only: delete everything ----------
+
+async def reset_all_data():
+    """Deletes EVERYTHING (players, matches, links, seasons, years, mode data) and starts from scratch."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for table in ("matches", "players", "links", "paused_matches", "season_players", "seasons",
+                      "years", "year_players", "mode_players", "mode_year_players"):
+            await db.execute(f"DELETE FROM {table}")
+        await db.execute("DELETE FROM sqlite_sequence WHERE name != 'modes'")
+        await db.commit()
+    await init_seasons()   # creates year 1 / season 1 again

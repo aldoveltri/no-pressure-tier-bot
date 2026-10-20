@@ -50,3 +50,7 @@ MODES = [
     {"key": "classic", "name": "Classic 1v1", "system": "ft5"},
     {"key": "bridge", "name": "The Bridge", "system": "ft3"},
 ]
+
+# Guild tools (breaklist, GEXP)
+GEXP_WEEKLY_REQ = 55000
+HYPIXEL_GUILD_NAME = "No Pressure"   # the exact name of the guild on Hypixel (used to read the GEXP)

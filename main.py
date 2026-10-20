@@ -325,6 +325,7 @@ async def setup_hook():
     await init_modes()
     await seed_modes([m["name"] for m in MODES])
     await bot.load_extension("namesync")
+    await bot.load_extension("breaklist")
 
 bot.setup_hook = setup_hook
 

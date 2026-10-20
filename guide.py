@@ -231,3 +231,20 @@ GUIDE_PAGES += [
         ],
     },
 ]
+
+
+GUIDE_PAGES.append({
+    "title": "Guild: breaklist",
+    "blocks": [
+        _p("The breaklist saves the players who leave the guild (or are removed) so that they can rejoin "
+           "later. They must stay guildless: joining another guild permanently removes the breaklist."),
+        _c("/breaklist view ign", "Shows when a player was added, the time spent in the guild and their GEXP."),
+        _c("/breaklist guild [page]", "The list of everyone on the breaklist."),
+        _c("/breaklist eligibility ign", "The last 7 days of GEXP and whether the player meets the requirement."),
+        _c("/breaklist add ign [start] [end] [gexp] [missing]",
+           "Staff only. Adds a player and posts the notice. The GEXP owed is calculated from the weekly "
+           "requirement and the time into the player's current 7-day cycle."),
+        _c("/breaklist remove ign", "Staff only. Takes a player off the list, for example when they rejoin."),
+        _c("/breaklist reminder ign", "Staff only. Posts a GEXP reminder in the inactivity channel."),
+    ],
+})

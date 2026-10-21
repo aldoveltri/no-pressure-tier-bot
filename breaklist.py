@@ -17,10 +17,15 @@ from PIL import Image, ImageDraw
 import graphics as g
 from config import STAFF_ROLE, GUILD_NAME, GEXP_WEEKLY_REQ, HYPIXEL_GUILD_NAME
 from database import DB_PATH
-from hypixel import _read_key
+from dotenv import dotenv_values
 from mojang import get_uuid
 
 log = logging.getLogger("tierbot")
+
+def _read_key():
+    """The Hypixel API key, read from the .env file or from the environment variable."""
+    key = dotenv_values(".env").get("HYPIXEL_API_KEY") or os.getenv("HYPIXEL_API_KEY")
+    return key.strip() if key else None
 
 CYCLE_DAYS = 7
 ROWS_PER_PAGE = 8

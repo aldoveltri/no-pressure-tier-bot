@@ -1,4 +1,4 @@
-STAFF_ROLE = "Tester"
+STAFF_ROLE = "Tier Tester"
 
 # Shown in the images. Change it here if you want the other name.
 GUILD_NAME = "NO PRESSURE"        # or "COMBO SQUAD"

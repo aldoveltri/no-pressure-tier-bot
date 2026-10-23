@@ -1481,6 +1481,42 @@ class RoadCog(commands.Cog):
         card = await self.core.road_card(data)
         await interaction.followup.send(content=data["text"], file=send_file(card, "road.png"))
 
+    @app_commands.command(name="test", description="Send a test message to every channel set in the variables (administrators)")
+    async def test(self, interaction: discord.Interaction):
+        if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("Only server administrators can use this command.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        names = [
+            ("BREAKLIST_CHANNEL_ID", "Breaklist forum"),
+            ("INACTIVITY_CHANNEL_ID", "Inactivity notices"),
+            ("EXCUSE_CHANNEL_ID", "Excuse list"),
+            ("ROAD_CHANNEL_ID", "Road to #6 forum"),
+            ("LOGS_1V1_CHANNEL_ID", "1v1 logs"),
+        ]
+        lines = []
+        for env_name, label in names:
+            cid = chan_id(env_name)
+            if cid is None:
+                lines.append(f"- {label} (`{env_name}`): NOT SET (messages go in the channel where the command is used)")
+                continue
+            ch = self.core.bot.get_channel(cid)
+            if ch is None:
+                try:
+                    ch = await self.core.bot.fetch_channel(cid)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    lines.append(f"- {label} (`{env_name}`): FAILED, channel {cid} not found or the bot cannot see it (wrong ID, or the bot is not in that server)")
+                    continue
+            res = await self.core.post_to(
+                env_name, content=f"Channel test from {interaction.user.display_name}: {label}. You can delete this.",
+                thread_name="Channel test (delete me)")
+            if res:
+                lines.append(f"- {label} (`{env_name}`): OK -> {res}")
+            else:
+                lines.append(f"- {label} (`{env_name}`): FAILED, the bot sees the channel but cannot post. Give it View Channel, Send Messages, Attach Files "
+                             "(forum: also Create Posts and Send Messages in Posts)")
+        await interaction.followup.send("**Channel test**\n" + "\n".join(lines), ephemeral=True)
+
 
 # ======================================================================================
 # schedule: notices, Road to #N, GEXP snapshot, automatic backup

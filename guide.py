@@ -466,10 +466,40 @@ ROAD_PAGES = [
 
 # ======================================================================================
 
+
+EXTRA_PAGES = [
+    {"title": "Requests and notice buttons", "blocks": [
+        _h("What the buttons do"),
+        _p("Every GEXP notice has three buttons. Only the staff and the player the notice is for (with a linked account) can press them."),
+        _b("Breaklist Me: opens a form (reason, how long you will be inactive, will you stay guildless, and the guild you will join if not). It sends a REQUEST to the staff channel, it does not add anyone by itself."),
+        _b("Excuse Me: a form with the reason and for how many weeks. It is also a request."),
+        _b("Ignore: tells the staff, in a professional message, that the player expects to reach the requirement or does not intend to act. No more notices for that player until the next week."),
+        _p("In the requests channel the staff presses Accept or Decline. On Accept the player is breaklisted or excused as usual, and the player is pinged with the decision."),
+    ]},
+    {"title": "Country flags", "blocks": [
+        _h("Flag next to the name"),
+        _c("/country set ign country", "Staff. Country name (Italy) or 2-letter code (IT). The flag shows next to the player name on the cards."),
+        _c("/country remove ign", "Staff. Removes the country."),
+        _c("/country view ign", "Everyone. Shows the country of a player."),
+    ]},
+    {"title": "Mute logs", "blocks": [
+        _h("Logging mutes"),
+        _c("/mute add ign length reason", "Staff. Length: 3d, 12h, 1d12h, 2w, 30m or perm. Posted in the mute logs channel with a ping to remove the guild bridge permissions."),
+        _c("/mute end ign", "Staff. Lifts the mute now and pings to restore the guild bridge permissions."),
+        _c("/mute view ign", "Everyone. Every mute of a player with length and reason."),
+        _c("/mute list", "Staff. Active mutes."),
+        _p("When a timed mute ends, the bot posts the reminder by itself. If MUTE_BRIDGE_ROLE_ID is set and the player linked their account, the bot removes and restores that Discord role automatically."),
+    ]},
+    {"title": "Changing the requirement", "blocks": [
+        _h("/gexp setreq amount"),
+        _p("Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and used by every new calculation, card and notice."),
+    ]},
+]
+
 GUIDE_CATEGORIES = [
     {"name": "1v1 Tier Testing", "description": "Tiers, elo, matches and leaderboards", "pages": TIER_PAGES},
     {"name": "Breaklist", "description": "Breaklist, reasons, history and days in guild", "pages": BREAKLIST_PAGES},
-    {"name": "GEXP & notices", "description": "Requirement, debt, reminders and excuses", "pages": GEXP_PAGES},
+    {"name": "GEXP & notices", "description": "Requirement, debt, reminders and excuses", "pages": GEXP_PAGES + EXTRA_PAGES},
     {"name": "Road to #6", "description": "GEXP needed to pass the guilds above", "pages": ROAD_PAGES},
 ]
 

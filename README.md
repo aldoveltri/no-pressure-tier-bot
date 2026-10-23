@@ -30,6 +30,12 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - Debt rule: the normal requirement is met first, only the GEXP beyond it pays the debt (owe 9,286+40: earn 9,326 = clear; 9,300 = 26 left). Debt carries over weeks and through the breaklist.
 - `/excuse add|remove|list ...` (staff): excusal list stored in the database.
 
+### Requests, country, mutes, requirement
+- **Breaklist Me / Excuse Me** open a form and send a REQUEST to `REQUESTS_CHANNEL_ID`: reason, how long, will they stay guildless (if not: which guild). Staff presses Accept or Decline; the player is pinged. **Ignore** posts a professional message in that channel and stops the notices for that player until the next week.
+- `/country set|remove|view`: flag next to the name on the cards.
+- `/mute add|end|view|list`: mute logs in `MUTE_LOG_CHANNEL_ID`, with a ping; optional automatic Discord role for the guild bridge (`MUTE_BRIDGE_ROLE_ID`).
+- `/gexp setreq amount`: change the weekly requirement (saved).
+
 ### Automatic notices (#inactivity-notices)
 - Friday 12:00 AM Mountain Time: players under `FRIDAY_NOTICE_MAX_GEXP` (20,000) and in guild more than 7 days.
 - Final notice `FINAL_NOTICE_HOURS_BEFORE_PURGE` (12) hours before the purge: everyone under 55,000.
@@ -62,6 +68,11 @@ main.py, database.py, graphics.py, guide.py, elo.py, config.py, mojang.py, hypix
 | `EXCUSE_CHANNEL_ID` | no | #inactivity-notices-list |
 | `ROAD_CHANNEL_ID` | no | Forum #road-to-#6-guild |
 | `LOGS_1V1_CHANNEL_ID` | no | #1v1-logs |
+| `REQUESTS_CHANNEL_ID` | no | #breaklist-and-excuse-requests |
+| `REQUESTS_PING_ROLE_ID` | no | Role pinged on every request (staff) |
+| `MUTE_LOG_CHANNEL_ID` | no | Mute logs channel |
+| `MUTE_PING_USER_ID` or `MUTE_PING_ROLE_ID` | no | Who gets pinged for mutes |
+| `MUTE_BRIDGE_ROLE_ID` | no | Discord role removed on mute and restored when it ends (needs the linked account) |
 | `VETERAN_DAYS` | no | 180 |
 | `FRIDAY_NOTICE_MAX_GEXP` | no | 20000 |
 | `FINAL_NOTICE_HOURS_BEFORE_PURGE` | no | 12 |
@@ -88,7 +99,7 @@ Channels are read at every use: change the ID in the panel and restart, no code 
 - "Friday midnight MT" = Friday 12:00 AM Mountain Time.
 - GEXP resets at midnight ET (affects only the Road post time).
 - The requirement counts down from the exact join time to the purge (55,000 x time left / week).
-- Country flag command and mute logs: not implemented yet.
+- Not done yet: the set date command for matches and the match numbering after a cancel (need main.py and database.py).
 
 ## 9. Troubleshooting
 - `cannot import name '_read_key'`: an old `breaklist.py` is on the host. Upload the new one and restart.

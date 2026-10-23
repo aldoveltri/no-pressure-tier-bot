@@ -46,16 +46,23 @@ def week_len(dt: datetime) -> int:
     return secs(week_start(dt), week_end(dt))
 
 
-def required_from(join: datetime, req: int = WEEKLY_REQ) -> int:
+def set_weekly_req(amount: int) -> None:
+    global WEEKLY_REQ
+    WEEKLY_REQ = int(amount)
+
+
+def required_from(join: datetime, req: "int | None" = None) -> int:
     """Normal requirement for someone who joins (or rejoins) at 'join': proportional to the time left
     until the next purge, rounded up to a whole GEXP."""
+    req = WEEKLY_REQ if req is None else req
     remaining = max(0, secs(join, week_end(join)))
     return min(req, ceil_div(req * remaining, week_len(join)))
 
 
-def required_elapsed(start: datetime, end: datetime, req: int = WEEKLY_REQ) -> int:
+def required_elapsed(start: datetime, end: datetime, req: "int | None" = None) -> int:
     """GEXP that should have been earned between start and end (inside one week): used for the
     GEXP a player owes when they are put on the breaklist."""
+    req = WEEKLY_REQ if req is None else req
     elapsed = max(0, secs(start, end))
     return min(req, ceil_div(req * elapsed, week_len(start)))
 

@@ -8,6 +8,7 @@ import io
 import logging
 import math
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -51,7 +52,6 @@ FINAL_HOURS_BEFORE_PURGE = _int_env("FINAL_NOTICE_HOURS_BEFORE_PURGE", 12)
 ROAD_POST_TIME = _env("ROAD_POST_TIME_ET", "00:10")      # HH:MM, Eastern Time
 AUTO_BACKUP_KEEP = _int_env("AUTO_BACKUP_KEEP", 14)
 ROAD_START_RANK = _int_env("ROAD_START_RANK", 7)             # our guild rank today (the guilds in ROAD_GUILDS are above us)
-REQ = gc.WEEKLY_REQ
 
 REMINDER = ("Stay guildless while you are on the breaklist. Joining another guild will "
             "permanently remove your ability to use the breaklist.")
@@ -145,6 +145,20 @@ CREATE TABLE IF NOT EXISTS guild_seen (
     uuid TEXT PRIMARY KEY, joined_at TEXT, rank TEXT, last_seen TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS bl_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL, ign TEXT, kind TEXT NOT NULL, reason TEXT, duration TEXT,
+    guildless INTEGER, guild TEXT, weeks INTEGER DEFAULT 1,
+    requester_id TEXT, status TEXT NOT NULL DEFAULT 'pending', decided_by TEXT, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS countries (
+    uuid TEXT PRIMARY KEY, ign TEXT, code TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mutes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL, ign TEXT, reason TEXT, start_at TEXT NOT NULL, end_at TEXT,
+    status TEXT NOT NULL DEFAULT 'active', added_by TEXT, ended_at TEXT
+);
 CREATE TABLE IF NOT EXISTS road_history (
     day TEXT NOT NULL, guild TEXT NOT NULL, exp INTEGER NOT NULL, PRIMARY KEY (day, guild)
 );
@@ -231,12 +245,101 @@ def _box(d, x, y, w, h, label, value, color=None, size=32, sub=None, sub_color=N
         d.text((x + w // 2, y + 92), sub, font=g.get_font(15, True), fill=sub_color or g.MUTED, anchor="mm")
 
 
+# ---------- country flags next to the player name ----------
+
+COUNTRY_NAMES = {
+    "argentina": "AR", "australia": "AU", "austria": "AT", "belgium": "BE", "bolivia": "BO", "brazil": "BR",
+    "bulgaria": "BG", "canada": "CA", "chile": "CL", "china": "CN", "colombia": "CO", "croatia": "HR",
+    "cuba": "CU", "cyprus": "CY", "czechia": "CZ", "czech republic": "CZ", "denmark": "DK",
+    "dominican republic": "DO", "ecuador": "EC", "egypt": "EG", "estonia": "EE", "finland": "FI",
+    "france": "FR", "germany": "DE", "greece": "GR", "hong kong": "HK", "hungary": "HU", "iceland": "IS",
+    "india": "IN", "indonesia": "ID", "iran": "IR", "iraq": "IQ", "ireland": "IE", "israel": "IL",
+    "italy": "IT", "japan": "JP", "jordan": "JO", "kazakhstan": "KZ", "kuwait": "KW", "latvia": "LV",
+    "lebanon": "LB", "lithuania": "LT", "luxembourg": "LU", "malaysia": "MY", "malta": "MT", "mexico": "MX",
+    "morocco": "MA", "netherlands": "NL", "holland": "NL", "new zealand": "NZ", "nigeria": "NG",
+    "norway": "NO", "pakistan": "PK", "paraguay": "PY", "peru": "PE", "philippines": "PH", "poland": "PL",
+    "portugal": "PT", "puerto rico": "PR", "qatar": "QA", "romania": "RO", "russia": "RU",
+    "saudi arabia": "SA", "serbia": "RS", "singapore": "SG", "slovakia": "SK", "slovenia": "SI",
+    "south africa": "ZA", "south korea": "KR", "korea": "KR", "spain": "ES", "sweden": "SE",
+    "switzerland": "CH", "taiwan": "TW", "thailand": "TH", "tunisia": "TN", "turkey": "TR", "turkiye": "TR",
+    "ukraine": "UA", "united arab emirates": "AE", "uae": "AE", "united kingdom": "GB", "uk": "GB",
+    "england": "GB", "scotland": "GB", "wales": "GB", "great britain": "GB",
+    "united states": "US", "usa": "US", "america": "US", "uruguay": "UY", "venezuela": "VE", "vietnam": "VN",
+}
+
+
+def parse_country(text):
+    """'Italy', 'italy' or 'IT' -> 'IT'. None when unknown."""
+    t = (text or "").strip().lower()
+    if t in COUNTRY_NAMES:
+        return COUNTRY_NAMES[t]
+    if re.fullmatch(r"[a-z]{2}", t):
+        return "GB" if t == "uk" else t.upper()
+    return None
+
+
+def flag_emoji(code):
+    return "".join(chr(0x1F1E6 + ord(c) - 65) for c in code.upper())
+
+
+FLAGS = {}          # player name (lower case) -> (country code, PIL image or None)
+_FLAG_IMAGES = {}   # country code -> PIL image or None
+
+
+async def _flag_image(code):
+    if code in _FLAG_IMAGES:
+        return _FLAG_IMAGES[code]
+    img = None
+    try:
+        timeout = aiohttp.ClientTimeout(total=6)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"https://flagcdn.com/w80/{code.lower()}.png") as resp:
+                if resp.status == 200:
+                    img = Image.open(io.BytesIO(await resp.read())).convert("RGBA")
+    except Exception:
+        img = None
+    _FLAG_IMAGES[code] = img
+    return img
+
+
+async def load_flag(uuid, name):
+    """Looks up the country of a player so the card drawn next shows the flag by the name."""
+    try:
+        row = await q_one("SELECT code FROM countries WHERE uuid = ?", (uuid,))
+    except Exception:
+        row = None
+    if not row:
+        FLAGS.pop(name.lower(), None)
+        return
+    FLAGS[name.lower()] = (row["code"], await _flag_image(row["code"]))
+
+
+def _name_flag(img, d, x, y, name, font):
+    """Draws the name (anchor left-middle) and, if the player has a country, its flag right after it."""
+    d.text((x, y), name, font=font, fill=g.TEXT, anchor="lm")
+    entry = FLAGS.get(name.lower())
+    if not entry:
+        return
+    code, flag = entry
+    fx = x + int(d.textlength(name, font=font)) + 18
+    h = 34
+    if flag is not None:
+        w = int(flag.width * h / flag.height)
+        small = flag.resize((w, h))
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=6, fill=255)
+        img.paste(small, (fx, y - h // 2), mask)
+    else:
+        g._badge(d, fx + 28, y, code, g.ACCENT, w=56, h=h, font_size=18)
+
+
+
 def _identity(img, d, y, name, head, badge_text, badge_color, extra=None, h=130):
     d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + h], radius=16, fill=g.ROW_BG)
     d.rounded_rectangle([g.PAD, y, g.PAD + 8, y + h], radius=4, fill=badge_color)
     g._paste_head(img, d, head, g.PAD + 34, y + 20, 90, radius=12)
     nx = g.PAD + 34 + 90 + 24
-    d.text((nx, y + 44), name, font=g.get_font(38, True), fill=g.TEXT, anchor="lm")
+    _name_flag(img, d, nx, y + 44, name, g.get_font(38, True))
     bw = max(150, int(d.textlength(badge_text, font=g.get_font(16, True))) + 40)
     g._badge(d, nx + bw // 2, y + 94, badge_text, badge_color, w=bw, h=34, font_size=16)
     if extra:
@@ -357,7 +460,7 @@ def draw_history(name, head, entries, total, page, pages):
     d.rounded_rectangle([g.PAD, top, g.WIDTH - g.PAD, top + id_h], radius=16, fill=g.ROW_BG)
     d.rounded_rectangle([g.PAD, top, g.PAD + 8, top + id_h], radius=4, fill=g.ACCENT)
     g._paste_head(img, d, head, g.PAD + 34, top + 15, 80, radius=12)
-    d.text((g.PAD + 34 + 80 + 22, top + 55), name, font=g.get_font(36, True), fill=g.TEXT, anchor="lm")
+    _name_flag(img, d, g.PAD + 34 + 80 + 22, top + 55, name, g.get_font(36, True))
     d.text((g.WIDTH - g.PAD - 30, top + 40), str(total), font=g.get_font(44, True), fill=g.ACCENT, anchor="rm")
     d.text((g.WIDTH - g.PAD - 30, top + 82), "TIMES ON BREAKLIST", font=g.get_font(14, True),
            fill=g.MUTED, anchor="rm")
@@ -394,8 +497,8 @@ def draw_history(name, head, entries, total, page, pages):
 
 def draw_eligibility(name, head, days, total, owed, source):
     """days: list of (day 'YYYY-MM-DD', gexp), oldest first."""
-    daily = REQ / 7
-    ok = total >= REQ
+    daily = gc.WEEKLY_REQ / 7
+    ok = total >= gc.WEEKLY_REQ
     id_h = 130
     rows_h = 60 + len(days) * 38 + 12
     info_h = 72 if owed is not None else 0
@@ -410,11 +513,11 @@ def draw_eligibility(name, head, days, total, owed, source):
     d.rounded_rectangle([g.PAD, y, g.PAD + 8, y + id_h], radius=4, fill=g.GREEN if ok else g.RED)
     g._paste_head(img, d, head, g.PAD + 34, y + 20, 90, radius=12)
     nx = g.PAD + 34 + 90 + 24
-    d.text((nx, y + 44), name, font=g.get_font(36, True), fill=g.TEXT, anchor="lm")
-    label = "QUALIFIES" if ok else f"MISSING {n(REQ - total)}"
+    _name_flag(img, d, nx, y + 44, name, g.get_font(36, True))
+    label = "QUALIFIES" if ok else f"MISSING {n(gc.WEEKLY_REQ - total)}"
     g._badge(d, nx + 100, y + 96, label, g.GREEN if ok else g.RED, w=200, h=34, font_size=16)
     d.text((g.WIDTH - g.PAD - 30, y + 52), n(total), font=g.get_font(44, True), fill=g.TEXT, anchor="rm")
-    d.text((g.WIDTH - g.PAD - 30, y + 98), f"of {n(REQ)} GEXP", font=g.get_font(18), fill=g.MUTED, anchor="rm")
+    d.text((g.WIDTH - g.PAD - 30, y + 98), f"of {n(gc.WEEKLY_REQ)} GEXP", font=g.get_font(18), fill=g.MUTED, anchor="rm")
 
     y += id_h + 14
     d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + rows_h], radius=16, fill=g.ROW_BG)
@@ -480,7 +583,7 @@ def draw_missing(name, head, joined, purge, r, start, current, extra_note):
     height = top + id_h + gap + box_h + gap + box_h + gap + _panel_height(text, max_lines=5) + 16 + g.FOOTER_H
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
-    g._header(d, "GEXP REQUIREMENT", f"{GUILD_NAME_DISPLAY} · weekly requirement {n(REQ)} GEXP")
+    g._header(d, "GEXP REQUIREMENT", f"{GUILD_NAME_DISPLAY} · weekly requirement {n(gc.WEEKLY_REQ)} GEXP")
     _identity(img, d, top, name, head, status, color,
               f"Joined {gc.fmt_et(joined)}", id_h)
     d.text((g.WIDTH - g.PAD - 30, top + id_h - 28), f"Purge {gc.fmt_et(purge)}", font=g.get_font(16),
@@ -668,6 +771,7 @@ class Core:
         self._guild = None
         self._stamp = 0.0
         self._lock = asyncio.Lock()
+        self.last_error = ""
 
     # ----- guild data -----
 
@@ -748,7 +852,7 @@ class Core:
     # ----- posting -----
 
     async def post_to(self, env_name, *, content=None, data=None, filename="card.png", view=None,
-                      thread_name=None, thread_key=None, mentions=None):
+                      thread_name=None, thread_key=None, mentions=None, embed=None):
         """Sends to the channel set in the environment variable (text channel, thread or forum).
         Returns the channel mention, None when no channel is configured, False when posting failed."""
         cid = chan_id(env_name)
@@ -763,6 +867,8 @@ class Core:
                 kwargs["file"] = discord.File(io.BytesIO(data), filename=filename)
             if view is not None:
                 kwargs["view"] = view
+            if embed is not None:
+                kwargs["embed"] = embed
             if isinstance(ch, discord.ForumChannel):
                 if thread_key:
                     tid = await kv_get(thread_key)
@@ -773,7 +879,7 @@ class Core:
                             return thread.mention
                         except discord.NotFound:
                             pass
-                if "content" not in kwargs and "file" not in kwargs:
+                if "content" not in kwargs and "file" not in kwargs and "embed" not in kwargs:
                     kwargs["content"] = thread_name or "Post"
                 created = await ch.create_thread(name=(thread_name or "Post")[:100], **kwargs)
                 if thread_key:
@@ -783,6 +889,7 @@ class Core:
             return ch.mention
         except (discord.HTTPException, discord.Forbidden) as e:
             log.warning("Could not post in %s (%s): %s", env_name, cid, e)
+            self.last_error = f"{type(e).__name__}: {getattr(e, 'status', '')} code {getattr(e, 'code', '')} - {getattr(e, 'text', e)}"
             return False
 
     async def post_or_here(self, interaction, env_name, **kwargs):
@@ -885,6 +992,67 @@ class Core:
         rows = await q_all("SELECT uuid FROM excuses WHERE week = ?", (key,))
         return {r["uuid"] for r in rows}
 
+    # ----- requests (Breaklist Me / Excuse Me) -----
+
+    async def post_request_channel(self, interaction, *, content=None, embed=None, view=None):
+        """Posts in REQUESTS_CHANNEL_ID; without it (tests) or if it fails, in the channel of the interaction."""
+        posted = await self.post_to("REQUESTS_CHANNEL_ID", content=content, embed=embed, view=view,
+                                    mentions=discord.AllowedMentions(users=True, roles=True))
+        if posted:
+            return posted
+        kwargs = {"allowed_mentions": discord.AllowedMentions(users=True, roles=True)}
+        if content:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not None:
+            kwargs["view"] = view
+        await interaction.channel.send(**kwargs)
+        return None
+
+    async def create_request(self, interaction, kind, uuid, *, reason, duration, guildless, guild):
+        name = await self.name_for(uuid)
+        weeks = _weeks_from(duration) if kind == "excuse" else 1
+        rid = await q_run(
+            "INSERT INTO bl_requests (uuid, ign, kind, reason, duration, guildless, guild, weeks, requester_id, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (uuid, name, kind, reason, duration, None if guildless is None else int(guildless), guild, weeks,
+             str(interaction.user.id), iso(now_utc())))
+        embed = discord.Embed(title=("Breaklist request" if kind == "breaklist" else "Excuse request"),
+                              color=0x00C8E6, timestamp=now_utc())
+        embed.add_field(name="Player", value=f"**{esc(name)}**", inline=True)
+        embed.add_field(name="Requested by", value=f"<@{interaction.user.id}>", inline=True)
+        embed.add_field(name="Reason", value=reason or "-", inline=False)
+        if kind == "breaklist":
+            embed.add_field(name="Inactive for", value=duration or "-", inline=True)
+            embed.add_field(name="Staying guildless", value="Yes" if guildless else f"No - joining **{esc(guild or '?')}**",
+                            inline=True)
+        else:
+            embed.add_field(name="Excusal length", value=f"{weeks} week(s) (asked: {duration})", inline=True)
+        embed.set_footer(text=f"Request #{rid}")
+        view = discord.ui.View(timeout=None)
+        view.add_item(RequestButton("ok", rid))
+        view.add_item(RequestButton("no", rid))
+        role = _env("REQUESTS_PING_ROLE_ID")
+        content = f"<@&{role}>" if role.isdigit() else None
+        await self.post_request_channel(interaction, content=content, embed=embed, view=view)
+        return rid
+
+    async def announce_breaklist(self, name, res, channel):
+        card = await self.breaklist_card(res["entry"], "BREAKLISTED", res["count"])
+        text = f"✅ **{esc(name)}** was added to the breaklist."
+        posted = await self.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
+                                    thread_name=name)
+        if not posted:
+            await channel.send(content=text, file=discord.File(io.BytesIO(card), filename="breaklist.png"),
+                               allowed_mentions=NO_MENTIONS)
+        return posted
+
+    async def ignored_now(self):
+        key = gc.week_start(now_utc()).date().isoformat()
+        rows = await q_all("SELECT key FROM kv WHERE key LIKE ?", (f"ignore:%:{key}",))
+        return {r["key"].split(":")[1] for r in rows}
+
     # ----- inactivity notices -----
 
     async def notice_item(self, uuid, kind, members=None):
@@ -901,7 +1069,7 @@ class Core:
         purge = gc.week_end(now)
         weekly = gc.weekly_sum(history, ws)
         joined = await self.joined_for(uuid)
-        required = gc.required_from(max(joined, ws)) if joined and joined > ws else REQ
+        required = gc.required_from(max(joined, ws)) if joined and joined > ws else gc.WEEKLY_REQ
         seconds_left = max(0, gc.secs(now, purge))
         needed = max(0, required - weekly)
         per_day = math.ceil(needed / max(seconds_left / 86400, 1 / 24)) if needed else 0
@@ -914,12 +1082,14 @@ class Core:
         view = discord.ui.View(timeout=None)
         view.add_item(NoticeButton("bl", uuid))
         view.add_item(NoticeButton("ex", uuid))
+        view.add_item(NoticeButton("ig", uuid))
         return view
 
     async def send_notice(self, it, interaction=None):
         name = await self.name_for(it["uuid"])
         it = dict(it, ign=name)
         head = await self.head_for(it["uuid"], name)
+        await load_flag(it["uuid"], name)
         data = await asyncio.to_thread(draw_notice, it, head)
         did = await self.linked_discord(it["uuid"])
         who = f"<@{did}>" if did else f"**{esc(name)}**"
@@ -941,7 +1111,7 @@ class Core:
             log.warning("No guild data: the %s notices were skipped", kind)
             return 0
         now = now_utc()
-        excused = await self.excused_now()
+        excused = await self.excused_now() | await self.ignored_now()
         on_bl = {r["uuid"] for r in await q_all("SELECT uuid FROM bl_entries WHERE status = 'active'")}
         sent = 0
         for uuid, m in members.items():
@@ -1050,12 +1220,14 @@ class Core:
 # the Breaklist Me / Excuse Me buttons (they keep working after a restart)
 # ======================================================================================
 
-class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<act>bl|ex):(?P<uuid>[0-9a-f]{32})"):
+class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<act>bl|ex|ig):(?P<uuid>[0-9a-f]{32})"):
+    """Breaklist Me / Excuse Me / Ignore on a GEXP notice. The first two only send a request to the staff."""
+    LABELS = {"bl": "Breaklist Me", "ex": "Excuse Me", "ig": "Ignore"}
+    STYLES = {"bl": discord.ButtonStyle.danger, "ex": discord.ButtonStyle.secondary, "ig": discord.ButtonStyle.secondary}
+
     def __init__(self, act: str, uuid: str):
-        super().__init__(discord.ui.Button(
-            label="Breaklist Me" if act == "bl" else "Excuse Me",
-            style=discord.ButtonStyle.danger if act == "bl" else discord.ButtonStyle.secondary,
-            custom_id=f"np:{act}:{uuid}"))
+        super().__init__(discord.ui.Button(label=self.LABELS[act], style=self.STYLES[act],
+                                           custom_id=f"np:{act}:{uuid}"))
         self.act = act
         self.uuid = uuid
 
@@ -1076,36 +1248,152 @@ class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<
 
     async def callback(self, interaction: discord.Interaction):
         core: Core = interaction.client.np_core
-        await interaction.response.defer(ephemeral=True)
-        name = await core.name_for(self.uuid)
-        by = f"{interaction.user} ({interaction.user.id})"
         if self.act == "bl":
-            res = await core.do_breaklist(self.uuid, name, reason="Requested with the notice button",
-                                          added_by=str(interaction.user.id))
-            if "error" in res:
-                await interaction.followup.send(res["error"], ephemeral=True)
-                return
-            card = await core.breaklist_card(res["entry"], "BREAKLISTED", res["count"])
-            posted = await core.post_to("BREAKLIST_CHANNEL_ID", content=f"✅ **{esc(name)}** was added to the breaklist.",
-                                        data=card, filename="breaklist.png", thread_name=name)
-            if not posted:
-                await interaction.channel.send(content=f"✅ **{esc(name)}** was added to the breaklist.",
-                                               file=discord.File(io.BytesIO(card), filename="breaklist.png"),
-                                               allowed_mentions=NO_MENTIONS)
-            msg = f"You were added to the breaklist" + (f" (posted in {posted})." if posted else ".")
+            await interaction.response.send_modal(BreaklistRequestModal(self.uuid))
+        elif self.act == "ex":
+            await interaction.response.send_modal(ExcuseRequestModal(self.uuid))
         else:
-            until = await core.add_excuse(self.uuid, name, weeks=1, reason="Requested with the notice button",
-                                          added_by=by)
-            text = f"✅ **{esc(name)}** has been excused until the purge on {gc.fmt_et(until)}."
-            posted = await core.post_to("EXCUSE_CHANNEL_ID", content=text)
-            if not posted:
-                await interaction.channel.send(content=text, allowed_mentions=NO_MENTIONS)
-            msg = "You were excused for this week."
+            await interaction.response.defer(ephemeral=True)
+            name = await core.name_for(self.uuid)
+            wkey = gc.week_start(now_utc()).date().isoformat()
+            if await kv_get(f"ignore:{self.uuid}:{wkey}"):
+                await interaction.followup.send("You already told us this week: no more notices until the next one.",
+                                                ephemeral=True)
+                return
+            await kv_set(f"ignore:{self.uuid}:{wkey}", iso(now_utc()))
+            text = (f"**{esc(name)}** (<@{interaction.user.id}>) has acknowledged the GEXP notice and has indicated "
+                    f"that they expect to reach the requirement this week, or that they do not intend to act on it. "
+                    f"No further notices will be sent for them until the next week.")
+            await core.post_request_channel(interaction, content=text)
+            await interaction.followup.send(
+                "Noted. You will not get more notices this week. The staff can see your answer.", ephemeral=True)
+
+
+def _yes_no(text):
+    t = (text or "").strip().lower()
+    if t in ("yes", "y", "si", "sì", "true", "1"):
+        return True
+    if t in ("no", "n", "false", "0"):
+        return False
+    return None
+
+
+class BreaklistRequestModal(discord.ui.Modal, title="Breaklist request"):
+    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, max_length=300,
+                                  placeholder="Why do you need the breaklist?")
+    duration = discord.ui.TextInput(label="How long will you be inactive?", max_length=60,
+                                    placeholder="e.g. 2 weeks")
+    guildless = discord.ui.TextInput(label="Will you stay guildless? (yes / no)", max_length=3, default="yes")
+    guild = discord.ui.TextInput(label="If no: which guild will you join?", required=False, max_length=40)
+
+    def __init__(self, uuid: str):
+        super().__init__()
+        self.uuid = uuid
+
+    async def on_submit(self, interaction: discord.Interaction):
+        stay = _yes_no(self.guildless.value)
+        if stay is None:
+            await interaction.response.send_message("Answer `yes` or `no` to \"Will you stay guildless?\". Press the button again.", ephemeral=True)
+            return
+        if stay is False and not self.guild.value.strip():
+            await interaction.response.send_message("You said you will not stay guildless: write the guild you will join. Press the button again.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        core: Core = interaction.client.np_core
+        await core.create_request(interaction, "breaklist", self.uuid, reason=self.reason.value.strip(),
+                                  duration=self.duration.value.strip(), guildless=stay,
+                                  guild=self.guild.value.strip() if stay is False else None)
+        await interaction.followup.send("Your breaklist request was sent to the staff. You will be pinged when they decide.", ephemeral=True)
+
+
+class ExcuseRequestModal(discord.ui.Modal, title="Excuse request"):
+    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, max_length=300,
+                                  placeholder="Why can't you reach the requirement?")
+    duration = discord.ui.TextInput(label="For how many weeks?", max_length=30, default="1")
+
+    def __init__(self, uuid: str):
+        super().__init__()
+        self.uuid = uuid
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        core: Core = interaction.client.np_core
+        await core.create_request(interaction, "excuse", self.uuid, reason=self.reason.value.strip(),
+                                  duration=self.duration.value.strip(), guildless=None, guild=None)
+        await interaction.followup.send("Your excusal request was sent to the staff. You will be pinged when they decide.", ephemeral=True)
+
+
+def _weeks_from(text):
+    m = re.search(r"\d+", text or "")
+    w = int(m.group()) if m else 1
+    if "month" in (text or "").lower():
+        w *= 4
+    return max(1, min(w, 8))
+
+
+class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:(?P<act>ok|no):(?P<rid>\d+)"):
+    """Accept / Decline under a request in the requests channel (staff only)."""
+
+    def __init__(self, act: str, rid: int):
+        super().__init__(discord.ui.Button(
+            label="Accept" if act == "ok" else "Decline",
+            style=discord.ButtonStyle.success if act == "ok" else discord.ButtonStyle.danger,
+            custom_id=f"np:rq:{act}:{rid}"))
+        self.act = act
+        self.rid = int(rid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(match["act"], int(match["rid"]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if is_guild_staff(interaction.user):
+            return True
+        await interaction.response.send_message("Only the guild staff can accept or decline requests.", ephemeral=True)
+        return False
+
+    async def callback(self, interaction: discord.Interaction):
+        core: Core = interaction.client.np_core
+        row = await q_one("SELECT * FROM bl_requests WHERE id = ?", (self.rid,))
+        if not row:
+            await interaction.response.send_message("I can't find this request any more.", ephemeral=True)
+            return
+        if row["status"] != "pending":
+            await interaction.response.send_message(f"This request was already {row['status']}.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        name = row["ign"] or await core.name_for(row["uuid"])
+        staff = interaction.user
+        if self.act == "ok":
+            if row["kind"] == "breaklist":
+                reason = row["reason"] or "Requested by the player"
+                if row["duration"]:
+                    reason = f"{reason} (away: {row['duration']})"
+                res = await core.do_breaklist(row["uuid"], name, reason=reason[:300], added_by=str(staff.id))
+                if "error" in res:
+                    await interaction.followup.send(res["error"], ephemeral=True)
+                    return
+                await core.announce_breaklist(name, res, interaction.channel)
+            else:
+                until = await core.add_excuse(row["uuid"], name, weeks=int(row["weeks"] or 1), reason=row["reason"],
+                                              added_by=f"{staff} ({staff.id})")
+                text = f"✅ **{esc(name)}** has been excused until {gc.fmt_et(until)}."
+                if not await core.post_to("EXCUSE_CHANNEL_ID", content=text):
+                    await interaction.channel.send(content=text, allowed_mentions=NO_MENTIONS)
+            status, color, word = "accepted", 0x2ECC71, "accepted"
+        else:
+            status, color, word = "declined", 0xE74C3C, "declined"
+        await q_run("UPDATE bl_requests SET status = ?, decided_by = ? WHERE id = ?", (status, str(staff.id), self.rid))
         try:
-            await interaction.message.edit(view=None)
-        except discord.HTTPException:
+            embed = interaction.message.embeds[0]
+            embed.color = color
+            embed.set_footer(text=f"{status.capitalize()} by {staff.display_name}")
+            await interaction.message.edit(embed=embed, view=None)
+        except (IndexError, discord.HTTPException):
             pass
-        await interaction.followup.send(msg, ephemeral=True)
+        await interaction.channel.send(
+            f"<@{row['requester_id']}> your {row['kind']} request for **{esc(name)}** was {word} by {esc(staff.display_name)}.",
+            allowed_mentions=USER_MENTIONS)
 
 
 # ======================================================================================
@@ -1123,6 +1411,7 @@ async def lookup(interaction: discord.Interaction, ign: str):
             f"`{ign}` is not a valid Minecraft username. Check the spelling "
             f"(3-16 characters: letters, numbers and underscores).")
         return None
+    await load_flag(result[0], result[1])
     return result
 
 
@@ -1421,6 +1710,17 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         self.core = core
         super().__init__()
 
+    @app_commands.command(name="setreq", description="Change the weekly GEXP requirement (guild staff)")
+    @app_commands.describe(amount="New weekly requirement, for example 55000")
+    @app_commands.check(staff_check)
+    async def setreq(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1000, 1_000_000]):
+        old = gc.WEEKLY_REQ
+        gc.set_weekly_req(amount)
+        await kv_set("weekly_req", amount)
+        await interaction.response.send_message(
+            f"Weekly GEXP requirement changed from **{n(old)}** to **{n(amount)}**. "
+            f"It applies to every new calculation, card and notice from now on.")
+
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")
     @app_commands.describe(
         ign="Minecraft username of the player",
@@ -1505,6 +1805,8 @@ class RoadCog(commands.Cog):
             ("EXCUSE_CHANNEL_ID", "Excuse list"),
             ("ROAD_CHANNEL_ID", "Road to #6 forum"),
             ("LOGS_1V1_CHANNEL_ID", "1v1 logs"),
+            ("REQUESTS_CHANNEL_ID", "Breaklist and excuse requests"),
+            ("MUTE_LOG_CHANNEL_ID", "Mute logs"),
         ]
         lines = []
         for env_name, label in names:
@@ -1519,15 +1821,224 @@ class RoadCog(commands.Cog):
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     lines.append(f"- {label} (`{env_name}`): FAILED, channel {cid} not found or the bot cannot see it (wrong ID, or the bot is not in that server)")
                     continue
+            kind = type(ch).__name__
+            where = getattr(getattr(ch, "guild", None), "name", "?")
+            self.core.last_error = ""
             res = await self.core.post_to(
                 env_name, content=f"Channel test from {interaction.user.display_name}: {label}. You can delete this.",
                 thread_name="Channel test (delete me)")
             if res:
-                lines.append(f"- {label} (`{env_name}`): OK -> {res}")
+                lines.append(f"- {label} (`{env_name}`): OK -> {res} [{kind}]")
             else:
-                lines.append(f"- {label} (`{env_name}`): FAILED, the bot sees the channel but cannot post. Give it View Channel, Send Messages, Attach Files "
-                             "(forum: also Create Posts and Send Messages in Posts)")
+                extra = ""
+                if isinstance(ch, discord.Thread):
+                    extra = f" Thread state: archived={ch.archived}, locked={ch.locked} (an ID of a single post, not of the forum?)."
+                lines.append(f"- {label} (`{env_name}`): FAILED [{kind} in server '{where}'] Discord says: {self.core.last_error}.{extra}")
         await interaction.followup.send("**Channel test**\n" + "\n".join(lines), ephemeral=True)
+
+
+# ======================================================================================
+# country flags, mute logs
+# ======================================================================================
+
+class CountryCog(commands.GroupCog, name="country", description="Country flags shown next to player names"):
+    def __init__(self, core: Core):
+        self.core = core
+        super().__init__()
+
+    @app_commands.command(name="set", description="Assign a country to a player: its flag shows next to the name (guild staff)")
+    @app_commands.describe(ign="Minecraft username", country="Country name (Italy) or 2-letter code (IT)")
+    @app_commands.check(staff_check)
+    async def set(self, interaction: discord.Interaction, ign: str, country: str):
+        await interaction.response.defer()
+        code = parse_country(country)
+        if code is None:
+            await interaction.followup.send("I don't know that country. Write its name (for example `Italy`) or its 2-letter code (`IT`).")
+            return
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        await q_run("INSERT INTO countries (uuid, ign, code) VALUES (?, ?, ?) "
+                    "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign, code = excluded.code", (uuid, name, code))
+        await interaction.followup.send(f"{flag_emoji(code)} **{esc(name)}** now has the country **{code}**. "
+                                        "The flag shows on their cards.")
+
+    @app_commands.command(name="remove", description="Remove the country of a player (guild staff)")
+    @app_commands.check(staff_check)
+    async def remove(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        await q_run("DELETE FROM countries WHERE uuid = ?", (uuid,))
+        FLAGS.pop(name.lower(), None)
+        await interaction.followup.send(f"Country removed from **{esc(name)}**.")
+
+    @app_commands.command(name="view", description="Show the country of a player")
+    async def view(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        row = await q_one("SELECT code FROM countries WHERE uuid = ?", (uuid,))
+        await interaction.followup.send(f"{flag_emoji(row['code'])} **{esc(name)}**: {row['code']}" if row
+                                        else f"**{esc(name)}** has no country set.")
+
+
+def parse_mute_length(text):
+    """'3d', '12h', '1d12h', '2w', '30m', 'perm' -> timedelta, 'perm' for permanent, None if unreadable."""
+    t = (text or "").strip().lower().replace(" ", "")
+    if t in ("perm", "permanent", "forever"):
+        return "perm"
+    if not re.fullmatch(r"(\d+[wdhm])+", t):
+        return None
+    units = {"w": 7 * 86400, "d": 86400, "h": 3600, "m": 60}
+    total = sum(int(v) * units[u] for v, u in re.findall(r"(\d+)([wdhm])", t))
+    return timedelta(seconds=total) if total > 0 else None
+
+
+def mute_length_text(row):
+    if not row["end_at"]:
+        return "Permanent"
+    return gc.fmt_duration((from_iso(row["end_at"]) - from_iso(row["start_at"])).total_seconds())
+
+
+def mute_ping():
+    uid, rid = _env("MUTE_PING_USER_ID"), _env("MUTE_PING_ROLE_ID")
+    if uid.isdigit():
+        return f"<@{uid}>"
+    if rid.isdigit():
+        return f"<@&{rid}>"
+    return ""
+
+
+MUTE_MENTIONS = discord.AllowedMentions(users=True, roles=True)
+
+
+class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
+    def __init__(self, core: Core):
+        self.core = core
+        super().__init__()
+
+    async def bridge_role(self, uuid, give: bool):
+        """Optional: removes / restores a Discord role (MUTE_BRIDGE_ROLE_ID) of the linked member."""
+        rid = _env("MUTE_BRIDGE_ROLE_ID")
+        did = await self.core.linked_discord(uuid)
+        if not rid.isdigit() or not did:
+            return False
+        for guild in self.core.bot.guilds:
+            member, role = guild.get_member(did), guild.get_role(int(rid))
+            if member and role:
+                try:
+                    await (member.add_roles(role, reason="Mute ended") if give
+                           else member.remove_roles(role, reason="Muted"))
+                    return True
+                except discord.HTTPException:
+                    return False
+        return False
+
+    @app_commands.command(name="add", description="Log a mute with its length and reason (guild staff)")
+    @app_commands.describe(ign="Minecraft username", length="3d, 12h, 1d12h, 2w, 30m or perm", reason="Why they were muted")
+    @app_commands.check(staff_check)
+    async def add(self, interaction: discord.Interaction, ign: str, length: str, reason: str):
+        await interaction.response.defer()
+        td = parse_mute_length(length)
+        if td is None:
+            await interaction.followup.send("I couldn't read the length. Use `3d`, `12h`, `1d12h`, `2w`, `30m` or `perm`.")
+            return
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        if await q_one("SELECT id FROM mutes WHERE uuid = ? AND status = 'active'", (uuid,)):
+            await interaction.followup.send(f"**{esc(name)}** already has an active mute. Use `/mute end` first.")
+            return
+        now = now_utc()
+        end = None if td == "perm" else now + td
+        mid = await q_run("INSERT INTO mutes (uuid, ign, reason, start_at, end_at, status, added_by) "
+                          "VALUES (?, ?, ?, ?, ?, 'active', ?)",
+                          (uuid, name, reason, iso(now), iso(end) if end else None, str(interaction.user.id)))
+        auto = await self.bridge_role(uuid, give=False)
+        embed = discord.Embed(title="Mute logged", color=0xE74C3C, timestamp=now)
+        embed.add_field(name="Player", value=f"**{esc(name)}**", inline=True)
+        embed.add_field(name="Length", value="Permanent" if end is None else gc.fmt_duration(td.total_seconds()), inline=True)
+        embed.add_field(name="Ends", value="Never" if end is None else gc.fmt_et(end), inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(text=f"Mute #{mid} · by {interaction.user.display_name}")
+        todo = ("Guild bridge permissions removed automatically." if auto
+                else "Please remove their guild bridge permissions manually.")
+        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=f"{mute_ping()} {todo}".strip(), embed=embed,
+                                         mentions=MUTE_MENTIONS)
+        if not posted:
+            await interaction.followup.send(content=f"{mute_ping()} {todo}".strip(), embed=embed, allowed_mentions=MUTE_MENTIONS)
+        else:
+            await interaction.followup.send(f"Mute logged in {posted}.")
+
+    @app_commands.command(name="end", description="Lift a mute now (guild staff)")
+    @app_commands.check(staff_check)
+    async def end(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        row = await q_one("SELECT id FROM mutes WHERE uuid = ? AND status = 'active'", (uuid,))
+        if not row:
+            await interaction.followup.send(f"**{esc(name)}** has no active mute.")
+            return
+        await q_run("UPDATE mutes SET status = 'ended', ended_at = ? WHERE id = ?", (iso(now_utc()), row["id"]))
+        await self.announce_end(uuid, name, row["id"], by=interaction.user.display_name, interaction=interaction)
+
+    async def announce_end(self, uuid, name, mid, *, by, interaction=None):
+        auto = await self.bridge_role(uuid, give=True)
+        todo = ("Guild bridge permissions restored automatically." if auto
+                else "Please restore their guild bridge permissions.")
+        text = f"{mute_ping()} The mute of **{esc(name)}** (#{mid}) is over ({by}). {todo}".strip()
+        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=text, mentions=MUTE_MENTIONS)
+        if interaction is not None:
+            if posted:
+                await interaction.followup.send(f"Mute lifted. Notice sent in {posted}.")
+            else:
+                await interaction.followup.send(text, allowed_mentions=MUTE_MENTIONS)
+
+    @app_commands.command(name="view", description="Show the mutes of a player: length and reason")
+    async def view(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        rows = await q_all("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", (uuid,))
+        if not rows:
+            await interaction.followup.send(f"**{esc(name)}** has no mutes.")
+            return
+        embed = discord.Embed(title=f"Mutes of {name}", color=0x00C8E6)
+        embed.description = f"Total: **{len(rows)}**"
+        for row in rows[:8]:
+            when = gc.fmt_date(from_iso(row["start_at"]))
+            state = "Active" if row["status"] == "active" else "Ended"
+            embed.add_field(name=f"#{row['id']} · {state} · {mute_length_text(row)} · {when}",
+                            value=row["reason"] or "-", inline=False)
+        if len(rows) > 8:
+            embed.set_footer(text=f"Showing the latest 8 of {len(rows)}")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="list", description="Players with an active mute (guild staff)")
+    @app_commands.check(staff_check)
+    async def list(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        rows = await q_all("SELECT * FROM mutes WHERE status = 'active' ORDER BY id")
+        if not rows:
+            await interaction.followup.send("No active mutes.")
+            return
+        lines = []
+        for r in rows:
+            ends = "never" if not r["end_at"] else gc.fmt_et(from_iso(r["end_at"]))
+            lines.append(f"**{esc(r['ign'])}** · {mute_length_text(r)} · ends {ends}\n{r['reason'] or '-'}")
+        await interaction.followup.send("\n\n".join(lines)[:1900])
 
 
 # ======================================================================================
@@ -1578,6 +2089,14 @@ class Scheduler(commands.Cog):
         except Exception:
             log.exception("The Road post failed")
         try:
+            mutes = getattr(self.core, "mute_cog", None)
+            for row in await q_all("SELECT * FROM mutes WHERE status = 'active' AND end_at IS NOT NULL"):
+                if from_iso(row["end_at"]) <= now and mutes is not None:
+                    await q_run("UPDATE mutes SET status = 'expired', ended_at = ? WHERE id = ?", (iso(now), row["id"]))
+                    await mutes.announce_end(row["uuid"], row["ign"], row["id"], by="expired")
+        except Exception:
+            log.exception("The mute expiry check failed")
+        try:
             last = await kv_get("snapshot_at")
             if not last or (now - from_iso(last)).total_seconds() > 6 * 3600:
                 await kv_set("snapshot_at", iso(now))
@@ -1615,11 +2134,17 @@ def prune_auto_backups(keep: int):
 
 async def setup(bot: commands.Bot):
     await setup_tables()
+    saved = await kv_get("weekly_req")
+    if saved and saved.isdigit():
+        gc.set_weekly_req(int(saved))
     core = Core(bot)
     bot.np_core = core
-    bot.add_dynamic_items(NoticeButton)
+    bot.add_dynamic_items(NoticeButton, RequestButton)
     await bot.add_cog(Breaklist(core))
     await bot.add_cog(Excuse(core))
     await bot.add_cog(GexpTools(core))
     await bot.add_cog(RoadCog(core))
+    await bot.add_cog(CountryCog(core))
+    core.mute_cog = MuteCog(core)
+    await bot.add_cog(core.mute_cog)
     await bot.add_cog(Scheduler(core))

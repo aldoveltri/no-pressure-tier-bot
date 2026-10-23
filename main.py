@@ -821,6 +821,7 @@ async def removeplayer(interaction: discord.Interaction, ign: str, mode: Optiona
 
 @bot.tree.command(name="endseason", description="End the current season and start a new one (staff only)")
 @staff_only()
+@admin_only()
 async def endseason(interaction: discord.Interaction):
     async def do_season(i: discord.Interaction):
         backup = backup_db()
@@ -846,6 +847,7 @@ async def endseason(interaction: discord.Interaction):
 
 @bot.tree.command(name="endyear", description="End the year: save everything and start from scratch (staff only)")
 @staff_only()
+@admin_only()
 async def endyear(interaction: discord.Interaction):
     async def do_year(i: discord.Interaction):
         backup = backup_db()

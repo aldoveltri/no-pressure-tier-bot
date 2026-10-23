@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import shutil
 import aiosqlite
 from datetime import datetime, timedelta, timezone

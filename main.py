@@ -34,6 +34,12 @@ from graphics import (build_leaderboard_image, build_match_image, build_profile_
                       build_history_image, build_settier_image, build_matchlog_image,
                       build_setelo_image, build_info_image,
                       build_pause_image, build_paused_list_image, build_text_image)
+def admin_only():
+    async def pred(interaction: discord.Interaction) -> bool:
+        if interaction.user.guild_permissions.administrator:
+            return True
+        raise app_commands.CheckFailure("Only server administrators can use this command.")
+    return app_commands.check(pred)
 
 load_dotenv()
 

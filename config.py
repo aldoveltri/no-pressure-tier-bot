@@ -1,3 +1,4 @@
+import os
 STAFF_ROLE = STAFF_ROLE = os.getenv("TIER_TESTER_ROLE", "Tier Tester")
 
 # Shown in the images. Change it here if you want the other name.

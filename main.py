@@ -31,6 +31,7 @@ from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, MODES, tier_from_elo
 from elo import calcola, FIRST_TO
 from guide import GUIDE_PAGES, GUIDE_CATEGORIES
+from guide_cards import render_page
 from graphics import (build_leaderboard_image, build_match_image, build_profile_image,
                       build_history_image, build_settier_image, build_matchlog_image,
                       build_setelo_image, build_info_image,
@@ -359,6 +360,7 @@ async def setup_hook():
     await seed_modes([m["name"] for m in MODES])
     await bot.load_extension("namesync")
     await bot.load_extension("breaklist")
+    await bot.load_extension("evidence")
 
 bot.setup_hook = setup_hook
 
@@ -459,9 +461,9 @@ class GuideView(discord.ui.View):
         if key not in self.cache:
             cat_obj = GUIDE_CATEGORIES[self.cat]
             p = cat_obj["pages"][self.page]
-            self.cache[key] = await build_text_image(
-                p["title"].upper(), f"{GUILD_NAME} · {cat_obj['name']}", p["blocks"],
-                footer=f"Page {self.page + 1}/{len(cat_obj['pages'])}")
+            self.cache[key] = await asyncio.to_thread(
+                render_page, p["title"].upper(), f"{GUILD_NAME} · {cat_obj['name']}", p["blocks"],
+                f"Page {self.page + 1}/{len(cat_obj['pages'])}")
         f = discord.File(io.BytesIO(self.cache[key]), filename="guide.png")
         await it.response.edit_message(attachments=[f], view=self)
 
@@ -473,9 +475,9 @@ async def guide(interaction: discord.Interaction):
     key = (cat, page)
     cat_obj = GUIDE_CATEGORIES[cat]
     p = cat_obj["pages"][page]
-    data = await build_text_image(
-        p["title"].upper(), f"{GUILD_NAME} · {cat_obj['name']}", p["blocks"],
-        footer=f"Page {page + 1}/{len(cat_obj['pages'])}")
+    data = await asyncio.to_thread(
+        render_page, p["title"].upper(), f"{GUILD_NAME} · {cat_obj['name']}", p["blocks"],
+        f"Page {page + 1}/{len(cat_obj['pages'])}")
     view = GuideView(interaction.user.id, cat, page)
     view.cache[key] = data
     view.message = await interaction.followup.send(file=png_file(data, "guide.png"), view=view)

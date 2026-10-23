@@ -168,6 +168,11 @@ CREATE TABLE IF NOT EXISTS road_history (
 async def setup_tables():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
+        for col in ("channel_id", "message_id"):
+            try:
+                await db.execute(f"ALTER TABLE bl_requests ADD COLUMN {col} TEXT")
+            except aiosqlite.OperationalError:
+                pass
         await db.commit()
 
 
@@ -318,11 +323,16 @@ def _name_flag(img, d, x, y, name, font):
     """Draws the name (anchor left-middle) and, if the player has a country, its flag right after it."""
     d.text((x, y), name, font=font, fill=g.TEXT, anchor="lm")
     entry = FLAGS.get(name.lower())
-    if not entry:
-        return
-    code, flag = entry
     fx = x + int(d.textlength(name, font=font)) + 18
     h = 34
+    if not entry:
+        # no country set yet: a neutral grey flag with a question mark
+        w = 51
+        d.rounded_rectangle([fx, y - h // 2, fx + w, y + h // 2], radius=6, fill=(96, 102, 116),
+                            outline=(150, 156, 170), width=2)
+        d.text((fx + w // 2, y), "?", font=g.get_font(22, True), fill=(235, 238, 245), anchor="mm")
+        return
+    code, flag = entry
     if flag is not None:
         w = int(flag.width * h / flag.height)
         small = flag.resize((w, h))
@@ -437,7 +447,7 @@ def draw_breaklist_list(rows, heads, page, pages, total):
         d.rounded_rectangle([g.PAD, y0, g.PAD + 8, y0 + g.ROW_H - 8], radius=4, fill=g.ACCENT)
         hx = g.PAD + 28
         g._paste_head(img, d, heads.get(e["uuid"]), hx, cy - g.HEAD // 2, g.HEAD)
-        d.text((hx + g.HEAD + 12, cy), e["ign"], font=g.get_font(24, True), fill=g.TEXT, anchor="lm")
+        _name_flag(img, d, hx + g.HEAD + 12, cy, e["ign"], g.get_font(24, True))
         d.text((520, cy), gc.fmt_date(from_iso(e["added_at"])), font=g.get_font(18, True), fill=g.TEXT, anchor="mm")
         d.text((640, cy), str(int(e["days_total"])), font=g.get_font(20, True), fill=g.TEXT, anchor="mm")
         owed = e["owed"]
@@ -625,7 +635,8 @@ def draw_notice(it, head):
     need_line = (f"You still need {n(it['needed'])} GEXP, about {n(it['per_day'])} GEXP per day.")
     if it.get("debt"):
         need_line += f" You also owe {n(it['debt'])} extra GEXP from before."
-    how = "Use the buttons below: Breaklist Me puts you on the breaklist, Excuse Me excuses you for this week."
+    how = ("Use the buttons below: Breaklist Me and Excuse Me send a request to the staff (you can cancel it "
+           "until they decide), Ignore tells the staff you will reach the requirement or don't intend to act.")
     text = f"{why} {need_line} {how}"
 
     id_h, box_h, gap = 130, 110, 14
@@ -772,6 +783,7 @@ class Core:
         self._stamp = 0.0
         self._lock = asyncio.Lock()
         self.last_error = ""
+        self.last_message = None
 
     # ----- guild data -----
 
@@ -875,17 +887,18 @@ class Core:
                     if tid and tid.isdigit():
                         try:
                             thread = self.bot.get_channel(int(tid)) or await self.bot.fetch_channel(int(tid))
-                            await thread.send(**kwargs)
+                            self.last_message = await thread.send(**kwargs)
                             return thread.mention
                         except discord.NotFound:
                             pass
                 if "content" not in kwargs and "file" not in kwargs and "embed" not in kwargs:
                     kwargs["content"] = thread_name or "Post"
                 created = await ch.create_thread(name=(thread_name or "Post")[:100], **kwargs)
+                self.last_message = created.message
                 if thread_key:
                     await kv_set(thread_key, created.thread.id)
                 return created.thread.mention
-            await ch.send(**kwargs)
+            self.last_message = await ch.send(**kwargs)
             return ch.mention
         except (discord.HTTPException, discord.Forbidden) as e:
             log.warning("Could not post in %s (%s): %s", env_name, cid, e)
@@ -969,6 +982,7 @@ class Core:
         if count is None:
             count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (entry["uuid"],)))["c"]
         head = await self.head_for(entry["uuid"], entry["ign"])
+        await load_flag(entry["uuid"], entry["ign"])
         return await asyncio.to_thread(draw_breaklist_card, entry, head, title, count)
 
     # ----- excuses -----
@@ -996,6 +1010,7 @@ class Core:
 
     async def post_request_channel(self, interaction, *, content=None, embed=None, view=None):
         """Posts in REQUESTS_CHANNEL_ID; without it (tests) or if it fails, in the channel of the interaction."""
+        self.last_message = None
         posted = await self.post_to("REQUESTS_CHANNEL_ID", content=content, embed=embed, view=view,
                                     mentions=discord.AllowedMentions(users=True, roles=True))
         if posted:
@@ -1007,8 +1022,34 @@ class Core:
             kwargs["embed"] = embed
         if view is not None:
             kwargs["view"] = view
-        await interaction.channel.send(**kwargs)
+        self.last_message = await interaction.channel.send(**kwargs)
         return None
+
+    async def pending_request(self, uuid):
+        return await q_one("SELECT * FROM bl_requests WHERE uuid = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+                           (uuid,))
+
+    async def cancel_request(self, rid, by_user):
+        """Cancels a pending request (by the requester or by the staff). Returns the text to show."""
+        row = await q_one("SELECT * FROM bl_requests WHERE id = ?", (rid,))
+        if not row:
+            return "I can't find this request any more."
+        if row["status"] != "pending":
+            return f"This request was already {row['status']}."
+        await q_run("UPDATE bl_requests SET status = 'cancelled', decided_by = ? WHERE id = ?", (str(by_user.id), rid))
+        try:
+            if row.get("channel_id") and row.get("message_id"):
+                ch = self.bot.get_channel(int(row["channel_id"])) or await self.bot.fetch_channel(int(row["channel_id"]))
+                msg = await ch.fetch_message(int(row["message_id"]))
+                embed = msg.embeds[0]
+                embed.color = 0x95A5A6
+                embed.set_footer(text=f"Cancelled by {by_user.display_name}")
+                await msg.edit(embed=embed, view=None)
+                await ch.send(f"Request #{rid} for **{esc(row['ign'] or '?')}** was cancelled by "
+                              f"{esc(by_user.display_name)}.", allowed_mentions=NO_MENTIONS)
+        except Exception:
+            log.warning("Could not update the cancelled request message", exc_info=True)
+        return f"Your {row['kind']} request was cancelled. You can send a different one now."
 
     async def create_request(self, interaction, kind, uuid, *, reason, duration, guildless, guild):
         name = await self.name_for(uuid)
@@ -1033,9 +1074,13 @@ class Core:
         view = discord.ui.View(timeout=None)
         view.add_item(RequestButton("ok", rid))
         view.add_item(RequestButton("no", rid))
+        view.add_item(RequestButton("cx", rid))
         role = _env("REQUESTS_PING_ROLE_ID")
         content = f"<@&{role}>" if role.isdigit() else None
         await self.post_request_channel(interaction, content=content, embed=embed, view=view)
+        if self.last_message is not None:
+            await q_run("UPDATE bl_requests SET channel_id = ?, message_id = ? WHERE id = ?",
+                        (str(self.last_message.channel.id), str(self.last_message.id), rid))
         return rid
 
     async def announce_breaklist(self, name, res, channel):
@@ -1248,6 +1293,15 @@ class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<
 
     async def callback(self, interaction: discord.Interaction):
         core: Core = interaction.client.np_core
+        pending = await core.pending_request(self.uuid)
+        if pending:
+            view = discord.ui.View(timeout=120)
+            view.add_item(CancelPendingButton(pending["id"]))
+            await interaction.response.send_message(
+                f"There is already a **{pending['kind']}** request waiting for the staff (#{pending['id']}). "
+                f"You can send another one only after this one is closed. Changed your mind? Cancel it here.",
+                view=view, ephemeral=True)
+            return
         if self.act == "bl":
             await interaction.response.send_modal(BreaklistRequestModal(self.uuid))
         elif self.act == "ex":
@@ -1267,6 +1321,19 @@ class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<
             await core.post_request_channel(interaction, content=text)
             await interaction.followup.send(
                 "Noted. You will not get more notices this week. The staff can see your answer.", ephemeral=True)
+
+
+class CancelPendingButton(discord.ui.Button):
+    """'Cancel my request' shown to the player when they press a notice button with a request still open."""
+
+    def __init__(self, rid: int):
+        super().__init__(label="Cancel my request", style=discord.ButtonStyle.danger)
+        self.rid = rid
+
+    async def callback(self, interaction: discord.Interaction):
+        core: Core = interaction.client.np_core
+        text = await core.cancel_request(self.rid, interaction.user)
+        await interaction.response.edit_message(content=text + " Press a button on the notice again.", view=None)
 
 
 def _yes_no(text):
@@ -1298,12 +1365,15 @@ class BreaklistRequestModal(discord.ui.Modal, title="Breaklist request"):
         if stay is False and not self.guild.value.strip():
             await interaction.response.send_message("You said you will not stay guildless: write the guild you will join. Press the button again.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
         core: Core = interaction.client.np_core
+        if await core.pending_request(self.uuid):
+            await interaction.response.send_message("You already have a request waiting for the staff.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
         await core.create_request(interaction, "breaklist", self.uuid, reason=self.reason.value.strip(),
                                   duration=self.duration.value.strip(), guildless=stay,
                                   guild=self.guild.value.strip() if stay is False else None)
-        await interaction.followup.send("Your breaklist request was sent to the staff. You will be pinged when they decide.", ephemeral=True)
+        await interaction.followup.send("Your breaklist request was sent to the staff. You will be pinged when they decide. Press a notice button again if you want to cancel it.", ephemeral=True)
 
 
 class ExcuseRequestModal(discord.ui.Modal, title="Excuse request"):
@@ -1316,8 +1386,11 @@ class ExcuseRequestModal(discord.ui.Modal, title="Excuse request"):
         self.uuid = uuid
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
         core: Core = interaction.client.np_core
+        if await core.pending_request(self.uuid):
+            await interaction.response.send_message("You already have a request waiting for the staff.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
         await core.create_request(interaction, "excuse", self.uuid, reason=self.reason.value.strip(),
                                   duration=self.duration.value.strip(), guildless=None, guild=None)
         await interaction.followup.send("Your excusal request was sent to the staff. You will be pinged when they decide.", ephemeral=True)
@@ -1331,14 +1404,15 @@ def _weeks_from(text):
     return max(1, min(w, 8))
 
 
-class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:(?P<act>ok|no):(?P<rid>\d+)"):
-    """Accept / Decline under a request in the requests channel (staff only)."""
+class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:(?P<act>ok|no|cx):(?P<rid>\d+)"):
+    """Accept / Decline (staff only) and Cancel (the requester or the staff) under a request."""
+    LABELS = {"ok": "Accept", "no": "Decline", "cx": "Cancel request"}
+    STYLES = {"ok": discord.ButtonStyle.success, "no": discord.ButtonStyle.danger,
+              "cx": discord.ButtonStyle.secondary}
 
     def __init__(self, act: str, rid: int):
-        super().__init__(discord.ui.Button(
-            label="Accept" if act == "ok" else "Decline",
-            style=discord.ButtonStyle.success if act == "ok" else discord.ButtonStyle.danger,
-            custom_id=f"np:rq:{act}:{rid}"))
+        super().__init__(discord.ui.Button(label=self.LABELS[act], style=self.STYLES[act],
+                                           custom_id=f"np:rq:{act}:{rid}"))
         self.act = act
         self.rid = int(rid)
 
@@ -1349,11 +1423,22 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if is_guild_staff(interaction.user):
             return True
+        if self.act == "cx":
+            row = await q_one("SELECT requester_id FROM bl_requests WHERE id = ?", (self.rid,))
+            if row and str(row["requester_id"]) == str(interaction.user.id):
+                return True
+            await interaction.response.send_message("Only the person who sent this request (or the staff) can cancel it.",
+                                                    ephemeral=True)
+            return False
         await interaction.response.send_message("Only the guild staff can accept or decline requests.", ephemeral=True)
         return False
 
     async def callback(self, interaction: discord.Interaction):
         core: Core = interaction.client.np_core
+        if self.act == "cx":
+            await interaction.response.defer(ephemeral=True)
+            await interaction.followup.send(await core.cancel_request(self.rid, interaction.user), ephemeral=True)
+            return
         row = await q_one("SELECT * FROM bl_requests WHERE id = ?", (self.rid,))
         if not row:
             await interaction.response.send_message("I can't find this request any more.", ephemeral=True)
@@ -1529,6 +1614,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         page = min(page, pages)
         chunk = rows[(page - 1) * per: page * per]
         heads = await g._fetch_heads([(e["uuid"], e["ign"]) for e in chunk])
+        for e in chunk:
+            await load_flag(e["uuid"], e["ign"])
         card = await asyncio.to_thread(draw_breaklist_list, chunk, heads, page, pages, len(rows))
         await interaction.followup.send(file=send_file(card, "breaklist_guild.png"))
 
@@ -1807,6 +1894,8 @@ class RoadCog(commands.Cog):
             ("LOGS_1V1_CHANNEL_ID", "1v1 logs"),
             ("REQUESTS_CHANNEL_ID", "Breaklist and excuse requests"),
             ("MUTE_LOG_CHANNEL_ID", "Mute logs"),
+            ("BLACKLIST_CHANNEL_ID", "Guild blacklist"),
+            ("EVIDENCE_CHANNEL_ID", "Evidence"),
         ]
         lines = []
         for env_name, label in names:

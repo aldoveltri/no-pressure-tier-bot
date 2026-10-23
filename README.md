@@ -36,6 +36,9 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - `/mute add|end|view|list`: mute logs in `MUTE_LOG_CHANNEL_ID`, with a ping; optional automatic Discord role for the guild bridge (`MUTE_BRIDGE_ROLE_ID`).
 - `/gexp setreq amount`: change the weekly requirement (saved).
 
+### Blacklist, evidence, Urchin
+- `/blacklist add|edit|remove|list`, `/evidence add` (report with replay/media, reason, votes, end/cancel, verdict), `/urchin check|scan|test` and an automatic Urchin watch of the guild members every 30 minutes. Files: `evidence.py`, loaded by `main.py`.
+
 ### Automatic notices (#inactivity-notices)
 - Friday 12:00 AM Mountain Time: players under `FRIDAY_NOTICE_MAX_GEXP` (20,000) and in guild more than 7 days.
 - Final notice `FINAL_NOTICE_HOURS_BEFORE_PURGE` (12) hours before the purge: everyone under 55,000.
@@ -51,7 +54,7 @@ Daily post (`ROAD_POST_TIME_ET`, default 00:10 ET) in the road forum: GEXP gap t
 `/link /unlink /profile /history /matches /cancelled /paused /leaderboard /info /modes /rules /guide /ping` and staff `/settier /setelo /match /forfeit /undo /pause /resume /droppause /removeplayer /refreshnames`. Admin only: `/endseason /endyear /resetall` (resetall is for tests: remove before launch). Every 1v1 result is also posted in the 1v1 logs channel.
 
 ## 4. Project files
-main.py, database.py, graphics.py, guide.py, elo.py, config.py, mojang.py, hypixel.py, namesync.py, **gexpcalc.py** (requirement maths), **breaklist.py** (breaklist, excuses, gexp, notices, road), requirements.txt.
+main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, elo.py, config.py, mojang.py, hypixel.py, namesync.py, **gexpcalc.py** (requirement maths), **breaklist.py** (breaklist, excuses, gexp, notices, road), requirements.txt.
 
 ## 5. Environment variables (host panel or `.env`)
 | Variable | Required | Meaning |
@@ -71,6 +74,12 @@ main.py, database.py, graphics.py, guide.py, elo.py, config.py, mojang.py, hypix
 | `REQUESTS_CHANNEL_ID` | no | #breaklist-and-excuse-requests |
 | `REQUESTS_PING_ROLE_ID` | no | Role pinged on every request (staff) |
 | `MUTE_LOG_CHANNEL_ID` | no | Mute logs channel |
+| `BLACKLIST_CHANNEL_ID` | no | Guild blacklist channel or forum |
+| `EVIDENCE_CHANNEL_ID` | no | Evidence channel or forum (cheating reports and Urchin alerts go in a thread named Evidence) |
+| `EVIDENCE_STAFF_ONLY` | no | Empty or 0: everybody can use blacklist / evidence (test). 1: staff only (voting stays open to everybody) |
+| `URCHIN_API_KEY` | for Urchin | Key from the Urchin Discord |
+| `URCHIN_URL` | no | Address template with {uuid} {name} {key}, if the default is not right |
+| `URCHIN_KEY_HEADER` | no | If Urchin wants the key in a header (for example Authorization) |
 | `MUTE_PING_USER_ID` or `MUTE_PING_ROLE_ID` | no | Who gets pinged for mutes |
 | `MUTE_BRIDGE_ROLE_ID` | no | Discord role removed on mute and restored when it ends (needs the linked account) |
 | `VETERAN_DAYS` | no | 180 |

@@ -306,13 +306,13 @@ BREAKLIST_PAGES = [
         "title": "Staff: add a player",
         "blocks": [
             _p(f"Breaklist commands are for the {GUILD_ROLE} role and administrators. The {TESTER_ROLE} role "
-               f"cannot use them. All dates are in Eastern Time (ET) and written month/day/year."),
+               f"cannot use them. Dates are in Eastern Time (ET), written year/month/day: 2026/10/03 or 2026/10/03 6:00 PM. The year is optional (10/03 6:00 PM)."),
             _c("/breaklist add ign [reason] [start] [end] [gexp] [days] [debt]",
                "Adds the player and posts the notice card."),
             _h("The options"),
             _b("ign: the Minecraft username."),
             _b("reason: why the player is breaklisted. Everybody can read it."),
-            _b("start: when the player joined the guild, for example 10/03/2026 or 10/03/2026 6:00 PM. "
+            _b("start: when the player joined the guild, for example 2026/10/03 or 2026/10/03 6:00 PM. "
                "Default: the join date from Hypixel."),
             _b("end: when the player was breaklisted. Default: now."),
             _b("gexp: the GEXP they earned this week before the breaklist. Default: read from the Hypixel data "
@@ -324,7 +324,7 @@ BREAKLIST_PAGES = [
                "The bot reads the join date and the GEXP from Hypixel, works out how much GEXP should have "
                "been earned so far this week, and saves the difference as GEXP owed."),
             _h("Example: someone breaklisted before the bot existed"),
-            _c("/breaklist add ign:Notch reason:Vacation start:08/15/2026 end:09/10/2026 gexp:12000 days:23 debt:40",
+            _c("/breaklist add ign:Notch reason:Vacation start:2026/08/15 end:2026/09/10 gexp:12000 days:23 debt:40",
                "Enter the numbers by hand: the days in guild, the GEXP of that week and the old debt. "
                "Do it once for every player who is already on the breaklist, so that their days are saved."),
             _p("What the owed GEXP is: the requirement is proportional to the time spent in the guild during "
@@ -400,7 +400,7 @@ GEXP_PAGES = [
             _b("Earns 9,300: the requirement is met and the debt goes down by 14, so 26 are still owed."),
             _c("/gexp missing ign joined [start_gexp] [current_gexp] [debt] [save]",
                f"({GUILD_ROLE}) Calculates what a player must earn this week. Write the day and exact time "
-               f"they joined, in Eastern Time (for example 10/21/2026 6:00 PM), and the GEXP they had at that "
+               f"they joined, in Eastern Time (for example 2026/10/21 6:00 PM, the year is optional), and the GEXP they had at that "
                f"moment. The card shows the normal requirement, the starting GEXP, the current GEXP, the extra "
                f"debt, the total target and the remaining debt after the progress."),
             _b("current_gexp: if you leave it empty, the bot reads it from Hypixel (the GEXP since the start "
@@ -421,8 +421,10 @@ GEXP_PAGES = [
             _b("12 hours before the purge: the final reminder, for every member under their requirement."),
             _p("Players who are excused for the week or on the breaklist do not get a reminder."),
             _h("The buttons"),
-            _b("Breaklist Me: puts the player on the breaklist and posts the notice in the No Pressure Breaklist."),
-            _b("Excuse Me: excuses the player for this week and posts it in the excused list channel."),
+            _b("Breaklist Me and Excuse Me open a short form and send a REQUEST to the staff. Nobody is added "
+               "automatically: the staff accepts or declines (see Breaklist > Requests)."),
+            _b("Ignore: tells the staff that you will reach the requirement or don't intend to act. No more "
+               "reminders for you until the next week."),
             _p("Only the staff and the player the notice is for can click them (the player must have linked "
                "their Discord account with /link; staff can link a member by hand with /link ign user:@member)."),
             _c("/breaklist notice ign [kind]", f"({GUILD_ROLE}) Posts the notice of one player right now."),
@@ -438,7 +440,7 @@ GEXP_PAGES = [
                f"channel with the date of the purge when it ends."),
             _c("/excuse remove ign", f"({GUILD_ROLE}) Removes the current excuse of a player."),
             _c("/excuse list", f"({GUILD_ROLE}) Everybody who is excused now or later, with the last date."),
-            _p("Players can also excuse themselves with the Excuse Me button of the reminder."),
+            _p("Players can ask for an excuse with the Excuse Me button of the reminder: the staff decides."),
         ],
     },
 ]
@@ -453,15 +455,16 @@ ROAD_PAGES = [
         "blocks": [
             _p("Every day the bot posts how much GEXP the guild needs to pass the guilds above it on Hypixel, "
                "with a card, the daily numbers of each guild and a chart of the gap over time."),
-            _p("The format is: 6,662,105 gexp from #6 guild, then the same for #5 and #4."),
+            _p("The card lists every guild above us, from the nearest one up to #1: for example "
+               "6,662,105 gexp from #6 guild, 10,007,334 gexp from #5 guild, and so on."),
             _h("How it works"),
             _b("The bot compares the total guild GEXP of our guild with the guilds listed by the staff in the "
                "host settings (ROAD_GUILDS)."),
             _b("It posts at the daily GEXP reset, in the Road to #6 guild forum."),
             _b("From the second day it shows how much GEXP per day we and they earn, and how many days it would "
                "take to catch up. The chart needs two days of data."),
-            _b("When the guild passes the #6 guild, the titles change by themselves: the goals become #5, #4 "
-               "and #3, and so on."),
+            _b("When we pass a guild, it leaves the card and we take its place: the title goes from #6 to #5, "
+               "then #4... If that guild passes us again, it comes back."),
             _c("/road", "Shows the card right now, without posting it in the forum."),
         ],
     },
@@ -470,40 +473,128 @@ ROAD_PAGES = [
 # ======================================================================================
 
 
-EXTRA_PAGES = [
-    {"title": "Requests and notice buttons", "blocks": [
-        _h("What the buttons do"),
-        _p("Every GEXP notice has three buttons. Only the staff and the player the notice is for (with a linked account) can press them."),
-        _b("Breaklist Me: opens a form (reason, how long you will be inactive, will you stay guildless, and the guild you will join if not). It sends a REQUEST to the staff channel, it does not add anyone by itself."),
-        _b("Excuse Me: a form with the reason and for how many weeks. It is also a request."),
-        _b("Ignore: tells the staff, in a professional message, that the player expects to reach the requirement or does not intend to act. No more notices for that player until the next week."),
-        _p("In the requests channel the staff presses Accept or Decline. On Accept the player is breaklisted or excused as usual, and the player is pinged with the decision."),
+REQUEST_PAGES = [
+    {"title": "Requests: the notice buttons", "blocks": [
+        _p("Every GEXP notice has three buttons. Only the staff and the player the notice is for (with a "
+           "linked account) can press them."),
+        _h("The three buttons"),
+        _c("Breaklist Me", "Opens a form: reason, how long you will be inactive, will you stay guildless "
+           "(yes / no) and, if not, which guild you will join. It sends a REQUEST to the staff. Nobody is "
+           "added by themselves."),
+        _c("Excuse Me", "Opens a form with the reason and the number of weeks. It is a request too."),
+        _c("Ignore", "Tells the staff you will reach the requirement or don't intend to act. No more "
+           "notices for you until the next week."),
+        _h("What happens next"),
+        _b("The request appears in the requests channel with Accept and Decline (staff only)."),
+        _b("The player is pinged with the decision. On Accept they are breaklisted or excused as usual."),
+        _b("You can send only one request at a time. Changed your mind? Press any notice button: you get a "
+           "Cancel my request button. Or press Cancel request under the request itself."),
+        _b("After it is closed or cancelled you can send a different one (for example Excuse Me instead of "
+           "Breaklist Me)."),
     ]},
+]
+
+BLACKLIST_PAGES = [
+    {"title": "Overview", "blocks": [
+        _p("The guild blacklist is the list of players who are not welcome (cheating, boosting, ...). It "
+           "lives in the blacklist channel. Cheating reports are discussed in the evidence thread, where "
+           "everybody can vote and the staff decides."),
+        _h("The three parts"),
+        _b("Blacklist: add, edit, remove and list. Reason and duration are free text."),
+        _b("Evidence: a cheating report with replay codes / media, a reason, votes and a final verdict."),
+        _b("Urchin: when a guild member is tagged on Urchin the bot posts it in the evidence channel."),
+    ]},
+    {"title": "Blacklist commands", "blocks": [
+        _c("/blacklist add ign reason duration", "Adds a player and posts the notice (with their skin) in "
+           "the blacklist channel. Reason and duration are free text: write what you want."),
+        _c("/blacklist edit ign [reason] [duration]", "Changes the reason and/or the duration."),
+        _c("/blacklist remove ign", "Takes the player off the blacklist and posts it."),
+        _c("/blacklist list", "Everyone on the blacklist, with reason and duration."),
+    ]},
+    {"title": "Cheating reports", "blocks": [
+        _c("/evidence add ign", "Opens a report in the evidence thread: the suspect's skin and two fields "
+           "to complete."),
+        _h("The fields"),
+        _b("Replay / media: one or more replay codes and/or links. Press the button as many times as you "
+           "like: each time it adds lines."),
+        _b("Reason: why the player is suspected."),
+        _h("The buttons"),
+        _b("Sufficient evidence / Insufficient evidence: everybody can vote, one vote each, and you can change "
+           "your vote. The totals are shown on the report."),
+        _b("End cheating report: shows two choices, Add to blacklist (asks reason and duration, posts in the "
+           "blacklist channel) or Insufficient evidence."),
+        _b("Cancel: closes the report as cancelled, with an optional reason."),
+        _p("When a report is closed, a final verdict message is posted in the evidence thread, positive or "
+           "negative."),
+        _h("Who can do what"),
+        _b("Everybody: vote."),
+        _b("Staff: add replay / media, reason, cancel, end the report, and all the blacklist commands."),
+    ]},
+    {"title": "Urchin tags", "blocks": [
+        _p("Urchin is a community cheater detection system that saves tagged players. The bot checks the "
+           "members of the guild about every 30 minutes."),
+        _b("When a member gets a new tag, the bot posts it in the evidence channel with the tags and a "
+           "Create cheating report button. The report starts with the Urchin tags as the reason."),
+        _b("The first check only remembers who is already tagged, so the channel is not flooded."),
+        _c("/urchin check ign", "Shows the Urchin tags of a player."),
+        _c("/urchin scan", "Posts now every guild member who is tagged."),
+        _c("/urchin test ign", "Debug: shows the raw answer of the Urchin API."),
+    ]},
+]
+
+EXTRA_PAGES = [
     {"title": "Country flags", "blocks": [
-        _h("Flag next to the name"),
-        _c("/country set ign country", "Staff. Country name (Italy) or 2-letter code (IT). The flag shows next to the player name on the cards."),
+        _p("A country can be assigned to a player. Its flag then shows next to the player name on the cards. "
+           "Players without a country show a grey flag with a question mark."),
+        _c("/country set ign country", "Staff. Country name (Italy) or 2-letter code (IT)."),
         _c("/country remove ign", "Staff. Removes the country."),
         _c("/country view ign", "Everyone. Shows the country of a player."),
     ]},
     {"title": "Mute logs", "blocks": [
-        _h("Logging mutes"),
-        _c("/mute add ign length reason", "Staff. Length: 3d, 12h, 1d12h, 2w, 30m or perm. Posted in the mute logs channel with a ping to remove the guild bridge permissions."),
+        _c("/mute add ign length reason", "Staff. Length: 3d, 12h, 1d12h, 2w, 30m or perm. It is logged in the "
+           "mute logs channel with a ping to remove the guild bridge permissions."),
         _c("/mute end ign", "Staff. Lifts the mute now and pings to restore the guild bridge permissions."),
-        _c("/mute view ign", "Everyone. Every mute of a player with length and reason."),
-        _c("/mute list", "Staff. Active mutes."),
-        _p("When a timed mute ends, the bot posts the reminder by itself. If MUTE_BRIDGE_ROLE_ID is set and the player linked their account, the bot removes and restores that Discord role automatically."),
+        _c("/mute view ign", "Everyone. Every mute of a player, with length and reason."),
+        _c("/mute list", "Staff. The active mutes."),
+        _p("When a timed mute ends the bot posts the reminder by itself. If a bridge role is set up and the "
+           "player linked their account, the role is removed and restored automatically."),
     ]},
-    {"title": "Changing the requirement", "blocks": [
-        _h("/gexp setreq amount"),
-        _p("Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and used by every new calculation, card and notice."),
+    {"title": "Settings and tests", "blocks": [
+        _c("/gexp setreq amount", "Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and "
+           "used by every new calculation, card and notice."),
+        _c("/test", "Administrators. Sends a test message to every channel set in the host variables and "
+           "tells you which ones work."),
+        _c("/guide", "This guide."),
     ]},
 ]
 
+
+def _overview(title, text, items):
+    return {"title": "Overview", "blocks": [_p(text), _h(title), *[_b(x) for x in items]]}
+
+
+TIER_PAGES.insert(0, _overview(
+    "What you will find here",
+    "The 1v1 part of the bot: tier tests, elo, matches, leaderboards, seasons and years.",
+    ["Getting started: link your account and first commands.",
+     "Your stats and leaderboards: for everyone.",
+     "Game modes, elo tables, seasons and years.",
+     "Tier Tester commands and administrator commands."]))
+BREAKLIST_PAGES.append(REQUEST_PAGES[0])
+GEXP_PAGES.insert(0, _overview(
+    "What you will find here",
+    "How the weekly GEXP requirement works and what the bot does about it.",
+    ["The weekly requirement and the exact joining time.",
+     "Extra GEXP debt and /gexp missing.",
+     "Automatic notices and the excuse list."]))
+
 GUIDE_CATEGORIES = [
     {"name": "1v1 Tier Testing", "description": "Tiers, elo, matches and leaderboards", "pages": TIER_PAGES},
-    {"name": "Breaklist", "description": "Breaklist, reasons, history and days in guild", "pages": BREAKLIST_PAGES},
-    {"name": "GEXP & notices", "description": "Requirement, debt, reminders and excuses", "pages": GEXP_PAGES + EXTRA_PAGES},
+    {"name": "Breaklist", "description": "Breaklist, history, days in guild and requests", "pages": BREAKLIST_PAGES},
+    {"name": "GEXP & notices", "description": "Requirement, debt, reminders and excuses", "pages": GEXP_PAGES},
     {"name": "Road to #6", "description": "GEXP needed to pass the guilds above", "pages": ROAD_PAGES},
+    {"name": "Blacklist & evidence", "description": "Blacklist, cheating reports and Urchin", "pages": BLACKLIST_PAGES},
+    {"name": "Extras", "description": "Country flags, mute logs and settings", "pages": EXTRA_PAGES},
 ]
 
 # the old flat list is kept for any code that still imports it

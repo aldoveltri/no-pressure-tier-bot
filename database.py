@@ -718,11 +718,20 @@ async def cancel_match(m):
 
 # ---------- end of season / end of year ----------
 
-def backup_db() -> str:
-    """Copies the database next to itself (so, inside the volume on Railway). Returns the file name."""
-    name = f"backup_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.db"
-    shutil.copy2(DB_PATH, os.path.join(os.path.dirname(DB_PATH) or ".", name))
-    return name
+def backup_db(reason="manual"):
+    """Salva in <cartella del db>/backups/AAAA-MM/AAAAMMGG_HHMMSS_<motivo>.db e ritorna il percorso relativo."""
+    folder = os.path.dirname(os.path.abspath(DB_PATH))
+    now = datetime.now()
+    sub = os.path.join(folder, "backups", now.strftime("%Y-%m"))
+    os.makedirs(sub, exist_ok=True)
+    name = f"{now.strftime('%Y%m%d_%H%M%S')}_{reason}.db"
+    dest = os.path.join(sub, name)
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(dest)
+    with dst:
+        src.backup(dst)
+    src.close(); dst.close()
+    return os.path.relpath(dest, folder)
 
 
 async def _snapshot_tiers(db, season_id: int):

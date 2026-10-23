@@ -1,5 +1,6 @@
-discord.py
-aiohttp
-aiosqlite
+discord.py>=2.4
 python-dotenv
-Pillow
+aiohttp
+pillow
+aiosqlite
+tzdata

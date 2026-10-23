@@ -106,16 +106,46 @@ def fmt_et(dt: datetime) -> str:
     return f"{local.strftime('%m/%d/%Y')} {hour}:{local.strftime('%M %p')} ET"
 
 
-_FORMATS = ("%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M %p", "%m/%d/%Y %I %p", "%Y-%m-%d %H:%M", "%m/%d/%Y", "%Y-%m-%d")
+_TIME_FORMATS = ("%H:%M", "%I:%M %p", "%I %p")
 
 
 def parse_et(text) -> "datetime | None":
-    """'10/21/2026 6:00 PM', '10/21/2026 18:00' or '10/21/2026' (= midnight). Eastern Time. None if unreadable."""
+    """Eastern Time. Date first, optional time after it:
+       '2026/10/21 6:00 PM', '2026/10/21 18:00', '2026/10/21' (= midnight),
+       '10/21 6:00 PM' (no year: the current year), also the old '10/21/2026 6:00 PM' and '2026-10-21'.
+       Returns None if unreadable."""
     text = re.sub(r"(\d)\s*(am|pm)\b", r"\1 \2", (text or "").strip(), flags=re.I).upper()
     text = re.sub(r"\s+", " ", text)
-    for fmt in _FORMATS:
-        try:
-            return datetime.strptime(text, fmt).replace(tzinfo=ET)
-        except ValueError:
-            continue
-    return None
+    if not text:
+        return None
+    date_txt, _, time_txt = text.partition(" ")
+    date = None
+    m = re.fullmatch(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", date_txt)
+    if m:
+        y, mo, d = map(int, m.groups())
+    else:
+        m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", date_txt)
+        if m:
+            mo, d, y = map(int, m.groups())
+        else:
+            m = re.fullmatch(r"(\d{1,2})/(\d{1,2})", date_txt)
+            if not m:
+                return None
+            mo, d = map(int, m.groups())
+            y = datetime.now(ET).year
+    hh = mm = 0
+    if time_txt:
+        t = None
+        for fmt in _TIME_FORMATS:
+            try:
+                t = datetime.strptime(time_txt.strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if t is None:
+            return None
+        hh, mm = t.hour, t.minute
+    try:
+        return datetime(y, mo, d, hh, mm, tzinfo=ET)
+    except ValueError:
+        return None

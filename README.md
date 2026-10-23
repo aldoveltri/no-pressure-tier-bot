@@ -26,7 +26,7 @@ Use `/guide` in Discord for the same, category by category.
 Days in guild = banked days + time since the Hypixel join date while in guild. They freeze on the breaklist and are never lost.
 
 ### GEXP and excuses
-- `/gexp missing ign join start_gexp [current] [debt] [save]`: normal requirement (55,000 x time left until Tuesday 12:00 AM ET / week length, to the second), starting GEXP, current GEXP, extra debt, total target, remaining debt. Time format: `10/21/2026 6:00 PM` (ET). `save:True` stores the remaining debt.
+- `/gexp missing ign join start_gexp [current] [debt] [save]`: normal requirement (55,000 x time left until Tuesday 12:00 AM ET / week length, to the second), starting GEXP, current GEXP, extra debt, total target, remaining debt. Date format in commands: `2026/10/21 6:00 PM` (ET), or without the year `10/21 6:00 PM`, or `2026/10/21 18:00`. The cards always show MM/DD/YYYY. `save:True` stores the remaining debt.
 - Debt rule: the normal requirement is met first, only the GEXP beyond it pays the debt (owe 9,286+40: earn 9,326 = clear; 9,300 = 26 left). Debt carries over weeks and through the breaklist.
 - `/excuse add|remove|list ...` (staff): excusal list stored in the database.
 
@@ -36,7 +36,10 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - The card says why, and how much GEXP is needed. Buttons: **Breaklist Me** (posts "added" in the breaklist post) and **Excuse Me** (posts "excused" in the excuse list channel). Only staff and the pinged linked account can press them.
 
 ### Road to #6
-Daily post (`ROAD_POST_TIME_ET`, default 12:00 AM ET) in the road forum: GEXP gap to the three guilds above us, daily rates, ETA, chart. Needs `ROAD_GUILDS` (see below). After passing #6 the titles move up.
+Daily post (`ROAD_POST_TIME_ET`, default 00:10 ET) in the road forum: GEXP gap to the three guilds above us, daily rates, ETA, chart. Needs `ROAD_GUILDS` (see below). After passing #6 the titles move up.
+
+### Test
+- `/test` (administrators): sends a test message to every channel set in the variables and tells you which ones work.
 
 ### 1v1 (unchanged)
 `/link /unlink /profile /history /matches /cancelled /paused /leaderboard /info /modes /rules /guide /ping` and staff `/settier /setelo /match /forfeit /undo /pause /resume /droppause /removeplayer /refreshnames`. Admin only: `/endseason /endyear /resetall` (resetall is for tests: remove before launch). Every 1v1 result is also posted in the 1v1 logs channel.
@@ -62,8 +65,9 @@ main.py, database.py, graphics.py, guide.py, elo.py, config.py, mojang.py, hypix
 | `VETERAN_DAYS` | no | 180 |
 | `FRIDAY_NOTICE_MAX_GEXP` | no | 20000 |
 | `FINAL_NOTICE_HOURS_BEFORE_PURGE` | no | 12 |
-| `ROAD_POST_TIME_ET` | no | `00:00` |
-| `ROAD_GUILDS` | for Road | Comma-separated names of the guilds near us, e.g. `GuildA,GuildB,GuildC,GuildD` (we compare their total GEXP with ours) |
+| `ROAD_POST_TIME_ET` | no | `00:10` |
+| `ROAD_GUILDS` | for Road | Exact names of ALL the guilds above us (today #6, #5, #4, #3, #2, #1), comma separated. The card goes up to #1 |
+| `ROAD_START_RANK` | no | Our rank today (default 7). Each listed guild we pass moves us up one place |
 | `AUTO_BACKUP_KEEP` | no | Automatic backups kept (14) |
 
 Channels are read at every use: change the ID in the panel and restart, no code change. **Channel variable empty = the output goes in the channel where you used the command** (handy for testing without those channels).

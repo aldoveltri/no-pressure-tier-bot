@@ -50,6 +50,7 @@ FRIDAY_MAX_GEXP = _int_env("FRIDAY_NOTICE_MAX_GEXP", 20000)
 FINAL_HOURS_BEFORE_PURGE = _int_env("FINAL_NOTICE_HOURS_BEFORE_PURGE", 12)
 ROAD_POST_TIME = _env("ROAD_POST_TIME_ET", "00:10")      # HH:MM, Eastern Time
 AUTO_BACKUP_KEEP = _int_env("AUTO_BACKUP_KEEP", 14)
+ROAD_START_RANK = _int_env("ROAD_START_RANK", 7)             # our guild rank today (the guilds in ROAD_GUILDS are above us)
 REQ = gc.WEEKLY_REQ
 
 REMINDER = ("Stay guildless while you are on the breaklist. Joining another guild will "
@@ -561,28 +562,33 @@ def draw_notice(it, head):
 
 # ---------- Road to #N ----------
 
-CHART_COLORS = [None, (167, 112, 255), (74, 144, 255)]   # the first one is the accent
+ROAD_COLORS = [(255, 200, 61), (255, 143, 74), (167, 112, 255), (74, 144, 255), (80, 220, 190), (255, 105, 140)]
+# a colour per place ahead of us: nearest guild first
 
 
 def draw_road(ours, targets, series, title):
-    """ours = {'name','exp','rank'}; targets = [{'rank','name','exp','gap','eta','rate_us','rate_them'}];
-    series = {target name: [(day, gap), ...]}"""
-    row_h = 92
-    chart_h = 300
+    """ours = {'name','exp','rank'}; targets = [{'rank','name','exp','gap','eta','rate_us','rate_them'}] (nearest first,
+    up to 6, down to #1); series = {target name: [(day, gap), ...]}"""
+    n_t = len(targets)
+    row_h = 84 if n_t > 3 else 92
+    chart_h = 330
     top = g.HEADER_H + 16
-    height = top + 14 + len(targets) * (row_h + 10) + chart_h + 16 + g.FOOTER_H
+    leg_rows = 1 + (n_t > 3)
+    height = top + 14 + n_t * (row_h + 10) + chart_h + 16 + g.FOOTER_H
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
     g._header(d, title, f"{GUILD_NAME_DISPLAY} · currently #{ours['rank']} with {n(ours['exp'])} GEXP")
 
-    colors = [g.ACCENT, (167, 112, 255), (74, 144, 255)]
+    def color(i):
+        return ROAD_COLORS[i % len(ROAD_COLORS)]
+
     y = top
     for i, t in enumerate(targets):
-        c = colors[i % 3]
+        c = color(i)
         d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + row_h], radius=14, fill=g.ROW_BG)
         d.rounded_rectangle([g.PAD, y, g.PAD + 8, y + row_h], radius=4, fill=c)
         g._badge(d, g.PAD + 70, y + row_h // 2, f"#{t['rank']}", c, w=80, h=40, font_size=22)
-        d.text((g.PAD + 130, y + 24), t["name"], font=g.get_font(24, True), fill=g.TEXT, anchor="lm")
+        d.text((g.PAD + 130, y + 22), t["name"], font=g.get_font(24, True), fill=g.TEXT, anchor="lm")
         if t["rate_us"] is not None and t["rate_them"] is not None:
             line1 = f"You {n(t['rate_us'])}/day  ·  Them {n(t['rate_them'])}/day"
             if t["eta"] is not None:
@@ -593,12 +599,12 @@ def draw_road(ours, targets, series, title):
                 line2 = ""
         else:
             line1, line2 = "Daily stats appear after a few days of data", ""
-        d.text((g.PAD + 130, y + 54), line1, font=g.get_font(15), fill=g.SOFT, anchor="lm")
+        d.text((g.PAD + 130, y + row_h - 34), line1, font=g.get_font(15), fill=g.SOFT, anchor="lm")
         if line2:
-            d.text((g.PAD + 130, y + 75), line2, font=g.get_font(15, True), fill=g.GREEN if "Catch" in line2 else g.RED,
-                   anchor="lm")
-        d.text((g.WIDTH - g.PAD - 24, y + 36), n(t["gap"]), font=g.get_font(34, True), fill=c, anchor="rm")
-        d.text((g.WIDTH - g.PAD - 24, y + 68), f"GEXP FROM #{t['rank']} GUILD", font=g.get_font(13, True),
+            d.text((g.PAD + 130, y + row_h - 14), line2, font=g.get_font(15, True),
+                   fill=g.GREEN if "Catch" in line2 else g.RED, anchor="lm")
+        d.text((g.WIDTH - g.PAD - 24, y + row_h // 2 - 8), n(t["gap"]), font=g.get_font(32, True), fill=c, anchor="rm")
+        d.text((g.WIDTH - g.PAD - 24, y + row_h // 2 + 24), f"GEXP FROM #{t['rank']} GUILD", font=g.get_font(13, True),
                fill=g.MUTED, anchor="rm")
         y += row_h + 10
 
@@ -606,7 +612,7 @@ def draw_road(ours, targets, series, title):
     d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + chart_h], radius=16, fill=g.ROW_BG)
     d.text((g.PAD + 24, y + 26), "GAP OVER TIME (GEXP)", font=g.get_font(15, True), fill=g.MUTED, anchor="lm")
     px0, px1 = g.PAD + 110, g.WIDTH - g.PAD - 40
-    py0, py1 = y + 60, y + chart_h - 80
+    py0, py1 = y + 60, y + chart_h - 70 - 24 * (leg_rows - 1)
     series = {k: v for k, v in series.items() if len(v) >= 2}      # a single point makes no line
     all_pts = [v for pts in series.values() for _, v in pts]
     days_all = sorted({day for pts in series.values() for day, _ in pts})
@@ -632,16 +638,21 @@ def draw_road(ours, targets, series, title):
         for i, t in enumerate(targets):
             pts = [xy(day, v) for day, v in series.get(t["name"], [])]
             if len(pts) >= 2:
-                d.line(pts, fill=colors[i % 3], width=4)
+                d.line(pts, fill=color(i), width=4)
             for p in pts:
-                d.ellipse([p[0] - 4, p[1] - 4, p[0] + 4, p[1] + 4], fill=colors[i % 3])
+                d.ellipse([p[0] - 4, p[1] - 4, p[0] + 4, p[1] + 4], fill=color(i))
         d.text((px0, py1 + 20), days_all[0][5:].replace("-", "/"), font=g.get_font(14), fill=g.MUTED, anchor="lm")
         d.text((px1, py1 + 20), days_all[-1][5:].replace("-", "/"), font=g.get_font(14), fill=g.MUTED, anchor="rm")
-    lx = g.PAD + 24
+    # legend, wrapped on two lines when there are many guilds
+    lx, ly = g.PAD + 24, y + chart_h - 22 - 24 * (leg_rows - 1)
     for i, t in enumerate(targets):
-        d.rounded_rectangle([lx, y + chart_h - 29, lx + 14, y + chart_h - 15], radius=3, fill=colors[i % 3])
-        d.text((lx + 22, y + chart_h - 22), f"#{t['rank']} {t['name']}", font=g.get_font(14), fill=g.SOFT, anchor="lm")
-        lx += 40 + int(d.textlength(f"#{t['rank']} {t['name']}", font=g.get_font(14))) + 20
+        label = f"#{t['rank']} {t['name']}"
+        w = 22 + int(d.textlength(label, font=g.get_font(14))) + 20
+        if lx + w > g.WIDTH - g.PAD - 20 and lx > g.PAD + 24:
+            lx, ly = g.PAD + 24, ly + 24
+        d.rounded_rectangle([lx, ly - 7, lx + 14, ly + 7], radius=3, fill=color(i))
+        d.text((lx + 22, ly), label, font=g.get_font(14), fill=g.SOFT, anchor="lm")
+        lx += w + 6
     g._footer(d, height, "GEXP = total guild experience")
     return g._png(img)
 
@@ -961,7 +972,7 @@ class Core:
         """Returns (data, error). data = {'ours', 'targets', 'series', 'title', 'text'}."""
         names = [x.strip() for x in _env("ROAD_GUILDS").split(",") if x.strip()]
         if not names:
-            return None, "ROAD_GUILDS is not set (the names of the guilds ranked above you, comma separated)."
+            return None, "ROAD_GUILDS is not set (the names of the guilds ranked above you, e.g. the #6, #5 and #4 guilds, comma separated)."
         ours_guild = await api_guild({"name": HYPIXEL_GUILD_NAME})
         if not ours_guild:
             return None, "I couldn't read our guild from Hypixel (check the API key and HYPIXEL_GUILD_NAME)."
@@ -977,9 +988,10 @@ class Core:
                         "ON CONFLICT(day, guild) DO UPDATE SET exp = excluded.exp", (day, nm, exp))
 
         above = sorted([o for o in others if o[1] > our_exp], key=lambda o: o[1])
-        rank = len(above) + 1
+        # We start at ROAD_START_RANK (7) with every listed guild above us; each listed guild we pass moves us up one place.
+        rank = ROAD_START_RANK - (len(others) - len(above))
         if not above:
-            return None, "No guild in ROAD_GUILDS is above us: we are #1 of the list!"
+            return None, "No guild in ROAD_GUILDS is above us: we are #1!"
         targets = []
         hist = await q_all("SELECT day, guild, exp FROM road_history WHERE day >= ? ORDER BY day",
                            ((datetime.now(gc.ET) - timedelta(days=14)).date().isoformat(),))
@@ -997,7 +1009,7 @@ class Core:
 
         rate_us = rate(our_name)
         series = {}
-        for i, (nm, exp) in enumerate(above[:3]):
+        for i, (nm, exp) in enumerate(above[:6]):
             gap = exp - our_exp
             rate_them = rate(nm)
             eta = None
@@ -1127,7 +1139,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.describe(
         ign="Minecraft username of the player",
         reason="Why the player is being breaklisted (everyone can read it)",
-        start="When they joined the guild (Eastern Time): 10/03/2026 or 10/03/2026 6:00 PM. Default: from Hypixel",
+        start="When they joined the guild (Eastern Time): 2026/10/03 or 2026/10/03 6:00 PM (the year is optional: 10/03 6:00 PM). Default: from Hypixel",
         end="When they were breaklisted (Eastern Time). Default: now",
         gexp="GEXP earned this week before the breaklist. Default: taken from the saved Hypixel data",
         days="Total days the player has spent in the guild (use it for players breaklisted before the bot)",
@@ -1147,12 +1159,12 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if start:
             start_dt = gc.parse_et(start)
             if start_dt is None:
-                await interaction.followup.send("I couldn't read the start date. Use `10/03/2026` or `10/03/2026 6:00 PM` (Eastern Time).")
+                await interaction.followup.send("I couldn't read the start date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (Eastern Time).")
                 return
         if end:
             end_dt = gc.parse_et(end)
             if end_dt is None:
-                await interaction.followup.send("I couldn't read the end date. Use `10/03/2026` or `10/03/2026 6:00 PM` (Eastern Time).")
+                await interaction.followup.send("I couldn't read the end date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (Eastern Time).")
                 return
         if start_dt and end_dt and end_dt <= start_dt:
             await interaction.followup.send("The end date must be after the start date.")
@@ -1233,7 +1245,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
 
     @app_commands.command(name="remove", description="Take a player off the breaklist when they rejoin (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
-                           when="When they rejoined (Eastern Time). Default: now")
+                           when="When they rejoined (Eastern Time): 2026/10/03 6:00 PM, year optional. Default: now")
     @app_commands.check(staff_check)
     async def remove(self, interaction: discord.Interaction, ign: str, when: Optional[str] = None):
         await interaction.response.defer()
@@ -1247,7 +1259,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             return
         back = gc.parse_et(when) if when else now_utc()
         if back is None:
-            await interaction.followup.send("I couldn't read the date. Use `10/03/2026` or `10/03/2026 6:00 PM` (Eastern Time).")
+            await interaction.followup.send("I couldn't read the date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (Eastern Time).")
             return
         await q_run("UPDATE bl_entries SET status = 'returned', returned_at = ? WHERE id = ?", (iso(back), entry["id"]))
         days, _ = await self.core.days_info(uuid)
@@ -1412,7 +1424,7 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")
     @app_commands.describe(
         ign="Minecraft username of the player",
-        joined="When they joined or rejoined, Eastern Time: 10/21/2026 6:00 PM",
+        joined="When they joined or rejoined, Eastern Time: 2026/10/21 6:00 PM (the year is optional: 10/21 6:00 PM)",
         start_gexp="The GEXP they had at that moment (default 0)",
         current_gexp="Their GEXP now (default: taken from Hypixel)",
         debt="Extra GEXP debt (default: the saved debt)",
@@ -1427,8 +1439,8 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         join_dt = gc.parse_et(joined)
         if join_dt is None:
             await interaction.followup.send(
-                "I couldn't read the join time. Use month/day/year and the time in Eastern Time, "
-                "for example `10/21/2026 6:00 PM` or `10/21/2026 18:00`.")
+                "I couldn't read the join time. Use year/month/day and the time in Eastern Time, "
+                "for example `2026/10/21 6:00 PM`, `2026/10/21 18:00` or without year `10/21 6:00 PM`.")
             return
         r = await lookup(interaction, ign)
         if r is None:

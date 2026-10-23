@@ -29,11 +29,12 @@ from mojang import get_uuid
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, MODES, tier_from_elo
 from elo import calcola, FIRST_TO
-from guide import GUIDE_PAGES
+from guide import GUIDE_PAGES, GUIDE_CATEGORIES
 from graphics import (build_leaderboard_image, build_match_image, build_profile_image,
                       build_history_image, build_settier_image, build_matchlog_image,
                       build_setelo_image, build_info_image,
                       build_pause_image, build_paused_list_image, build_text_image)
+
 def admin_only():
     async def pred(interaction: discord.Interaction) -> bool:
         if interaction.user.guild_permissions.administrator:
@@ -106,6 +107,19 @@ async def send_card(interaction: discord.Interaction, data: bytes, filename: str
     """Sends an image card. For a game mode, the mode name is written above the image."""
     content = f"**{esc(md['name'])}**" if md else None
     return await interaction.followup.send(content=content, file=png_file(data, filename), **kwargs)
+
+
+async def post_1v1_log(interaction, png_bytes, filename="match.png", text=None):
+    cid = os.getenv("LOGS_1V1_CHANNEL_ID", "").strip()
+    if not cid.isdigit():
+        return
+    ch = interaction.client.get_channel(int(cid))
+    if ch is None or ch.id == interaction.channel_id:
+        return
+    try:
+        await ch.send(content=text, file=discord.File(io.BytesIO(png_bytes), filename=filename))
+    except discord.HTTPException:
+        pass
 
 
 async def lookup_ign(interaction: discord.Interaction, ign: str):
@@ -244,6 +258,7 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
     data = await build_match_image(w, l, score_name, match_id, date, forfeit=forfeit,
                                    first_to=FIRST_TO[system])
     await send_card(interaction, data, "match.png", md)
+    await post_1v1_log(interaction, data, filename="match.png", text=f"**{esc(md['name'])}**" if md else None)
     return True
 
 
@@ -388,55 +403,70 @@ async def rules(interaction: discord.Interaction):
 
 # ---------- guide ----------
 
-_guide_cache = {}
-
-
-class GuideSelect(discord.ui.Select):
-    def __init__(self, current: int):
-        options = [discord.SelectOption(label=f"{i + 1}. {p['title']}", value=str(i), default=(i == current))
-                   for i, p in enumerate(GUIDE_PAGES)]
-        super().__init__(placeholder="Jump to a section...", options=options, row=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        view: "GuideView" = self.view
-        await interaction.response.defer()
-        view.set_page(int(self.values[0]))
-        await interaction.edit_original_response(attachments=[await view.make_file()], view=view)
-
-
-class GuideView(PagedView):
-    def __init__(self):
+class GuideView(discord.ui.View):
+    def __init__(self, user_id, cat=0, page=0):
         super().__init__(timeout=300)
-        self.pages = len(GUIDE_PAGES)
-        self.select = GuideSelect(0)
-        self.add_item(self.select)
-        self.update_buttons()
+        self.user_id, self.cat, self.page = user_id, cat, page
+        self.cache = {}
+        self.add_item(self._cat_select())
+        self.add_item(self._page_select())
 
-    def set_page(self, index: int):
-        self.page = index
-        for option in self.select.options:
-            option.default = (option.value == str(index))
-        self.update_buttons()
+    def _cat_select(self):
+        sel = discord.ui.Select(placeholder="Category", options=[
+            discord.SelectOption(label=f"{i+1}. {c['name']}", description=c["description"][:100], value=str(i),
+                                 default=(i == self.cat)) for i, c in enumerate(GUIDE_CATEGORIES)])
+        async def cb(it):
+            self.cat, self.page = int(sel.values[0]), 0
+            await self.refresh(it, rebuild=True)
+        sel.callback = cb
+        return sel
 
-    async def change_page(self, interaction: discord.Interaction, delta: int):
-        await interaction.response.defer()
-        self.set_page(self.page + delta)
-        await interaction.edit_original_response(attachments=[await self.make_file()], view=self)
+    def _page_select(self):
+        pages = GUIDE_CATEGORIES[self.cat]["pages"]
+        sel = discord.ui.Select(placeholder="Page", options=[
+            discord.SelectOption(label=p["title"][:100], value=str(i), default=(i == self.page))
+            for i, p in enumerate(pages[:25])])
+        async def cb(it):
+            self.page = int(sel.values[0])
+            await self.refresh(it)
+        sel.callback = cb
+        return sel
 
-    async def make_file(self) -> discord.File:
-        if self.page not in _guide_cache:
-            p = GUIDE_PAGES[self.page]
-            _guide_cache[self.page] = await build_text_image(
-                p["title"].upper(), f"{GUILD_NAME} · Bot guide", p["blocks"],
-                footer=f"Page {self.page + 1}/{len(GUIDE_PAGES)}")
-        return png_file(_guide_cache[self.page], "guide.png")
+    async def interaction_check(self, it):
+        if it.user.id != self.user_id:
+            await it.response.send_message("This is not your guide. Use /guide.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh(self, it, rebuild=False):
+        if rebuild:
+            self.clear_items()
+            self.add_item(self._cat_select())
+            self.add_item(self._page_select())
+        key = (self.cat, self.page)
+        if key not in self.cache:
+            cat_obj = GUIDE_CATEGORIES[self.cat]
+            p = cat_obj["pages"][self.page]
+            self.cache[key] = await build_text_image(
+                p["title"].upper(), f"{GUILD_NAME} · {cat_obj['name']}", p["blocks"],
+                footer=f"Page {self.page + 1}/{len(cat_obj['pages'])}")
+        f = discord.File(io.BytesIO(self.cache[key]), filename="guide.png")
+        await it.response.edit_message(attachments=[f], view=self)
 
 
 @bot.tree.command(name="guide", description="A complete guide to the bot and all its commands")
 async def guide(interaction: discord.Interaction):
     await interaction.response.defer()
-    view = GuideView()
-    view.message = await interaction.followup.send(file=await view.make_file(), view=view)
+    cat, page = 0, 0
+    key = (cat, page)
+    cat_obj = GUIDE_CATEGORIES[cat]
+    p = cat_obj["pages"][page]
+    data = await build_text_image(
+        p["title"].upper(), f"{GUILD_NAME} · {cat_obj['name']}", p["blocks"],
+        footer=f"Page {page + 1}/{len(cat_obj['pages'])}")
+    view = GuideView(interaction.user.id, cat, page)
+    view.cache[key] = data
+    view.message = await interaction.followup.send(file=png_file(data, "guide.png"), view=view)
 
 
 # ---------- game modes ----------
@@ -772,6 +802,7 @@ async def undo(interaction: discord.Interaction, match_id: int):
     data = await build_match_image(w, l, m["score"] or "-", match_id, date,
                                    title="MATCH CANCELLED", forfeit=bool(m["forfeit"]))
     await send_card(interaction, data, "undo.png", md)
+    await post_1v1_log(interaction, data, filename="undo.png", text=f"**{esc(md['name'])}**" if md else None)
 
 
 @bot.tree.command(name="removeplayer", description="Remove a player from the leaderboard and profiles (staff only)")

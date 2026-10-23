@@ -1,5 +1,10 @@
+from math import ceil
+
 from config import TIER_RANGES, MODES
 from elo import WIN, LOSS, WIN5, LOSS5, FIRST_TO
+
+TESTER_ROLE = "Tier Tester"       # only for the 1v1 tier testing
+GUILD_ROLE = "Guild Staff"        # breaklist, GEXP, excuses (the real names are set in the host variables)
 
 
 def _fmt(values):
@@ -45,12 +50,16 @@ def _modes_bullets():
 
 _ft3_names = ", ".join(["Normal"] + [m["name"] for m in MODES if m["system"] == "ft3"])
 
-GUIDE_PAGES = [
+# ======================================================================================
+# CATEGORY 1: 1v1 tier testing
+# ======================================================================================
+
+TIER_PAGES = [
     {
         "title": "Getting started",
         "blocks": [
-            _p("This bot keeps track of the guild's 1v1 tier tests. Every player has an elo and a tier, "
-               "and every match changes them automatically. Use the menu or the arrows below to read "
+            _p("This part of the bot keeps track of the guild's 1v1 tier tests. Every player has an elo and a "
+               "tier, and every match changes them automatically. Use the menus or the arrows below to read "
                "the other sections of this guide."),
             _h("1. Link your account"),
             _c("/link ign:YourName",
@@ -100,7 +109,7 @@ GUIDE_PAGES = [
             _b("ELO: current elo"),
             _b("W: wins   ·   L: losses"),
             _b("WR: win rate   ·   MP: matches played"),
-            _p("The column used for sorting is highlighted in gold."),
+            _p("The column used for sorting is highlighted."),
         ],
     },
     {
@@ -114,7 +123,7 @@ GUIDE_PAGES = [
             _b("Choose the mode in the mode option of /profile, /history, /leaderboard, /matches and "
                "/cancelled. Leave it empty to use the normal mode. The bot suggests the modes while you type."),
             _b("The other modes only have a lifetime leaderboard: there are no seasons."),
-            _b("At the end of the year (/endyear) every mode resets too and its final leaderboard is "
+            _b("At the end of the year every mode resets too and its final leaderboard is "
                "saved: /leaderboard mode:NAME year:N."),
             _b("Paused matches (/pause) only exist in the normal mode."),
             _c("/modes", "Shows the game modes."),
@@ -148,7 +157,7 @@ GUIDE_PAGES = [
 
 if any(m["system"] == "ft5" for m in MODES):
     _ft5_names = ", ".join(m["name"] for m in MODES if m["system"] == "ft5")
-    GUIDE_PAGES.append({
+    TIER_PAGES.append({
         "title": "Classic 1v1 elo (FT5)",
         "blocks": [
             _p(f"{_ft5_names}: every match is first to 5. The points depend on the score (the games won "
@@ -171,17 +180,17 @@ if any(m["system"] == "ft5" for m in MODES):
         ],
     })
 
-GUIDE_PAGES += [
+TIER_PAGES += [
     {
         "title": "Seasons & years",
         "blocks": [
             _h("Seasons"),
-            _p("A season is a period of play, numbered (Season 1, Season 2...). When the staff ends it with "
-               "/endseason, the season leaderboard is saved forever, a new season starts, and every player "
+            _p("A season is a period of play, numbered (Season 1, Season 2...). When an administrator ends it, "
+               "the season leaderboard is saved forever, a new season starts, and every player "
                "loses 100 elo in the general leaderboard (minimum 0). Only the normal mode has seasons."),
             _b("See an old season: /leaderboard season:N and /profile season:N."),
             _h("Years"),
-            _p("At the end of the year the staff uses /endyear: the final leaderboards and the profiles "
+            _p("At the end of the year an administrator closes it: the final leaderboards and the profiles "
                "(normal mode and every other mode) are saved, then everyone goes back to 0 elo (tier D) and "
                "a new year starts. Discord links are kept."),
             _b("See a past year: /leaderboard year:N and /profile year:N (use the mode option for another mode)."),
@@ -189,16 +198,19 @@ GUIDE_PAGES += [
         ],
     },
     {
-        "title": "Staff: matches",
+        "title": f"{TESTER_ROLE} commands",
         "blocks": [
-            _p("The commands below have a mode option to work on another game mode "
-               "(except /pause, /resume and /droppause, which are only for the normal mode)."),
+            _p(f"For the {TESTER_ROLE} role (and administrators). A {TESTER_ROLE} can add, edit and remove "
+               f"tiers, elo and matches, but cannot end seasons or years, and has nothing to do with the "
+               f"breaklist. The commands below have a mode option for the other game modes "
+               f"(except /pause, /resume and /droppause)."),
             _c("/settier ign tier",
                "Assigns a tier after a tier test. The elo is set to the minimum of that tier."),
+            _c("/setelo ign elo", "Sets a player's elo by hand (0 to 5000)."),
             _c("/match winner loser score",
                "Logs a finished 1v1. The score is for example 3-1 (5-3 in Classic 1v1): the bot suggests "
                "the valid scores. Both players need a tier in that mode. The elo is calculated "
-               "automatically and the result card shows the match number."),
+               "automatically, the result card shows the match number and it is also posted in the 1v1 logs channel."),
             _c("/forfeit player opponent [player_games] [opponent_games] [pause_id]",
                "The player who left loses by forfeit: the elo changes like the biggest loss (3-0, or 5-0 in "
                "Classic 1v1), but the card shows the real score before the forfeit if you give the games "
@@ -210,41 +222,256 @@ GUIDE_PAGES += [
             _c("/undo match_id",
                "Cancels a match (of any mode) and restores the elo. It only works on the latest match of "
                "both players, in the current season or year, and if their elo wasn't changed by hand since."),
+            _c("/removeplayer ign",
+               "Removes a player from the leaderboard and /profile. Their matches stay in the history. "
+               "/settier or /setelo brings them back."),
+            _c("/link ign user:@member", "Links a member without the Hypixel verification."),
+            _c("/refreshnames",
+               "Checks Mojang for changed usernames right now. It also runs automatically every 6 hours."),
         ],
     },
     {
-        "title": "Staff: admin",
+        "title": "Administrators",
         "blocks": [
-            _c("/setelo ign elo", "Sets a player's elo by hand (0 to 5000). It has a mode option."),
-            _c("/removeplayer ign",
-               "Removes a player from the leaderboard and /profile (normal mode: also unlinks their Discord "
-               "account). Their matches stay in the history. /settier or /setelo brings them back. "
-               "It has a mode option."),
-            _c("/link ign user:@member", "Links a member without the Hypixel verification."),
+            _p("These commands are only for server administrators. The Tier Tester role cannot use them."),
             _c("/endseason",
                "Ends the season: asks for confirmation and saves a backup of the database first."),
             _c("/endyear",
                "Ends the year: saves the final leaderboards and profiles (all modes), then resets everyone "
                "to 0 elo. Asks for confirmation and saves a backup first."),
-            _c("/refreshnames",
-               "Checks Mojang for changed usernames right now. It also runs automatically every 6 hours."),
+            _c("/resetall",
+               "TEST ONLY. Deletes all the 1v1 data after saving a backup. You must type RESET EVERYTHING. "
+               "It is removed before the official launch."),
+            _h("Backups"),
+            _p("Every backup is saved in the backups folder next to the database, in a folder for each month: "
+               "backups/2026-10/20261022_043000_auto.db. The name tells the date, the time and the reason "
+               "(auto, season, year, reset). The bot also makes one automatic backup every day and keeps the "
+               "latest 14 of them; the others are never deleted."),
         ],
     },
 ]
 
+# ======================================================================================
+# CATEGORY 2: breaklist
+# ======================================================================================
 
-GUIDE_PAGES.append({
-    "title": "Guild: breaklist",
-    "blocks": [
-        _p("The breaklist saves the players who leave the guild (or are removed) so that they can rejoin "
-           "later. They must stay guildless: joining another guild permanently removes the breaklist."),
-        _c("/breaklist view ign", "Shows when a player was added, the time spent in the guild and their GEXP."),
-        _c("/breaklist guild [page]", "The list of everyone on the breaklist."),
-        _c("/breaklist eligibility ign", "The last 7 days of GEXP and whether the player meets the requirement."),
-        _c("/breaklist add ign [start] [end] [gexp] [missing]",
-           "Staff only. Adds a player and posts the notice. The GEXP owed is calculated from the weekly "
-           "requirement and the time into the player's current 7-day cycle."),
-        _c("/breaklist remove ign", "Staff only. Takes a player off the list, for example when they rejoin."),
-        _c("/breaklist reminder ign", "Staff only. Posts a GEXP reminder in the inactivity channel."),
-    ],
-})
+_veteran = 180
+
+BREAKLIST_PAGES = [
+    {
+        "title": "What is the breaklist",
+        "blocks": [
+            _p("The breaklist is the list of players who left the guild (or were removed) and are allowed to "
+               "come back later. It saves what they owe and how many days they had in the guild."),
+            _h("The rules"),
+            _b("A player on the breaklist must stay guildless. Joining another guild permanently removes their "
+               "ability to use the breaklist."),
+            _b("Every breaklist has a reason that everybody can read."),
+            _b("The days in the guild are saved: at 180 days a player reaches the veteran rank. While a player "
+               "is on the breaklist the days do not grow and are not lost. If someone has 60 days and is "
+               "breaklisted for 20, they come back with 60 days and the count restarts from the day they rejoin."),
+            _b("If the player had less GEXP than required when they were breaklisted, the missing GEXP becomes "
+               "an extra debt that they pay when they come back (see the GEXP & notices category)."),
+            _h("How it is posted"),
+            _p("When a player is added, the bot generates a notice card and posts it in the No Pressure "
+               "Breaklist post of the guild breaklist forum: player, GEXP this week, GEXP required, extra GEXP "
+               "owed, days in guild, join and breaklist dates, reason and the reminder to stay guildless."),
+        ],
+    },
+    {
+        "title": "Everyone: view the breaklist",
+        "blocks": [
+            _c("/breaklist view ign",
+               "The latest breaklist entry of a player as a card: when they were added, reason, GEXP owed, "
+               "total days in the guild (and how many are left to veteran) and how many times they have been "
+               "breaklisted. If they were never breaklisted, it says how many days they have in the guild."),
+            _c("/breaklist history ign [page]",
+               "Every time the player was on the breaklist: the dates, the length of each break, the reason "
+               "and the GEXP owed. 4 entries per page, newest first."),
+            _c("/breaklist guild [page]",
+               "The list of everyone who is on the breaklist now, with the date they were added, their days "
+               "in the guild and the GEXP they owe."),
+            _c("/breaklist eligibility ign",
+               "The last 7 days of GEXP of a player, day by day, and whether they reach the 55,000 GEXP "
+               "requirement (or how much they miss). It also shows the extra debt, if any."),
+            _p("The GEXP data comes live from Hypixel for players who are in the guild. For players who "
+               "already left, the bot uses the copy it saved while they were in the guild (it saves one every "
+               "6 hours)."),
+        ],
+    },
+    {
+        "title": "Staff: add a player",
+        "blocks": [
+            _p(f"Breaklist commands are for the {GUILD_ROLE} role and administrators. The {TESTER_ROLE} role "
+               f"cannot use them. All dates are in Eastern Time (ET) and written month/day/year."),
+            _c("/breaklist add ign [reason] [start] [end] [gexp] [days] [debt]",
+               "Adds the player and posts the notice card."),
+            _h("The options"),
+            _b("ign: the Minecraft username."),
+            _b("reason: why the player is breaklisted. Everybody can read it."),
+            _b("start: when the player joined the guild, for example 10/03/2026 or 10/03/2026 6:00 PM. "
+               "Default: the join date from Hypixel."),
+            _b("end: when the player was breaklisted. Default: now."),
+            _b("gexp: the GEXP they earned this week before the breaklist. Default: read from the Hypixel data "
+               "the bot saved."),
+            _b("days: the total days the player had in the guild. Default: counted from the start date."),
+            _b("debt: extra GEXP debt from previous weeks. Default: the debt the bot already has saved."),
+            _h("Example: a player leaving now"),
+            _c("/breaklist add ign:Notch reason:Exams until the 5th",
+               "The bot reads the join date and the GEXP from Hypixel, works out how much GEXP should have "
+               "been earned so far this week, and saves the difference as GEXP owed."),
+            _h("Example: someone breaklisted before the bot existed"),
+            _c("/breaklist add ign:Notch reason:Vacation start:08/15/2026 end:09/10/2026 gexp:12000 days:23 debt:40",
+               "Enter the numbers by hand: the days in guild, the GEXP of that week and the old debt. "
+               "Do it once for every player who is already on the breaklist, so that their days are saved."),
+            _p("What the owed GEXP is: the requirement is proportional to the time spent in the guild during "
+               "the week, down to the minute. Someone breaklisted 2 days 7 hours 3 minutes after the purge "
+               "should have 55,000 / 7 x 2.1271 = 18,023 GEXP. If they had 12,000, they owe 6,023, plus any "
+               "old debt."),
+        ],
+    },
+    {
+        "title": "Staff: rejoin, days & debt",
+        "blocks": [
+            _c("/breaklist remove ign [when]",
+               "Takes the player off the breaklist when they rejoin. The days are kept and keep growing from "
+               "the rejoin date. The extra GEXP debt stays saved. The entry stays in /breaklist history."),
+            _c("/breaklist setdays ign days",
+               "Sets the days a player already has banked. For someone on the breaklist, it is their total days "
+               "in the guild. For someone who is in the guild, it is the days from their previous stays (the "
+               "days of the current stay are added automatically from the Hypixel join date)."),
+            _c("/breaklist debt ign amount",
+               "Sets the extra GEXP debt of a player by hand. 0 clears it."),
+            _c("/breaklist notice ign [kind]",
+               "Posts the GEXP notice of one player right now, with its buttons. Useful to test, or to remind "
+               "someone outside of the automatic schedule."),
+            _h("Tip: starting with players who are already on the breaklist"),
+            _b("1. /breaklist add for each of them with start, end, gexp, days and debt, as in the example."),
+            _b("2. /breaklist guild to check the list."),
+            _b("3. When one rejoins: /breaklist remove, then /gexp missing to calculate what they must earn."),
+        ],
+    },
+]
+
+# ======================================================================================
+# CATEGORY 3: GEXP & notices
+# ======================================================================================
+
+_daily = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Monday"]
+
+GEXP_PAGES = [
+    {
+        "title": "The weekly requirement",
+        "blocks": [
+            _p("The guild requires 55,000 GEXP every week. The week ends with the purge, every Tuesday at "
+               "12:00 AM Eastern Time (ET). Members under the requirement are kicked or breaklisted."),
+            _p("Your requirement depends on exactly when you join: the later you join during the week, the "
+               "less GEXP you need before the next purge."),
+            {
+                "type": "table",
+                "cols": ["Day of the week", "Cumulative GEXP"],
+                "widths": [0.5, 0.5],
+                "colors": ["text", "accent"],
+                "rows": [[f"Day {i + 1} ({name})", f"{ceil(55000 * (i + 1) / 7):,}"] for i, name in enumerate(_daily)],
+            },
+            _p("These are reference amounts. The real requirement is adjusted to your exact joining time."),
+            _h("Exact joining time"),
+            _p("The 55,000 are divided across the whole week (168 hours), so the requirement is "
+               "55,000 x (time left until the purge) / (length of the week), rounded up. It changes every "
+               "minute: joining at 6:30 PM ET gives a different requirement than joining at 6:31 PM ET."),
+            _p("Example: joining on Friday at 6:00 PM ET leaves 78 hours until the purge, so the requirement is "
+               "55,000 x 78 / 168 = 25,536 GEXP."),
+        ],
+    },
+    {
+        "title": "Extra GEXP debt",
+        "blocks": [
+            _p("Players on the breaklist may owe extra GEXP from previous weeks. When they rejoin, the normal "
+               "requirement is recalculated from their exact joining time, and the debt is tracked separately."),
+            _b("The normal requirement must be met first. Only the GEXP earned beyond it pays the debt."),
+            _b("Any unpaid debt carries over to the next weeks until it is paid, also when the player goes on "
+               "the breaklist again."),
+            _h("Example: the requirement is 9,286 and the player owes 40"),
+            _b("Earns 9,286: the requirement is met, but the 40 are still owed."),
+            _b("Earns 9,326: the requirement is met and the debt is paid completely."),
+            _b("Earns 9,300: the requirement is met and the debt goes down by 14, so 26 are still owed."),
+            _c("/gexp missing ign joined [start_gexp] [current_gexp] [debt] [save]",
+               f"({GUILD_ROLE}) Calculates what a player must earn this week. Write the day and exact time "
+               f"they joined, in Eastern Time (for example 10/21/2026 6:00 PM), and the GEXP they had at that "
+               f"moment. The card shows the normal requirement, the starting GEXP, the current GEXP, the extra "
+               f"debt, the total target and the remaining debt after the progress."),
+            _b("current_gexp: if you leave it empty, the bot reads it from Hypixel (the GEXP since the start "
+               "of the week)."),
+            _b("debt: if you leave it empty, the bot uses the saved debt of the player."),
+            _b("save:True saves the remaining debt as the player's new debt, so it carries over."),
+        ],
+    },
+    {
+        "title": "Automatic notices",
+        "blocks": [
+            _p("The bot posts reminders by itself in the inactivity notices channel. Each reminder is a card "
+               "with the GEXP of the player this week, what is required, what is missing, the reason and the "
+               "time left, and it pings the player if their account is linked with /link."),
+            _h("When they are posted"),
+            _b("Friday at 12:00 AM Mountain Time: for members who have less than 20,000 GEXP this week and have "
+               "been in the guild for more than 7 days."),
+            _b("12 hours before the purge: the final reminder, for every member under their requirement."),
+            _p("Players who are excused for the week or on the breaklist do not get a reminder."),
+            _h("The buttons"),
+            _b("Breaklist Me: puts the player on the breaklist and posts the notice in the No Pressure Breaklist."),
+            _b("Excuse Me: excuses the player for this week and posts it in the excused list channel."),
+            _p("Only the staff and the player the notice is for can click them (the player must have linked "
+               "their Discord account with /link; staff can link a member by hand with /link ign user:@member)."),
+            _c("/breaklist notice ign [kind]", f"({GUILD_ROLE}) Posts the notice of one player right now."),
+        ],
+    },
+    {
+        "title": "Excuses",
+        "blocks": [
+            _p("An excuse means that the player is excused for the week: they will not be kicked or breaklisted, "
+               "and they get no reminders. It is not a breaklist."),
+            _c("/excuse add ign [weeks] [reason]",
+               f"({GUILD_ROLE}) Excuses a player for 1 week (or up to 12) and posts it in the excused list "
+               f"channel with the date of the purge when it ends."),
+            _c("/excuse remove ign", f"({GUILD_ROLE}) Removes the current excuse of a player."),
+            _c("/excuse list", f"({GUILD_ROLE}) Everybody who is excused now or later, with the last date."),
+            _p("Players can also excuse themselves with the Excuse Me button of the reminder."),
+        ],
+    },
+]
+
+# ======================================================================================
+# CATEGORY 4: Road to #N
+# ======================================================================================
+
+ROAD_PAGES = [
+    {
+        "title": "Road to #6",
+        "blocks": [
+            _p("Every day the bot posts how much GEXP the guild needs to pass the guilds above it on Hypixel, "
+               "with a card, the daily numbers of each guild and a chart of the gap over time."),
+            _p("The format is: 6,662,105 gexp from #6 guild, then the same for #5 and #4."),
+            _h("How it works"),
+            _b("The bot compares the total guild GEXP of our guild with the guilds listed by the staff in the "
+               "host settings (ROAD_GUILDS)."),
+            _b("It posts at the daily GEXP reset, in the Road to #6 guild forum."),
+            _b("From the second day it shows how much GEXP per day we and they earn, and how many days it would "
+               "take to catch up. The chart needs two days of data."),
+            _b("When the guild passes the #6 guild, the titles change by themselves: the goals become #5, #4 "
+               "and #3, and so on."),
+            _c("/road", "Shows the card right now, without posting it in the forum."),
+        ],
+    },
+]
+
+# ======================================================================================
+
+GUIDE_CATEGORIES = [
+    {"name": "1v1 Tier Testing", "description": "Tiers, elo, matches and leaderboards", "pages": TIER_PAGES},
+    {"name": "Breaklist", "description": "Breaklist, reasons, history and days in guild", "pages": BREAKLIST_PAGES},
+    {"name": "GEXP & notices", "description": "Requirement, debt, reminders and excuses", "pages": GEXP_PAGES},
+    {"name": "Road to #6", "description": "GEXP needed to pass the guilds above", "pages": ROAD_PAGES},
+]
+
+# the old flat list is kept for any code that still imports it
+GUIDE_PAGES = TIER_PAGES

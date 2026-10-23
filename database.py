@@ -182,11 +182,15 @@ async def init_modes():
         );
         """)
         for sql in ("ALTER TABLE matches ADD COLUMN mode_id INTEGER",
-                    "ALTER TABLE matches ADD COLUMN mode_year_id INTEGER"):
+                    "ALTER TABLE matches ADD COLUMN mode_year_id INTEGER",
+                    "ALTER TABLE matches ADD COLUMN num INTEGER"):
             try:
                 await db.execute(sql)
             except aiosqlite.OperationalError:
                 pass
+        # 'num' is the match number people see. It starts equal to the id; a new match can take the
+        # number of a cancelled one (the id stays unique).
+        await db.execute("UPDATE matches SET num = id WHERE num IS NULL")
         await db.commit()
 
 
@@ -370,13 +374,27 @@ async def verified_owner(uuid: str):
 
 # ---------- matches ----------
 
+async def _next_number(db) -> int:
+    """The number of the next match: the lowest number of a cancelled match that no live match is using
+    (the new match takes its place), otherwise the highest number + 1."""
+    cur = await db.execute(
+        "SELECT MIN(c.num) FROM matches c WHERE c.cancelled = 1 AND NOT EXISTS "
+        "(SELECT 1 FROM matches l WHERE l.cancelled = 0 AND l.num = c.num)")
+    row = await cur.fetchone()
+    if row and row[0] is not None:
+        return row[0]
+    cur = await db.execute("SELECT COALESCE(MAX(num), 0) + 1 FROM matches")
+    return (await cur.fetchone())[0]
+
+
 async def save_match(w_uuid, l_uuid, w_before, w_after, l_before, l_after, score,
                      played_at=None, forfeit=False, mode_id=None):
     """Saves a match and updates elo. Main mode: general elo and season elo.
-    Extra mode (mode_id given): the elo of that mode only."""
+    Extra mode (mode_id given): the elo of that mode only. Returns the match NUMBER."""
     played_at = played_at or _now()
     async with aiosqlite.connect(DB_PATH) as db:
         year_id, season_id = await _current(db)
+        num = await _next_number(db)
 
         if mode_id is not None:
             for uuid, e in ((w_uuid, w_after), (l_uuid, l_after)):
@@ -386,12 +404,12 @@ async def save_match(w_uuid, l_uuid, w_before, w_after, l_before, l_after, score
             cur = await db.execute(
                 "INSERT INTO matches (played_at, winner_uuid, loser_uuid, "
                 "winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after, score, forfeit, "
-                "mode_id, mode_year_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "mode_id, mode_year_id, num) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (played_at, w_uuid, l_uuid, w_before, w_after, l_before, l_after, score,
-                 1 if forfeit else 0, mode_id, year_id),
+                 1 if forfeit else 0, mode_id, year_id, num),
             )
             await db.commit()
-            return cur.lastrowid
+            return num
 
         async def season_elo(uuid):
             cur = await db.execute(
@@ -416,13 +434,13 @@ async def save_match(w_uuid, l_uuid, w_before, w_after, l_before, l_after, score
         cur = await db.execute(
             "INSERT INTO matches (played_at, winner_uuid, loser_uuid, "
             "winner_elo_before, winner_elo_after, loser_elo_before, loser_elo_after, score, forfeit, "
-            "season_id, year_id, w_season_before, w_season_after, l_season_before, l_season_after) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "season_id, year_id, w_season_before, w_season_after, l_season_before, l_season_after, num) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (played_at, w_uuid, l_uuid, w_before, w_after, l_before, l_after, score,
-             1 if forfeit else 0, season_id, year_id, ws_b, ws_a, ls_b, ls_a),
+             1 if forfeit else 0, season_id, year_id, ws_b, ws_a, ls_b, ls_a, num),
         )
         await db.commit()
-        return cur.lastrowid
+        return num
 
 
 async def _scope(db, season_id=None, mode_id=None):
@@ -670,25 +688,36 @@ async def get_cancelled_matches(limit: int = 10, offset: int = 0, mode_id: int |
 
 # ---------- undo ----------
 
-async def get_match(match_id: int):
+async def get_match(match_number: int):
+    """The match with this number. If a cancelled match and a live one share the number, the live one."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute(_NAMES_SELECT + "WHERE m.id = ?", (match_id,))
+        cur = await db.execute(_NAMES_SELECT + "WHERE m.num = ? ORDER BY m.cancelled ASC, m.id DESC LIMIT 1",
+                               (match_number,))
         return await cur.fetchone()
 
 
+async def set_match_date(match_id: int, played_at: str):
+    """Changes the date of a match (match_id is the row id: use get_match(...)['id'])."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE matches SET played_at = ? WHERE id = ?", (played_at, match_id))
+        await db.commit()
+
+
 async def last_match_id(uuid: str, mode_id: int | None = None):
-    """Newest non-cancelled match of a player in the main mode or in an extra mode (None if none)."""
+    """Newest non-cancelled match of a player in the main mode or in an extra mode:
+    (row id, match number), or (None, None) if there is none."""
     async with aiosqlite.connect(DB_PATH) as db:
         if mode_id is None:
             cur = await db.execute(
-                "SELECT MAX(id) FROM matches WHERE (winner_uuid = ? OR loser_uuid = ?) "
-                "AND cancelled = 0 AND mode_id IS NULL", (uuid, uuid))
+                "SELECT id, num FROM matches WHERE (winner_uuid = ? OR loser_uuid = ?) "
+                "AND cancelled = 0 AND mode_id IS NULL ORDER BY id DESC LIMIT 1", (uuid, uuid))
         else:
             cur = await db.execute(
-                "SELECT MAX(id) FROM matches WHERE (winner_uuid = ? OR loser_uuid = ?) "
-                "AND cancelled = 0 AND mode_id = ?", (uuid, uuid, mode_id))
-        return (await cur.fetchone())[0]
+                "SELECT id, num FROM matches WHERE (winner_uuid = ? OR loser_uuid = ?) "
+                "AND cancelled = 0 AND mode_id = ? ORDER BY id DESC LIMIT 1", (uuid, uuid, mode_id))
+        row = await cur.fetchone()
+        return (row[0], row[1]) if row else (None, None)
 
 
 async def cancel_match(m):

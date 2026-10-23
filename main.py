@@ -18,7 +18,7 @@ from database import (init_db, init_extras, init_seasons, init_modes, upsert_pla
                       get_history, count_history, get_all_matches, count_all_matches,
                       count_cancelled_matches, get_cancelled_matches,
                       get_link, remove_link, link_account,
-                      get_match, last_match_id, cancel_match,
+                      get_match, last_match_id, cancel_match, set_match_date,
                       backup_db, remove_player, get_info,
                       create_pause, get_pause, list_open_pauses, count_open_pauses, close_pause,
                       get_current, list_seasons, list_years,
@@ -26,6 +26,7 @@ from database import (init_db, init_extras, init_seasons, init_modes, upsert_pla
                       end_season, end_year,
                       get_mode_by_name, get_mode, seed_modes, reset_all_data)
 from mojang import get_uuid
+import gexpcalc as gc
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, MODES, tier_from_elo
 from elo import calcola, FIRST_TO
@@ -89,6 +90,14 @@ def esc(text: str) -> str:
     return discord.utils.escape_markdown(text)
 
 
+def match_number(m) -> int:
+    """The number shown for a match (a new match can take the number of a cancelled one)."""
+    try:
+        return m["num"] if m["num"] is not None else m["id"]
+    except (IndexError, KeyError):
+        return m["id"]
+
+
 def is_staff(member) -> bool:
     if not isinstance(member, discord.Member):
         return False
@@ -117,7 +126,10 @@ async def post_1v1_log(interaction, png_bytes, filename="match.png", text=None):
     if ch is None or ch.id == interaction.channel_id:
         return
     try:
-        await ch.send(content=text, file=discord.File(io.BytesIO(png_bytes), filename=filename))
+        kwargs = {"content": text, "allowed_mentions": NO_MENTIONS}
+        if png_bytes:
+            kwargs["file"] = discord.File(io.BytesIO(png_bytes), filename=filename)
+        await ch.send(**kwargs)
     except discord.HTTPException:
         pass
 
@@ -769,11 +781,11 @@ async def undo(interaction: discord.Interaction, match_id: int):
 
     # the match must be the most recent one for both players (in the same mode)
     for uuid in (m["winner_uuid"], m["loser_uuid"]):
-        last = await last_match_id(uuid, mode_id)
-        if last != match_id:
+        last_id, last_num = await last_match_id(uuid, mode_id)
+        if last_id != m["id"]:
             await interaction.followup.send(
                 f"Match #{match_id} can't be cancelled yet: one of the players has a newer "
-                f"match (#{last}). Cancel the newer one first.")
+                f"match (#{last_num}). Cancel the newer one first.")
             return
 
     # and their elo must not have changed since (new /settier, /setelo...)
@@ -803,6 +815,35 @@ async def undo(interaction: discord.Interaction, match_id: int):
                                    title="MATCH CANCELLED", forfeit=bool(m["forfeit"]))
     await send_card(interaction, data, "undo.png", md)
     await post_1v1_log(interaction, data, filename="undo.png", text=f"**{esc(md['name'])}**" if md else None)
+
+
+@bot.tree.command(name="setdate", description="Change the date of a logged match (staff only)")
+@app_commands.describe(match_id="Match number (the # shown on the match card)",
+                       date="New date: 2026/10/21, or 2026/10/21 6:00 PM, or without the year: 10/21 (Eastern Time)")
+@staff_only()
+async def setdate(interaction: discord.Interaction, match_id: int, date: str):
+    await interaction.response.defer()
+    m = await get_match(match_id)
+    if m is None:
+        await interaction.followup.send(f"Match #{match_id} does not exist.")
+        return
+    new = gc.parse_et(date)
+    if new is None:
+        await interaction.followup.send(
+            "I couldn't read the date. Use `2026/10/21`, `2026/10/21 6:00 PM` or without the year `10/21` "
+            "(Eastern Time).")
+        return
+    if not re.search(r"\d:\d|am|pm", date, re.I):
+        new = new.replace(hour=12)          # no time given: midday, so the date never shifts
+    if new.astimezone(timezone.utc) > datetime.now(timezone.utc):
+        await interaction.followup.send("That date is in the future.")
+        return
+    old_text = fmt_date(m["played_at"])
+    await set_match_date(m["id"], new.isoformat())
+    text = (f"📅 Match **#{match_id}** ({esc(m['winner_ign'])} vs {esc(m['loser_ign'])}): "
+            f"date changed from **{old_text}** to **{new.strftime('%m/%d/%Y')}**.")
+    await interaction.followup.send(text, allowed_mentions=NO_MENTIONS)
+    await post_1v1_log(interaction, None, text=text)
 
 
 @bot.tree.command(name="removeplayer", description="Remove a player from the leaderboard and profiles (staff only)")
@@ -1131,7 +1172,7 @@ def history_entries(rows, uuid):
     entries = []
     for m in rows:
         cancelled = bool(m["cancelled"])
-        base = {"id": m["id"], "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
+        base = {"id": match_number(m), "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
                 "cancelled": cancelled, "forfeit": bool(m["forfeit"])}
         if m["winner_uuid"] == uuid:
             delta = 0 if cancelled else m["winner_elo_after"] - m["winner_elo_before"]
@@ -1208,7 +1249,7 @@ def log_entries(rows):
     for m in rows:
         cancelled = bool(m["cancelled"])
         entries.append({
-            "id": m["id"], "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
+            "id": match_number(m), "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
             "cancelled": cancelled, "forfeit": bool(m["forfeit"]),
             "winner": m["winner_ign"], "winner_uuid": m["winner_uuid"],
             "loser": m["loser_ign"], "loser_uuid": m["loser_uuid"],

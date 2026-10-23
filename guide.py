@@ -222,6 +222,9 @@ TIER_PAGES += [
             _c("/undo match_id",
                "Cancels a match (of any mode) and restores the elo. It only works on the latest match of "
                "both players, in the current season or year, and if their elo wasn't changed by hand since."),
+            _c("/setdate match_id date",
+               "Changes the date of a logged match. Write 2026/10/21 (or 2026/10/21 6:00 PM); the year is "
+               "optional (10/21). Cards still show MM/DD/YYYY. A new match takes the number of a cancelled one."),
             _c("/removeplayer ign",
                "Removes a player from the leaderboard and /profile. Their matches stay in the history. "
                "/settier or /setelo brings them back."),

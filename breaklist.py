@@ -1488,9 +1488,13 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:
             await interaction.message.edit(embed=embed, view=None)
         except (IndexError, discord.HTTPException):
             pass
-        await interaction.channel.send(
-            f"<@{row['requester_id']}> your {row['kind']} request for **{esc(name)}** was {word} by {esc(staff.display_name)}.",
-            allowed_mentions=USER_MENTIONS)
+        # the player cannot see the staff request channel: the answer goes to the inactivity notices
+        text = (f"<@{row['requester_id']}> your {row['kind']} request for **{esc(name)}** was {word} "
+                f"by {esc(staff.display_name)}.")
+        posted = await core.post_to("INACTIVITY_CHANNEL_ID", content=text, mentions=USER_MENTIONS,
+                                    thread_name="Requests", thread_key="inactivity_requests_thread")
+        if not posted:
+            await interaction.channel.send(text, allowed_mentions=USER_MENTIONS)
 
 
 # ======================================================================================

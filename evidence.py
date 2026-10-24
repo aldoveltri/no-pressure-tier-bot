@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 import aiohttp
@@ -35,10 +36,11 @@ CREATE TABLE IF NOT EXISTS cheat_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     uuid TEXT NOT NULL, ign TEXT NOT NULL, replays TEXT, reason TEXT,
     status TEXT NOT NULL DEFAULT 'open', verdict TEXT, source TEXT,
-    created_by TEXT, created_at TEXT, channel_id TEXT, message_id TEXT
+    created_by TEXT, created_at TEXT, channel_id TEXT, message_id TEXT,
+    confirmed_at TEXT, confirmed_by TEXT, closed_by TEXT
 );
 CREATE TABLE IF NOT EXISTS ev_votes (
-    report_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote TEXT NOT NULL,
+    report_id INTEGER NOT NULL, user_id TEXT NOT NULL, vote TEXT NOT NULL, name TEXT,
     PRIMARY KEY (report_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS urchin_seen (
@@ -90,16 +92,20 @@ def core_of(bot):
     return bot.np_core
 
 
-async def send_embed(core, interaction, env_name, *, embed, content=None, view=None, thread_name=None,
-                     thread_key=None):
+async def send_embed(core, interaction, env_name, *, embed=None, embeds=None, content=None, view=None,
+                     thread_name=None, thread_key=None):
     """Posts in the channel of the variable; without one (tests) or on failure, in the current channel.
     Returns the channel mention or None."""
     core.last_message = None
-    posted = await core.post_to(env_name, content=content, embed=embed, view=view, thread_name=thread_name,
-                                thread_key=thread_key)
+    posted = await core.post_to(env_name, content=content, embed=embed, embeds=embeds, view=view,
+                                thread_name=thread_name, thread_key=thread_key)
     if posted:
         return posted
-    kwargs = {"embed": embed}
+    kwargs = {}
+    if embeds:
+        kwargs["embeds"] = embeds
+    elif embed is not None:
+        kwargs["embed"] = embed
     if content:
         kwargs["content"] = content
     if view is not None:
@@ -226,44 +232,130 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
 # cheating reports
 # ======================================================================================
 
-async def vote_counts(rid):
-    rows = await q_all("SELECT vote, COUNT(*) AS c FROM ev_votes WHERE report_id = ? GROUP BY vote", (rid,))
-    d = {r["vote"]: r["c"] for r in rows}
-    return d.get("yes", 0), d.get("no", 0)
+async def vote_lists(rid):
+    """Who voted 'sufficient' and 'insufficient': lists of Discord ids (the votes are public)."""
+    rows = await q_all("SELECT vote, user_id FROM ev_votes WHERE report_id = ? ORDER BY rowid", (rid,))
+    return ([r["user_id"] for r in rows if r["vote"] == "yes"], [r["user_id"] for r in rows if r["vote"] == "no"])
 
 
-async def report_embed(row, footer=None):
-    yes, no = await vote_counts(row["id"])
-    colors = {"open": CYAN, "blacklisted": RED, "insufficient": GREY, "cancelled": GREY}
-    e = discord.Embed(title=f"Cheating report #{row['id']}", color=colors.get(row["status"], CYAN),
-                      description=f"Suspect: **{esc(row['ign'])}**")
-    e.set_thumbnail(url=body_url(row["uuid"]))
-    e.add_field(name="1 · Replay / media",
-                value=row["replays"] or "*Not added yet. Staff: press **Replay / media**.*", inline=False)
-    e.add_field(name="2 · Reason", value=row["reason"] or "*Not added yet. Staff: press **Reason**.*", inline=False)
-    e.add_field(name="Votes", value=f"✅ Sufficient evidence: **{yes}**   ·   ❌ Insufficient evidence: **{no}**",
-                inline=False)
+def phase_of(row, ending=False):
+    """draft (staff fill in the evidence) -> voting (confirmed, everybody votes) -> verdict (staff decide) -> closed."""
+    if row["status"] != "open":
+        return row["status"]
+    if not row["confirmed_at"]:
+        return "draft"
+    return "verdict" if ending else "voting"
+
+
+STATE_TEXT = {"draft": "Draft · staff are adding the evidence", "voting": "Voting open",
+              "verdict": "Waiting for the staff verdict", "blacklisted": "Closed · blacklisted",
+              "insufficient": "Closed · insufficient evidence", "cancelled": "Cancelled"}
+STATE_COLOR = {"draft": GOLD, "voting": CYAN, "verdict": GOLD, "blacklisted": RED, "insufficient": GREY,
+               "cancelled": GREY}
+IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+IMG_HOSTS = ("cdn.discordapp.com", "media.discordapp.net", "i.imgur.com", "i.ibb.co", "files.catbox.moe")
+UUID_LIKE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-", re.I)
+
+
+def classify(line):
+    """One saved line -> (kind, text). kind: replay | image | link."""
+    line = line.lstrip("•-* ").strip()
+    m = re.search(r"https?://\S+", line)
+    if not m:
+        code = line
+        if UUID_LIKE.match(code) or code.lower().startswith("/replay"):
+            code = code if code.lower().startswith("/replay") else f"/replay {code}"
+        return "replay", code
+    url = m.group(0)
+    host = re.sub(r"^https?://", "", url).split("/")[0].lower()
+    if url.lower().split("?")[0].endswith(IMG_EXT) or host in IMG_HOSTS:
+        return "image", url
+    return "link", url
+
+
+def short_url(url):
+    return re.sub(r"^https?://(www\.)?", "", url)[:60]
+
+
+async def flag_text(uuid):
+    row = await q_one("SELECT code FROM countries WHERE uuid = ?", (uuid,))
+    return bl.flag_emoji(row["code"]) if row else "🏳️"
+
+
+def mention_list(ids, limit=40):
+    if not ids:
+        return "*nobody yet*"
+    shown = "\n".join(f"<@{i}>" for i in ids[:limit])
+    return shown + (f"\n+{len(ids) - limit} more" if len(ids) > limit else "")
+
+
+def votes_fields(embed, yes, no):
+    embed.add_field(name=f"✅ Sufficient evidence [{len(yes)}]", value=mention_list(yes), inline=True)
+    embed.add_field(name=f"❌ Insufficient evidence [{len(no)}]", value=mention_list(no), inline=True)
+
+
+async def build_report(row, phase=None):
+    """The report as Discord embeds. Returns (list of embeds, message text with the video / links)."""
+    phase = phase or phase_of(row)
+    yes, no = await vote_lists(row["id"])
+    url = f"https://namemc.com/profile/{row['uuid']}"
+    e = discord.Embed(title=f"Cheating Report #{row['id']}", url=url, color=STATE_COLOR[phase])
+    e.set_thumbnail(url=head_url(row["uuid"], 160))
+    desc = f"**IGN** · `{row['ign']}` {await flag_text(row['uuid'])}"
     if row["source"]:
-        e.add_field(name="Source", value=row["source"], inline=False)
-    state = {"open": "Open", "blacklisted": "Closed: blacklisted", "insufficient": "Closed: insufficient evidence",
-             "cancelled": "Cancelled"}.get(row["status"], row["status"])
-    e.set_footer(text=footer or f"{state} · opened by {row['created_by'] or '?'}")
-    return e
+        desc += f"\n**Source** · {esc(row['source'])}"
+    e.description = desc
+
+    lines = [x for x in (row["replays"] or "").splitlines() if x.strip()]
+    images, links, replays = [], [], []
+    for line in lines:
+        kind, text = classify(line)
+        (images if kind == "image" else links if kind == "link" else replays).append(text)
+    ev = [f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
+    value = "\n".join(ev)[:1000] if ev else "*Nothing added yet. Staff: press **Replay / media**.*"
+    e.add_field(name="Evidence", value=value, inline=False)
+    reason = (row["reason"] or "").strip()
+    e.add_field(name="Reason", value=("> " + reason.replace("\n", "\n> "))[:1000] if reason
+                else "*Nothing added yet. Staff: press **Reason**.*", inline=False)
+    if phase == "draft":
+        e.add_field(name="Votes", value="🔒 Voting opens when staff confirm the evidence.", inline=False)
+    else:
+        votes_fields(e, yes, no)
+    state = STATE_TEXT[phase]
+    if row["confirmed_by"] and phase != "draft":
+        state += f" · confirmed by {row['confirmed_by']}"
+    e.set_footer(text=f"{state} · opened by {row['created_by'] or '?'}")
+
+    embeds = [e]
+    if images:
+        e.set_image(url=images[0])
+        for img in images[1:4]:                      # same url = Discord shows them as one gallery
+            extra = discord.Embed(url=url, color=STATE_COLOR[phase])
+            extra.set_image(url=img)
+            embeds.append(extra)
+    content = None
+    if links:                                         # raw links: Discord shows the video previews
+        content = ("**Videos / links**\n" + "\n".join(links))[:1800]
+    return embeds, content
 
 
 class EvButton(discord.ui.DynamicItem[discord.ui.Button],
-               template=r"np:ev:(?P<act>rp|rs|ys|ns|end|cx|bl|ie):(?P<rid>\d+)"):
-    LABELS = {"rp": "Replay / media", "rs": "Reason", "ys": "Sufficient evidence", "ns": "Insufficient evidence",
-              "end": "End cheating report", "cx": "Cancel", "bl": "Add to blacklist", "ie": "Insufficient evidence"}
+               template=r"np:ev:(?P<act>rp|rs|cf|ys|ns|end|cx|bl|ie|bk):(?P<rid>\d+)"):
+    LABELS = {"rp": "Replay / media", "rs": "Reason", "cf": "Confirm & open voting",
+              "ys": "Sufficient evidence", "ns": "Insufficient evidence",
+              "end": "End cheating report", "cx": "Cancel", "bl": "Add to blacklist",
+              "ie": "Insufficient evidence", "bk": "Back to voting"}
     STYLES = {"rp": discord.ButtonStyle.primary, "rs": discord.ButtonStyle.primary,
+              "cf": discord.ButtonStyle.success,
               "ys": discord.ButtonStyle.success, "ns": discord.ButtonStyle.danger,
               "end": discord.ButtonStyle.secondary, "cx": discord.ButtonStyle.secondary,
-              "bl": discord.ButtonStyle.danger, "ie": discord.ButtonStyle.secondary}
-    ROWS = {"rp": 0, "rs": 0, "ys": 1, "ns": 1, "end": 2, "cx": 2, "bl": 0, "ie": 0}
+              "bl": discord.ButtonStyle.danger, "ie": discord.ButtonStyle.secondary,
+              "bk": discord.ButtonStyle.secondary}
+    ROWS = {"rp": 0, "rs": 0, "cf": 1, "ys": 0, "ns": 0, "end": 1, "cx": 1, "bl": 0, "ie": 0, "bk": 1}
 
-    def __init__(self, act: str, rid: int):
+    def __init__(self, act: str, rid: int, disabled: bool = False):
         super().__init__(discord.ui.Button(label=self.LABELS[act], style=self.STYLES[act],
-                                           custom_id=f"np:ev:{act}:{rid}", row=self.ROWS[act]))
+                                           custom_id=f"np:ev:{act}:{rid}", row=self.ROWS[act], disabled=disabled))
         self.act = act
         self.rid = int(rid)
 
@@ -272,7 +364,6 @@ class EvButton(discord.ui.DynamicItem[discord.ui.Button],
         return cls(match["act"], int(match["rid"]))
 
     async def callback(self, interaction: discord.Interaction):
-        bot = interaction.client
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
         if not row:
             await interaction.response.send_message("I can't find this report any more.", ephemeral=True)
@@ -280,40 +371,81 @@ class EvButton(discord.ui.DynamicItem[discord.ui.Button],
         if row["status"] != "open":
             await interaction.response.send_message("This report is already closed.", ephemeral=True)
             return
-        if self.act in ("ys", "ns"):                       # voting: everybody
+        phase = phase_of(row)
+        if self.act in ("ys", "ns"):                       # voting: everybody, but only once the report is confirmed
+            if phase != "voting":
+                await interaction.response.send_message("Voting is not open (yet).", ephemeral=True)
+                return
             vote = "yes" if self.act == "ys" else "no"
-            await q_run("INSERT INTO ev_votes (report_id, user_id, vote) VALUES (?, ?, ?) "
-                        "ON CONFLICT(report_id, user_id) DO UPDATE SET vote = excluded.vote",
-                        (self.rid, str(interaction.user.id), vote))
-            await interaction.response.edit_message(embed=await report_embed(row))
+            await q_run("INSERT INTO ev_votes (report_id, user_id, vote, name) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(report_id, user_id) DO UPDATE SET vote = excluded.vote, name = excluded.name",
+                        (self.rid, str(interaction.user.id), vote, interaction.user.display_name))
+            await refresh(interaction, self.rid)
             return
         if not allowed(interaction.user):
             await deny(interaction)
             return
-        if self.act == "rp":
-            await interaction.response.send_modal(ReplayModal(self.rid))
-        elif self.act == "rs":
-            await interaction.response.send_modal(ReasonModal(self.rid, row["reason"] or ""))
+        if self.act in ("rp", "rs"):
+            if phase != "draft":
+                await interaction.response.send_message("The evidence is locked: the report is already confirmed.",
+                                                        ephemeral=True)
+            elif self.act == "rp":
+                await interaction.response.send_modal(ReplayModal(self.rid))
+            else:
+                await interaction.response.send_modal(ReasonModal(self.rid, row["reason"] or ""))
+        elif self.act == "cf":
+            if phase != "draft":
+                await interaction.response.send_message("This report is already confirmed.", ephemeral=True)
+            elif not ((row["replays"] or "").strip() and (row["reason"] or "").strip()):
+                await interaction.response.send_message("Add the replay / media AND the reason first.", ephemeral=True)
+            else:
+                await q_run("UPDATE cheat_reports SET confirmed_at = ?, confirmed_by = ? WHERE id = ?",
+                            (iso(now_utc()), interaction.user.display_name, self.rid))
+                await refresh(interaction, self.rid)
         elif self.act == "cx":
             await interaction.response.send_modal(CancelModal(self.rid))
         elif self.act == "end":
-            view = discord.ui.View(timeout=None)
-            view.add_item(EvButton("bl", self.rid))
-            view.add_item(EvButton("ie", self.rid))
-            await interaction.response.edit_message(
-                embed=await report_embed(row, footer="Choose the verdict: add to the blacklist or insufficient evidence"),
-                view=view)
+            if phase != "voting":
+                await interaction.response.send_message("Confirm the report first.", ephemeral=True)
+            else:
+                await refresh(interaction, self.rid, ending=True)
+        elif self.act == "bk":
+            await refresh(interaction, self.rid)
         elif self.act == "bl":
             await interaction.response.send_modal(VerdictBlacklistModal(self.rid, row["reason"] or ""))
         elif self.act == "ie":
             await close_report(interaction, row, "insufficient", "Insufficient evidence", by=interaction.user)
 
 
-def report_view(rid):
+def view_for(row, ending=False):
+    phase = phase_of(row, ending)
     view = discord.ui.View(timeout=None)
-    for act in ("rp", "rs", "ys", "ns", "end", "cx"):
-        view.add_item(EvButton(act, rid))
+    rid = row["id"]
+    if phase == "draft":
+        ready = bool((row["replays"] or "").strip() and (row["reason"] or "").strip())
+        view.add_item(EvButton("rp", rid))
+        view.add_item(EvButton("rs", rid))
+        view.add_item(EvButton("cf", rid, disabled=not ready))
+        view.add_item(EvButton("cx", rid))
+    elif phase == "voting":
+        for act in ("ys", "ns", "end", "cx"):
+            view.add_item(EvButton(act, rid))
+    elif phase == "verdict":
+        for act in ("bl", "ie", "bk"):
+            view.add_item(EvButton(act, rid))
+    else:
+        return None
     return view
+
+
+async def refresh(interaction, rid, *, ending=False, phase=None):
+    """Redraws the report in the message that was clicked."""
+    row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (rid,))
+    embeds, content = await build_report(row, phase or phase_of(row, ending))
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+    await interaction.edit_original_response(content=content, embeds=embeds, attachments=[],
+                                             view=view_for(row, ending))
 
 
 class ReplayModal(discord.ui.Modal, title="Replay codes / media"):
@@ -326,11 +458,14 @@ class ReplayModal(discord.ui.Modal, title="Replay codes / media"):
 
     async def on_submit(self, interaction: discord.Interaction):
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
+        if phase_of(row) != "draft":
+            await interaction.response.send_message("The evidence is locked: the report is already confirmed.",
+                                                    ephemeral=True)
+            return
         lines = [x.strip() for x in self.text.value.splitlines() if x.strip()]
         merged = ((row["replays"] + "\n") if row["replays"] else "") + "\n".join(f"• {x}" for x in lines)
-        await q_run("UPDATE cheat_reports SET replays = ? WHERE id = ?", (merged[:1000], self.rid))
-        row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
-        await interaction.response.edit_message(embed=await report_embed(row))
+        await q_run("UPDATE cheat_reports SET replays = ? WHERE id = ?", (merged[:3000], self.rid))
+        await refresh(interaction, self.rid)
 
 
 class ReasonModal(discord.ui.Modal, title="Reason"):
@@ -343,9 +478,13 @@ class ReasonModal(discord.ui.Modal, title="Reason"):
         self.reason.default = current
 
     async def on_submit(self, interaction: discord.Interaction):
-        await q_run("UPDATE cheat_reports SET reason = ? WHERE id = ?", (self.reason.value.strip(), self.rid))
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
-        await interaction.response.edit_message(embed=await report_embed(row))
+        if phase_of(row) != "draft":
+            await interaction.response.send_message("The evidence is locked: the report is already confirmed.",
+                                                    ephemeral=True)
+            return
+        await q_run("UPDATE cheat_reports SET reason = ? WHERE id = ?", (self.reason.value.strip(), self.rid))
+        await refresh(interaction, self.rid)
 
 
 class CancelModal(discord.ui.Modal, title="Cancel the report"):
@@ -357,8 +496,12 @@ class CancelModal(discord.ui.Modal, title="Cancel the report"):
 
     async def on_submit(self, interaction: discord.Interaction):
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
+        if row["status"] != "open":
+            await interaction.response.send_message("This report is already closed.", ephemeral=True)
+            return
+        note = self.reason.value.strip() or None
         await close_report(interaction, row, "cancelled", "Report cancelled", by=interaction.user,
-                           note=self.reason.value.strip() or None)
+                           details=[("Reason", note)] if note else [])
 
 
 class VerdictBlacklistModal(discord.ui.Modal, title="Add to the blacklist"):
@@ -372,45 +515,55 @@ class VerdictBlacklistModal(discord.ui.Modal, title="Add to the blacklist"):
 
     async def on_submit(self, interaction: discord.Interaction):
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
+        if row["status"] != "open":
+            await interaction.response.send_message("This report is already closed.", ephemeral=True)
+            return
+        await interaction.response.defer()
         entry, _ = await blacklist_upsert(row["uuid"], row["ign"], self.reason.value.strip(),
                                           self.duration.value.strip(), interaction.user.id)
         core = core_of(interaction.client)
         await send_embed(core, interaction, "BLACKLIST_CHANNEL_ID", embed=blacklist_embed(entry, "Added to the guild blacklist"),
                          thread_name=entry["ign"])
         await close_report(interaction, row, "blacklisted", "Added to the blacklist", by=interaction.user,
-                           note=f"Reason: {entry['reason']}\nDuration: {entry['duration']}")
+                           details=[("Reason", entry["reason"]), ("Duration", entry["duration"])])
 
 
-async def close_report(interaction, row, status, verdict_text, *, by, note=None):
-    """Closes the report: buttons removed, final verdict message in the evidence channel."""
-    await q_run("UPDATE cheat_reports SET status = ?, verdict = ? WHERE id = ?", (status, verdict_text, row["id"]))
-    row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (row["id"],))
-    yes, no = await vote_counts(row["id"])
-    embed = await report_embed(row, footer=f"{verdict_text} · by {by.display_name}")
-    if interaction.response.is_done():
-        await interaction.message.edit(embed=embed, view=None)
-    else:
-        await interaction.response.edit_message(embed=embed, view=None)
+def verdict_embed(row, status, verdict_text, details, yes, no, by):
     icon = {"blacklisted": "✅", "insufficient": "❌", "cancelled": "🚫"}[status]
-    final = discord.Embed(title=f"Final verdict · report #{row['id']}",
-                          color={"blacklisted": RED, "insufficient": GREY, "cancelled": GREY}[status],
-                          description=f"Suspect: **{esc(row['ign'])}**\n\n{icon} **{verdict_text}**")
-    final.set_thumbnail(url=head_url(row["uuid"]))
-    if note:
-        final.add_field(name="Details", value=note, inline=False)
-    if status != "cancelled":
-        final.add_field(name="Votes", value=f"Sufficient: **{yes}** · Insufficient: **{no}**", inline=False)
-    final.set_footer(text=f"Closed by {by.display_name}")
-    await interaction.channel.send(embed=final)
+    e = discord.Embed(title=f"Final verdict · report #{row['id']}", color=STATE_COLOR[status],
+                      url=f"https://namemc.com/profile/{row['uuid']}",
+                      description=f"**IGN** · `{row['ign']}`\n\n{icon} **{verdict_text}**")
+    e.set_thumbnail(url=head_url(row["uuid"], 160))
+    for label, text in details:
+        if text:
+            e.add_field(name=label, value=str(text)[:1000], inline=False)
+    if status != "cancelled" or yes or no:
+        votes_fields(e, yes, no)
+    e.set_footer(text=f"Decided by {by}")
+    return e
+
+
+async def close_report(interaction, row, status, verdict_text, *, by, details=None):
+    """Closes the report: the report shows the final state without buttons, and a final verdict message is posted."""
+    await q_run("UPDATE cheat_reports SET status = ?, verdict = ?, closed_by = ? WHERE id = ?",
+                (status, verdict_text, by.display_name, row["id"]))
+    row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (row["id"],))
+    await refresh(interaction, row["id"], phase=status)
+    yes, no = await vote_lists(row["id"])
+    if details is None:
+        details = [("Reported for", row["reason"])]
+    await interaction.channel.send(embed=verdict_embed(row, status, verdict_text, details, yes, no, by.display_name),
+                                   allowed_mentions=NO_MENTIONS)
 
 
 async def create_report(core, interaction, uuid, ign, *, created_by, reason=None, source=None):
-    """Creates the report message (interactive). Returns (report id, channel mention or None)."""
+    """Creates the report message (draft). Returns (report id, channel mention or None)."""
     rid = await q_run("INSERT INTO cheat_reports (uuid, ign, reason, status, source, created_by, created_at) "
                       "VALUES (?, ?, ?, 'open', ?, ?, ?)", (uuid, ign, reason, source, created_by, iso(now_utc())))
     row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (rid,))
-    posted = await send_embed(core, interaction, "EVIDENCE_CHANNEL_ID", embed=await report_embed(row),
-                              view=report_view(rid), thread_name="Evidence", thread_key="evidence_thread")
+    embeds, content = await build_report(row)
+    posted = await send_embed(core, interaction, "EVIDENCE_CHANNEL_ID", embeds=embeds, content=content,
+                              view=view_for(row), thread_name="Evidence", thread_key="evidence_thread")
     if core.last_message is not None:
         await q_run("UPDATE cheat_reports SET channel_id = ?, message_id = ? WHERE id = ?",
                     (str(core.last_message.channel.id), str(core.last_message.id), rid))
@@ -516,11 +669,12 @@ def tags_signature(tags):
 
 
 def urchin_embed(uuid, name, tags):
-    e = discord.Embed(title="Urchin: tagged player in the guild", color=GOLD,
-                      description=f"**{esc(name)}** is tagged on Urchin.")
-    e.set_thumbnail(url=head_url(uuid))
+    e = discord.Embed(title="Urchin · tagged player in the guild", color=GOLD,
+                      url=f"https://namemc.com/profile/{uuid}",
+                      description=f"**IGN** · `{name}`\nThis guild member is tagged on Urchin.")
+    e.set_thumbnail(url=head_url(uuid, 160))
     for kind, reason in tags[:10]:
-        e.add_field(name=kind, value=reason or "No reason given", inline=False)
+        e.add_field(name=str(kind)[:250], value=(str(reason) if reason else "No reason given")[:1000], inline=False)
     e.set_footer(text="Press the button to open a cheating report")
     return e
 
@@ -560,11 +714,10 @@ class UrchinReportButton(discord.ui.DynamicItem[discord.ui.Button], template=r"n
 
 
 async def post_urchin_alert(core, uuid, name, tags):
-    embed = urchin_embed(uuid, name, tags)
     view = discord.ui.View(timeout=None)
     view.add_item(UrchinReportButton(uuid))
-    return await core.post_to("EVIDENCE_CHANNEL_ID", embed=embed, view=view, thread_name="Evidence",
-                              thread_key="evidence_thread")
+    return await core.post_to("EVIDENCE_CHANNEL_ID", embed=urchin_embed(uuid, name, tags), view=view,
+                              thread_name="Evidence", thread_key="evidence_thread")
 
 
 class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater tags"):
@@ -675,6 +828,12 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
 async def setup(bot: commands.Bot):
     async with aiosqlite.connect(bl.DB_PATH) as db:
         await db.executescript(SCHEMA)
+        for table, col in (("cheat_reports", "confirmed_at"), ("cheat_reports", "confirmed_by"),
+                           ("cheat_reports", "closed_by"), ("ev_votes", "name")):
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+            except aiosqlite.OperationalError:
+                pass                                   # the column already exists
         await db.commit()
     bot.add_dynamic_items(EvButton, UrchinReportButton)
     await bot.add_cog(BlacklistCog(bot))

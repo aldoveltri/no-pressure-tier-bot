@@ -287,7 +287,7 @@ def flag_emoji(code):
     return "".join(chr(0x1F1E6 + ord(c) - 65) for c in code.upper())
 
 
-FLAGS = {}          # player name (lower case) -> (country code, PIL image or None)
+FLAGS = g.FLAGS      # player name (lower case) -> (country code, PIL image or None); shared with graphics.py
 _FLAG_IMAGES = {}   # country code -> PIL image or None
 
 
@@ -320,28 +320,13 @@ async def load_flag(uuid, name):
 
 
 def _name_flag(img, d, x, y, name, font):
-    """Draws the name (anchor left-middle) and, if the player has a country, its flag right after it."""
-    d.text((x, y), name, font=font, fill=g.TEXT, anchor="lm")
-    entry = FLAGS.get(name.lower())
-    fx = x + int(d.textlength(name, font=font)) + 18
-    h = 34
-    if not entry:
-        # no country set yet: a neutral grey flag with a question mark
-        w = 51
-        d.rounded_rectangle([fx, y - h // 2, fx + w, y + h // 2], radius=6, fill=(96, 102, 116),
-                            outline=(150, 156, 170), width=2)
-        d.text((fx + w // 2, y), "?", font=g.get_font(22, True), fill=(235, 238, 245), anchor="mm")
-        return
-    code, flag = entry
-    if flag is not None:
-        w = int(flag.width * h / flag.height)
-        small = flag.resize((w, h))
-        mask = Image.new("L", (w, h), 0)
-        ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=6, fill=255)
-        img.paste(small, (fx, y - h // 2), mask)
-    else:
-        g._badge(d, fx + 28, y, code, g.ACCENT, w=56, h=h, font_size=18)
+    """Name + flag (grey '?' flag when the country is not set). The drawing lives in graphics.py."""
+    g.name_flag(img, d, x, y, name, font)
 
+
+async def _load_flags(items):
+    """Used by graphics.py: loads the flags of [(uuid, name), ...] before a card is drawn."""
+    await asyncio.gather(*(load_flag(u, n) for u, n in items))
 
 
 def _identity(img, d, y, name, head, badge_text, badge_color, extra=None, h=130):
@@ -864,7 +849,7 @@ class Core:
     # ----- posting -----
 
     async def post_to(self, env_name, *, content=None, data=None, filename="card.png", view=None,
-                      thread_name=None, thread_key=None, mentions=None, embed=None):
+                      thread_name=None, thread_key=None, mentions=None, embed=None, embeds=None):
         """Sends to the channel set in the environment variable (text channel, thread or forum).
         Returns the channel mention, None when no channel is configured, False when posting failed."""
         cid = chan_id(env_name)
@@ -879,7 +864,9 @@ class Core:
                 kwargs["file"] = discord.File(io.BytesIO(data), filename=filename)
             if view is not None:
                 kwargs["view"] = view
-            if embed is not None:
+            if embeds:
+                kwargs["embeds"] = embeds
+            elif embed is not None:
                 kwargs["embed"] = embed
             if isinstance(ch, discord.ForumChannel):
                 if thread_key:
@@ -891,7 +878,7 @@ class Core:
                             return thread.mention
                         except discord.NotFound:
                             pass
-                if "content" not in kwargs and "file" not in kwargs and "embed" not in kwargs:
+                if not any(k in kwargs for k in ("content", "file", "embed", "embeds")):
                     kwargs["content"] = thread_name or "Post"
                 created = await ch.create_thread(name=(thread_name or "Post")[:100], **kwargs)
                 self.last_message = created.message
@@ -2228,6 +2215,7 @@ async def setup(bot: commands.Bot):
         gc.set_weekly_req(int(saved))
     core = Core(bot)
     bot.np_core = core
+    g.FLAG_LOADER = _load_flags          # every card with heads (1v1 cards too) shows the flags
     bot.add_dynamic_items(NoticeButton, RequestButton)
     await bot.add_cog(Breaklist(core))
     await bot.add_cog(Excuse(core))

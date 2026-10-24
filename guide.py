@@ -498,7 +498,7 @@ BLACKLIST_PAGES = [
     {"title": "Overview", "blocks": [
         _p("The guild blacklist is the list of players who are not welcome (cheating, boosting, ...). It "
            "lives in the blacklist channel. Cheating reports are discussed in the evidence thread, where "
-           "everybody can vote and the staff decides."),
+           "everybody can vote (after the staff confirm the evidence) and the staff decides."),
         _h("The three parts"),
         _b("Blacklist: add, edit, remove and list. Reason and duration are free text."),
         _b("Evidence: a cheating report with replay codes / media, a reason, votes and a final verdict."),
@@ -512,23 +512,25 @@ BLACKLIST_PAGES = [
         _c("/blacklist list", "Everyone on the blacklist, with reason and duration."),
     ]},
     {"title": "Cheating reports", "blocks": [
-        _c("/evidence add ign", "Opens a report in the evidence thread: the suspect's skin and two fields "
-           "to complete."),
-        _h("The fields"),
+        _c("/evidence add ign", "Opens a report in the evidence thread: a message with the suspect's skin, "
+           "flag, replay / media, reason and votes."),
+        _h("Step 1: staff fill in the evidence"),
         _b("Replay / media: one or more replay codes and/or links. Press the button as many times as you "
            "like: each time it adds lines."),
         _b("Reason: why the player is suspected."),
-        _h("The buttons"),
-        _b("Sufficient evidence / Insufficient evidence: everybody can vote, one vote each, and you can change "
-           "your vote. The totals are shown on the report."),
-        _b("End cheating report: shows two choices, Add to blacklist (asks reason and duration, posts in the "
-           "blacklist channel) or Insufficient evidence."),
-        _b("Cancel: closes the report as cancelled, with an optional reason."),
+        _b("Confirm & open voting: it works only when both fields are filled. After that the evidence is locked."),
+        _h("Step 2: everybody votes"),
+        _b("Sufficient evidence / Insufficient evidence: voting opens only after the confirmation. One vote "
+           "each, you can change it. Votes are public: the report shows the name of who voted."),
+        _h("Step 3: staff decide"),
+        _b("End cheating report: shows Add to blacklist (asks reason and duration, posts in the blacklist "
+           "channel) or Insufficient evidence. Back to voting undoes it."),
+        _b("Cancel: closes the report as cancelled, with an optional reason (at any step)."),
         _p("When a report is closed, a final verdict message is posted in the evidence thread, positive or "
-           "negative."),
+           "negative, with the votes."),
         _h("Who can do what"),
         _b("Everybody: vote."),
-        _b("Staff: add replay / media, reason, cancel, end the report, and all the blacklist commands."),
+        _b("Staff: add replay / media, reason, confirm, cancel, end the report, and all the blacklist commands."),
     ]},
     {"title": "Urchin tags", "blocks": [
         _p("Urchin is a community cheater detection system that saves tagged players. The bot checks the "

@@ -287,6 +287,29 @@ def flag_emoji(code):
     return "".join(chr(0x1F1E6 + ord(c) - 65) for c in code.upper())
 
 
+if not hasattr(g, "name_flag"):
+    # An OLD graphics.py is installed: the bot still starts, but flags will not show on the 1v1 cards.
+    # Replace graphics.py with the new one to get the flags everywhere.
+    log.warning("graphics.py is the old version: replace it with the new one to see the flags on every card")
+    g.FLAGS = {}
+    g.FLAG_LOADER = None
+
+    def _old_name_flag(img, d, x, y, name, font, h=34, **_):
+        if isinstance(font, int):
+            font = g.get_font(font, True)
+        d.text((x, y), name, font=font, fill=g.TEXT, anchor="lm")
+        fx = x + int(d.textlength(name, font=font)) + 18
+        entry = g.FLAGS.get(name.lower())
+        flag = entry[1] if entry else None
+        if flag is not None:
+            w = int(flag.width * h / flag.height)
+            img.paste(flag.resize((w, h)), (fx, y - h // 2))
+        else:
+            d.rounded_rectangle([fx, y - h // 2, fx + int(h * 1.5), y + h // 2], radius=6, fill=(96, 102, 116),
+                                outline=(150, 156, 170), width=2)
+            d.text((fx + int(h * 0.75), y), "?", font=g.get_font(22, True), fill=(235, 238, 245), anchor="mm")
+    g.name_flag = _old_name_flag
+
 FLAGS = g.FLAGS      # player name (lower case) -> (country code, PIL image or None); shared with graphics.py
 _FLAG_IMAGES = {}   # country code -> PIL image or None
 

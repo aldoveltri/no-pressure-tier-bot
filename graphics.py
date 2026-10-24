@@ -151,7 +151,56 @@ async def _fetch_heads(items):
     timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         results = await asyncio.gather(*(_fetch_head(session, u, n) for u, n in unique))
+    if FLAG_LOADER is not None:
+        try:
+            await FLAG_LOADER(unique)
+        except Exception:
+            pass
     return dict(results)
+
+
+# ---------- country flags next to player names ----------
+# FLAGS is filled by the breaklist extension (name in lower case -> (country code, PIL image or None)).
+# FLAG_LOADER is an async function set by that extension: it receives [(uuid, name), ...] and fills FLAGS.
+# Without the extension both stay empty and the cards simply draw the neutral "?" flag.
+
+FLAGS = {}
+FLAG_LOADER = None
+UNSET_FLAG = ((96, 102, 116), (150, 156, 170))
+
+
+def name_flag(img, d, x, y, name, font, h=34, fill=None, max_w=None, align="left", flag_for=None):
+    """Draws a player name and, right after it, the country flag (a grey '?' flag when none is set).
+    x is the left edge (align='left') or the center (align='center'); y is the vertical middle.
+    max_w: the name is made smaller when name + flag would not fit. flag_for: the player whose flag is shown,
+    when the text drawn is not just the name (e.g. 'vs Name')."""
+    fill = fill or TEXT
+    if isinstance(font, int):
+        font = get_font(font, True)
+    entry = FLAGS.get((flag_for or name).lower())
+    flag = entry[1] if entry else None
+    fw = int(flag.width * h / flag.height) if flag is not None else (56 if entry else int(h * 1.5))
+    size = getattr(font, "size", 20)
+    gap = max(10, h // 3)
+    while max_w and size > 12 and d.textlength(name, font=font) + gap + fw > max_w:
+        size -= 1
+        font = get_font(size, True)
+    total = d.textlength(name, font=font) + gap + fw
+    start = x - total / 2 if align == "center" else x
+    d.text((start, y), name, font=font, fill=fill, anchor="lm")
+    fx = int(start + d.textlength(name, font=font) + gap)
+    if not entry:
+        d.rounded_rectangle([fx, y - h // 2, fx + fw, y + h // 2], radius=6, fill=UNSET_FLAG[0],
+                            outline=UNSET_FLAG[1], width=2)
+        d.text((fx + fw // 2, y), "?", font=get_font(max(14, int(h * 0.65)), True), fill=(235, 238, 245),
+               anchor="mm")
+    elif flag is not None:
+        small = flag.resize((fw, h))
+        mask = Image.new("L", (fw, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, fw - 1, h - 1], radius=6, fill=255)
+        img.paste(small, (fx, y - h // 2), mask)
+    else:
+        _badge(d, fx + fw // 2, y, entry[0], ACCENT, w=fw, h=h, font_size=max(12, int(h * 0.5)))
 
 
 # ---------- drawing helpers ----------
@@ -262,7 +311,7 @@ def _draw_leaderboard(chunk, heads, start_rank, page, pages, total, sort, title,
 
         hx = PAD + 100
         _paste_head(img, d, heads.get(row["uuid"]), hx, cy - HEAD // 2, HEAD)
-        d.text((hx + HEAD + 10, cy), row["ign"], font=get_font(24, True), fill=TEXT, anchor="lm")
+        name_flag(img, d, hx + HEAD + 10, cy, row["ign"], 24, h=24, max_w=TIER_X - 32 - (hx + HEAD + 10) - 12)
 
         tier = row["tier"] or "-"
         _badge(d, TIER_X, cy, tier, _tier_color(tier), w=64, h=32, font_size=20)
@@ -305,7 +354,7 @@ def _match_panel(img, d, x0, y0, p, accent, label, head_data):
                         fill=ROW_BG, outline=accent, width=3)
     _badge(d, cx, y0, label, accent, w=116, h=30, font_size=16)
     _paste_head(img, d, head_data, cx - 60, y0 + 32, 120, radius=14)
-    d.text((cx, y0 + 184), p["name"], font=get_font(32, True), fill=TEXT, anchor="mm")
+    name_flag(img, d, cx, y0 + 184, p["name"], 32, h=30, max_w=PANEL_W - 30, align="center")
 
     ty = y0 + 224
     if p["tier_before"] != p["tier_after"]:
@@ -359,7 +408,7 @@ def _pause_panel(img, d, x0, y0, p, head_data):
     d.rounded_rectangle([x0, y0, x0 + PANEL_W, y0 + PANEL_H], radius=18,
                         fill=ROW_BG, outline=MUTED, width=3)
     _paste_head(img, d, head_data, cx - 60, y0 + 32, 120, radius=14)
-    d.text((cx, y0 + 184), p["name"], font=get_font(32, True), fill=TEXT, anchor="mm")
+    name_flag(img, d, cx, y0 + 184, p["name"], 32, h=30, max_w=PANEL_W - 30, align="center")
     _badge(d, cx, y0 + 224, p["tier"], _tier_color(p["tier"]), w=60, h=30, font_size=18)
     d.text((cx, y0 + 252), "GAMES WON", font=get_font(14, True), fill=MUTED, anchor="mm")
     d.text((cx, y0 + 284), str(p["games"]), font=get_font(40, True), fill=ACCENT, anchor="mm")
@@ -408,12 +457,12 @@ def _draw_paused_list(entries, total, heads):
         d.text((PAD + 24, cy + 14), e["date"], font=get_font(15), fill=MUTED, anchor="lm")
 
         _paste_head(img, d, heads.get(e["p1_uuid"]), 178, cy - 20, 40)
-        d.text((226, cy), e["p1"], font=get_font(20, True), fill=TEXT, anchor="lm")
+        name_flag(img, d, 226, cy, e["p1"], 20, h=20, max_w=190)
 
         d.text((450, cy), f"{e['g1']} - {e['g2']}", font=get_font(22, True), fill=ACCENT, anchor="mm")
 
         _paste_head(img, d, heads.get(e["p2_uuid"]), 494, cy - 20, 40)
-        d.text((542, cy), e["p2"], font=get_font(20, True), fill=TEXT, anchor="lm")
+        name_flag(img, d, 542, cy, e["p2"], 20, h=20, max_w=205)
 
         d.text((WIDTH - PAD - 28, cy), "to continue", font=get_font(15), fill=MUTED, anchor="rm")
 
@@ -447,7 +496,7 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, 
     d.rounded_rectangle([PAD, y0, PAD + 8, y0 + id_h], radius=4, fill=color)
     _paste_head(img, d, heads.get(uuid), PAD + 34, y0 + 20, 130, radius=14)
     nx = PAD + 34 + 130 + 28
-    d.text((nx, y0 + 62), name, font=get_font(46, True), fill=TEXT, anchor="lm")
+    name_flag(img, d, nx, y0 + 62, name, 46, h=40, max_w=WIDTH - PAD - 40 - 130 - nx)
 
     if tier2:
         _badge(d, nx + 48, y0 + 116, tier, color, w=96, h=40, font_size=24)
@@ -508,8 +557,8 @@ def _draw_history(name, entries, heads, page, pages, total):
         hx = PAD + 140
         _paste_head(img, d, heads.get(e["opp_uuid"]), hx, cy - HEAD // 2, HEAD)
         tx = hx + HEAD + 18
-        d.text((tx, cy - 11), f"vs {e['opp']}", font=get_font(26, True),
-               fill=MUTED if cancelled else TEXT, anchor="lm")
+        name_flag(img, d, tx, cy - 11, f"vs {e['opp']}", 26, h=24, fill=MUTED if cancelled else TEXT,
+                  max_w=340, flag_for=e["opp"])
         d.text((tx, cy + 17), f"Match #{e['id']} · {e['date']}", font=get_font(16), fill=MUTED, anchor="lm")
 
         d.text((620, cy - 7 if forfeit else cy), e["score"], font=get_font(24, True),
@@ -559,8 +608,7 @@ def _draw_matchlog(entries, heads, page, pages, total, cancelled_view):
         d.text((PAD + 24, cy + 14), e["date"], font=get_font(15), fill=MUTED, anchor="lm")
 
         _paste_head(img, d, heads.get(e["winner_uuid"]), 178, cy - 20, 40)
-        d.text((226, cy), e["winner"], font=get_font(20, True),
-               fill=MUTED if cancelled else TEXT, anchor="lm")
+        name_flag(img, d, 226, cy, e["winner"], 20, h=20, fill=MUTED if cancelled else TEXT, max_w=184)
 
         d.text((450, cy - 7 if forfeit else cy), e["score"], font=get_font(22, True),
                fill=MUTED if cancelled else ACCENT, anchor="mm")
@@ -569,7 +617,7 @@ def _draw_matchlog(entries, heads, page, pages, total, cancelled_view):
                    fill=MUTED if cancelled else RED, anchor="mm")
 
         _paste_head(img, d, heads.get(e["loser_uuid"]), 494, cy - 20, 40)
-        d.text((542, cy), e["loser"], font=get_font(20, True), fill=MUTED, anchor="lm")
+        name_flag(img, d, 542, cy, e["loser"], 20, h=20, fill=MUTED, max_w=185)
 
         ex = WIDTH - PAD - 28
         if cancelled:
@@ -607,7 +655,7 @@ def _draw_settier(uuid, name, old_tier, new_tier, elo, heads):
     _paste_head(img, d, heads.get(uuid), PAD + 34, y0 + 25, 100, radius=12)
 
     nx = PAD + 34 + 100 + 26
-    d.text((nx, y0 + 52), name, font=get_font(38, True), fill=TEXT, anchor="lm")
+    name_flag(img, d, nx, y0 + 52, name, 38, h=34, max_w=430)
     by = y0 + 106
     if old_tier and old_tier != new_tier:
         _badge(d, nx + 32, by, old_tier, _tier_color(old_tier), w=64, h=34, font_size=20)
@@ -647,7 +695,7 @@ def _draw_setelo(uuid, name, old_elo, new_elo, heads):
     _paste_head(img, d, heads.get(uuid), PAD + 34, y0 + 25, 100, radius=12)
 
     nx = PAD + 34 + 100 + 26
-    d.text((nx, y0 + 52), name, font=get_font(38, True), fill=TEXT, anchor="lm")
+    name_flag(img, d, nx, y0 + 52, name, 38, h=34, max_w=430)
     by = y0 + 106
     if old_tier and old_tier != new_tier:
         _badge(d, nx + 32, by, old_tier, _tier_color(old_tier), w=64, h=34, font_size=20)

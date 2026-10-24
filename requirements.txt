@@ -1,4 +1,4 @@
-discord.py>=2.4
+discord.py>=2.7
 python-dotenv
 aiohttp
 pillow

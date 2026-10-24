@@ -93,12 +93,12 @@ def core_of(bot):
 
 
 async def send_embed(core, interaction, env_name, *, embed=None, embeds=None, content=None, view=None,
-                     thread_name=None, thread_key=None):
+                     thread_name=None, thread_key=None, media=None):
     """Posts in the channel of the variable; without one (tests) or on failure, in the current channel.
     Returns the channel mention or None."""
     core.last_message = None
     posted = await core.post_to(env_name, content=content, embed=embed, embeds=embeds, view=view,
-                                thread_name=thread_name, thread_key=thread_key)
+                                thread_name=thread_name, thread_key=thread_key, media=media)
     if posted:
         return posted
     kwargs = {}
@@ -110,6 +110,8 @@ async def send_embed(core, interaction, env_name, *, embed=None, embeds=None, co
         kwargs["content"] = content
     if view is not None:
         kwargs["view"] = view
+    if media:
+        kwargs["files"] = [discord.File(io.BytesIO(data), filename=name) for name, data in media]
     core.last_message = await interaction.channel.send(**kwargs)
     return None
 
@@ -258,8 +260,10 @@ UUID_LIKE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-", re.I)
 
 
 def classify(line):
-    """One saved line -> (kind, text). kind: replay | image | link."""
+    """One saved line -> (kind, text). kind: replay | image | link | file (uploaded to the report)."""
     line = line.lstrip("•-* ").strip()
+    if line.startswith("📎"):
+        return "file", line[1:].strip()
     m = re.search(r"https?://\S+", line)
     if not m:
         code = line
@@ -271,6 +275,11 @@ def classify(line):
     if url.lower().split("?")[0].endswith(IMG_EXT) or host in IMG_HOSTS:
         return "image", url
     return "link", url
+
+
+def display_name(stored):
+    """'ev3-2-clip.mp4' -> 'clip.mp4'."""
+    return re.sub(r"^ev\d+-\d+-", "", stored)
 
 
 def short_url(url):
@@ -294,12 +303,12 @@ def votes_fields(embed, yes, no):
     embed.add_field(name=f"❌ Insufficient evidence [{len(no)}]", value=mention_list(no), inline=True)
 
 
-async def build_report(row, phase=None):
+async def build_report(row, phase=None, *, title=None):
     """The report as Discord embeds. Returns (list of embeds, message text with the video / links)."""
     phase = phase or phase_of(row)
     yes, no = await vote_lists(row["id"])
     url = f"https://namemc.com/profile/{row['uuid']}"
-    e = discord.Embed(title=f"Cheating Report #{row['id']}", url=url, color=STATE_COLOR[phase])
+    e = discord.Embed(title=title or f"Cheating Report #{row['id']}", url=url, color=STATE_COLOR[phase])
     e.set_thumbnail(url=head_url(row["uuid"], 160))
     desc = f"**IGN** · `{row['ign']}` {await flag_text(row['uuid'])}"
     if row["source"]:
@@ -307,11 +316,16 @@ async def build_report(row, phase=None):
     e.description = desc
 
     lines = [x for x in (row["replays"] or "").splitlines() if x.strip()]
-    images, links, replays = [], [], []
+    images, links, replays, files = [], [], [], []
     for line in lines:
         kind, text = classify(line)
-        (images if kind == "image" else links if kind == "link" else replays).append(text)
-    ev = [f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
+        if kind == "file":
+            files.append(text)
+        else:
+            (images if kind == "image" else links if kind == "link" else replays).append(text)
+    file_images = [f"attachment://{n}" for n in files if n.lower().endswith(IMG_EXT)]
+    ev = ([f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
+          + [f"• 📎 {display_name(n)}" + (" (video)" if not n.lower().endswith(IMG_EXT) else "") for n in files])
     value = "\n".join(ev)[:1000] if ev else "*Nothing added yet. Staff: press **Replay / media**.*"
     e.add_field(name="Evidence", value=value, inline=False)
     reason = (row["reason"] or "").strip()
@@ -327,6 +341,7 @@ async def build_report(row, phase=None):
     e.set_footer(text=f"{state} · opened by {row['created_by'] or '?'}")
 
     embeds = [e]
+    images = file_images + images                     # the files uploaded to the report come first
     if images:
         e.set_image(url=images[0])
         for img in images[1:4]:                      # same url = Discord shows them as one gallery
@@ -422,7 +437,7 @@ def view_for(row, ending=False):
     view = discord.ui.View(timeout=None)
     rid = row["id"]
     if phase == "draft":
-        ready = bool((row["replays"] or "").strip() and (row["reason"] or "").strip())
+        ready = bool((row["replays"] or "").strip() and (row["reason"] or "").strip())   # files count as lines too
         view.add_item(EvButton("rp", rid))
         view.add_item(EvButton("rs", rid))
         view.add_item(EvButton("cf", rid, disabled=not ready))
@@ -438,23 +453,37 @@ def view_for(row, ending=False):
     return view
 
 
-async def refresh(interaction, rid, *, ending=False, phase=None):
-    """Redraws the report in the message that was clicked."""
+async def refresh(interaction, rid, *, ending=False, phase=None, new_files=None):
+    """Redraws the report in the message that was clicked. The files already attached stay; new_files = [(name, bytes)]."""
     row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (rid,))
     embeds, content = await build_report(row, phase or phase_of(row, ending))
     if not interaction.response.is_done():
         await interaction.response.defer()
-    await interaction.edit_original_response(content=content, embeds=embeds, attachments=[],
+    keep = list(getattr(getattr(interaction, "message", None), "attachments", None) or [])
+    attachments = keep + [discord.File(io.BytesIO(data), filename=name) for name, data in (new_files or [])]
+    await interaction.edit_original_response(content=content, embeds=embeds, attachments=attachments,
                                              view=view_for(row, ending))
 
 
+MAX_FILES_PER_REPORT = 8
+
+
+def safe_name(name):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)[-50:] or "file"
+
+
 class ReplayModal(discord.ui.Modal, title="Replay codes / media"):
-    text = discord.ui.TextInput(label="Replay codes and/or media links", style=discord.TextStyle.paragraph,
-                                max_length=1500, placeholder="One per line: replay codes, YouTube / Medal / image links")
+    """Replay codes and links as text, and screenshots / videos uploaded straight into the report."""
 
     def __init__(self, rid):
         super().__init__()
         self.rid = rid
+        self.codes = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=1500, required=False,
+                                          placeholder="One per line: replay codes, YouTube / Medal links")
+        self.files = discord.ui.FileUpload(required=False, min_values=0, max_values=5)
+        self.add_item(discord.ui.Label(text="Replay codes and/or links", component=self.codes))
+        self.add_item(discord.ui.Label(text="Screenshots / videos", description="Optional: they are shown in the report",
+                                       component=self.files))
 
     async def on_submit(self, interaction: discord.Interaction):
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
@@ -462,10 +491,30 @@ class ReplayModal(discord.ui.Modal, title="Replay codes / media"):
             await interaction.response.send_message("The evidence is locked: the report is already confirmed.",
                                                     ephemeral=True)
             return
-        lines = [x.strip() for x in self.text.value.splitlines() if x.strip()]
-        merged = ((row["replays"] + "\n") if row["replays"] else "") + "\n".join(f"• {x}" for x in lines)
-        await q_run("UPDATE cheat_reports SET replays = ? WHERE id = ?", (merged[:3000], self.rid))
-        await refresh(interaction, self.rid)
+        lines = [x.strip() for x in (self.codes.value or "").splitlines() if x.strip()]
+        new_lines = [f"• {x}" for x in lines]
+        new_files, skipped = [], []
+        have = sum(1 for x in (row["replays"] or "").splitlines() if x.lstrip("•-* ").startswith("📎"))
+        limit = getattr(interaction.guild, "filesize_limit", None) or 10 * 1024 * 1024
+        await interaction.response.defer()
+        for att in (self.files.values or []):
+            if have + len(new_files) >= MAX_FILES_PER_REPORT:
+                skipped.append(f"{att.filename} (max {MAX_FILES_PER_REPORT} files)")
+                continue
+            if att.size > limit:
+                skipped.append(f"{att.filename} (too big: paste a YouTube / Medal link instead)")
+                continue
+            name = f"ev{self.rid}-{have + len(new_files) + 1}-{safe_name(att.filename)}"
+            new_files.append((name, await att.read()))
+            new_lines.append(f"📎 {name}")
+        if not new_lines:
+            await interaction.followup.send("Nothing added.", ephemeral=True)
+            return
+        merged = ((row["replays"] + "\n") if row["replays"] else "") + "\n".join(new_lines)
+        await q_run("UPDATE cheat_reports SET replays = ? WHERE id = ?", (merged[:3500], self.rid))
+        await refresh(interaction, self.rid, new_files=new_files)
+        if skipped:
+            await interaction.followup.send("Not added: " + "; ".join(skipped), ephemeral=True)
 
 
 class ReasonModal(discord.ui.Modal, title="Reason"):
@@ -522,8 +571,17 @@ class VerdictBlacklistModal(discord.ui.Modal, title="Add to the blacklist"):
         entry, _ = await blacklist_upsert(row["uuid"], row["ign"], self.reason.value.strip(),
                                           self.duration.value.strip(), interaction.user.id)
         core = core_of(interaction.client)
-        await send_embed(core, interaction, "BLACKLIST_CHANNEL_ID", embed=blacklist_embed(entry, "Added to the guild blacklist"),
-                         thread_name=entry["ign"])
+        # the blacklist post carries the evidence too: replay codes, links, screenshots / videos and the votes
+        media = []
+        for att in (getattr(getattr(interaction, "message", None), "attachments", None) or []):
+            try:
+                media.append((att.filename, await att.read()))
+            except Exception:
+                log.warning("Could not copy %s into the blacklist post", att.filename)
+        ev_embeds, ev_content = await build_report(row, "blacklisted", title=f"Evidence · report #{row['id']}")
+        await send_embed(core, interaction, "BLACKLIST_CHANNEL_ID",
+                         embeds=[blacklist_embed(entry, "Added to the guild blacklist")] + ev_embeds,
+                         content=ev_content, media=media, thread_name=entry["ign"])
         await close_report(interaction, row, "blacklisted", "Added to the blacklist", by=interaction.user,
                            details=[("Reason", entry["reason"]), ("Duration", entry["duration"])])
 

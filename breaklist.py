@@ -872,7 +872,7 @@ class Core:
     # ----- posting -----
 
     async def post_to(self, env_name, *, content=None, data=None, filename="card.png", view=None,
-                      thread_name=None, thread_key=None, mentions=None, embed=None, embeds=None):
+                      thread_name=None, thread_key=None, mentions=None, embed=None, embeds=None, media=None):
         """Sends to the channel set in the environment variable (text channel, thread or forum).
         Returns the channel mention, None when no channel is configured, False when posting failed."""
         cid = chan_id(env_name)
@@ -887,6 +887,8 @@ class Core:
                 kwargs["file"] = discord.File(io.BytesIO(data), filename=filename)
             if view is not None:
                 kwargs["view"] = view
+            if media:
+                kwargs["files"] = [discord.File(io.BytesIO(data), filename=name) for name, data in media]
             if embeds:
                 kwargs["embeds"] = embeds
             elif embed is not None:
@@ -901,7 +903,7 @@ class Core:
                             return thread.mention
                         except discord.NotFound:
                             pass
-                if not any(k in kwargs for k in ("content", "file", "embed", "embeds")):
+                if not any(k in kwargs for k in ("content", "file", "files", "embed", "embeds")):
                     kwargs["content"] = thread_name or "Post"
                 created = await ch.create_thread(name=(thread_name or "Post")[:100], **kwargs)
                 self.last_message = created.message

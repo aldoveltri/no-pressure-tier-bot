@@ -515,8 +515,9 @@ BLACKLIST_PAGES = [
         _c("/evidence add ign", "Opens a report in the evidence thread: a message with the suspect's skin, "
            "flag, replay / media, reason and votes."),
         _h("Step 1: staff fill in the evidence"),
-        _b("Replay / media: one or more replay codes and/or links. Press the button as many times as you "
-           "like: each time it adds lines."),
+        _b("Replay / media: replay codes and/or links, and you can upload screenshots or videos straight from "
+           "your device (up to 5 per time, 8 per report): they are shown inside the report as if you had posted "
+           "them. Press the button as many times as you like: each time it adds."),
         _b("Reason: why the player is suspected."),
         _b("Confirm & open voting: it works only when both fields are filled. After that the evidence is locked."),
         _h("Step 2: everybody votes"),
@@ -524,7 +525,8 @@ BLACKLIST_PAGES = [
            "each, you can change it. Votes are public: the report shows the name of who voted."),
         _h("Step 3: staff decide"),
         _b("End cheating report: shows Add to blacklist (asks reason and duration, posts in the blacklist "
-           "channel) or Insufficient evidence. Back to voting undoes it."),
+           "channel, together with the evidence: replay codes, links, screenshots, videos and the votes) or "
+           "Insufficient evidence. Back to voting undoes it."),
         _b("Cancel: closes the report as cancelled, with an optional reason (at any step)."),
         _p("When a report is closed, a final verdict message is posted in the evidence thread, positive or "
            "negative, with the votes."),

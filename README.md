@@ -37,7 +37,7 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - `/gexp setreq amount`: change the weekly requirement (saved).
 
 ### Blacklist, evidence, Urchin
-- `/blacklist add|edit|remove|list`, `/evidence add` (report with replay/media, reason, votes, end/cancel, verdict), `/urchin check|scan|test` and an automatic Urchin watch of the guild members every 30 minutes. Files: `evidence.py`, loaded by `main.py`.
+- `/blacklist add|edit|remove|list`, `/evidence add` (embed message: replay/media + reason, staff confirm, then public votes, end/cancel, final verdict message), `/urchin check|scan|test` and an automatic Urchin watch of the guild members every 30 minutes. Files: `evidence.py`, loaded by `main.py`.
 
 ### Automatic notices (#inactivity-notices)
 - Friday 12:00 AM Mountain Time: players under `FRIDAY_NOTICE_MAX_GEXP` (20,000) and in guild more than 7 days.
@@ -76,7 +76,7 @@ main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, elo.py
 | `MUTE_LOG_CHANNEL_ID` | no | Mute logs channel |
 | `BLACKLIST_CHANNEL_ID` | no | Guild blacklist channel or forum |
 | `EVIDENCE_CHANNEL_ID` | no | Evidence channel or forum (cheating reports and Urchin alerts go in a thread named Evidence) |
-| `EVIDENCE_STAFF_ONLY` | no | Empty or 0: everybody can use blacklist / evidence (test). 1: staff only (voting stays open to everybody) |
+| `EVIDENCE_STAFF_ONLY` | no | Empty or 0: everybody can use blacklist / evidence (test). 1: staff only (voting is always open to everybody once the report is confirmed) |
 | `URCHIN_API_KEY` | for Urchin | Key from the Urchin Discord |
 | `URCHIN_URL` | no | Address template with {uuid} {name} {key}, if the default is not right |
 | `URCHIN_KEY_HEADER` | no | If Urchin wants the key in a header (for example Authorization) |

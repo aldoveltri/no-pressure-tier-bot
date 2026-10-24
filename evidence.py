@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 import aiohttp
@@ -21,6 +22,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import breaklist as bl
+import evidence_cards as ec
+import graphics as g
 from breaklist import (q_one, q_all, q_run, kv_get, kv_set, esc, now_utc, iso, is_guild_staff, lookup,
                        NO_MENTIONS, _env)
 
@@ -240,6 +243,12 @@ async def vote_lists(rid):
     return ([r["user_id"] for r in rows if r["vote"] == "yes"], [r["user_id"] for r in rows if r["vote"] == "no"])
 
 
+async def vote_names(rid):
+    """Names of who voted 'sufficient' and 'insufficient' (shown on the card)."""
+    rows = await q_all("SELECT vote, name FROM ev_votes WHERE report_id = ? ORDER BY rowid", (rid,))
+    return ([r["name"] or "?" for r in rows if r["vote"] == "yes"], [r["name"] or "?" for r in rows if r["vote"] == "no"])
+
+
 def phase_of(row, ending=False):
     """draft (staff fill in the evidence) -> voting (confirmed, everybody votes) -> verdict (staff decide) -> closed."""
     if row["status"] != "open":
@@ -303,8 +312,8 @@ def votes_fields(embed, yes, no):
     embed.add_field(name=f"❌ Insufficient evidence [{len(no)}]", value=mention_list(no), inline=True)
 
 
-async def build_report(row, phase=None, *, title=None):
-    """The report as Discord embeds. Returns (list of embeds, message text with the video / links)."""
+async def build_report_text(row, phase=None, *, title=None):
+    """The report as plain Discord embeds (used for the copy of the evidence in the blacklist channel)."""
     phase = phase or phase_of(row)
     yes, no = await vote_lists(row["id"])
     url = f"https://namemc.com/profile/{row['uuid']}"
@@ -352,6 +361,40 @@ async def build_report(row, phase=None, *, title=None):
     if links:                                         # raw links: Discord shows the video previews
         content = ("**Videos / links**\n" + "\n".join(links))[:1800]
     return embeds, content
+
+
+async def build_report(row, phase=None):
+    """The report message: a picture with the summary (state, suspect, reason, public votes) on top, then the
+    evidence as text (copyable replay codes, links) and the uploaded screenshots in a gallery.
+    Returns (embeds, message text with the videos / links, png of the card, file name of the card)."""
+    phase = phase or phase_of(row)
+    yes, no = await vote_names(row["id"])
+    heads = await g._fetch_heads([(row["uuid"], row["ign"])])
+    lines = [x for x in (row["replays"] or "").splitlines() if x.strip()]
+    images, links, replays, files = [], [], [], []
+    for line in lines:
+        kind, text = classify(line)
+        if kind == "file":
+            files.append(text)
+        else:
+            (images if kind == "image" else links if kind == "link" else replays).append(text)
+    png = await asyncio.to_thread(ec.draw_report, row, yes, no, heads.get(row["uuid"]), phase, len(lines))
+    name = f"card-{row['id']}-{int(time.time() * 1000)}.png"
+    url = f"https://namemc.com/profile/{row['uuid']}"
+    ev = ([f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
+          + [f"• 📎 {display_name(n)}" + (" (video)" if not n.lower().endswith(IMG_EXT) else "") for n in files])
+    text = ("**Evidence**\n" + "\n".join(ev))[:3800] if ev else \
+        "*No evidence yet. Staff: press **Replay / media** to add replay codes, screenshots or videos.*"
+    main = discord.Embed(url=url, color=STATE_COLOR[phase], description=text)
+    main.set_image(url=f"attachment://{name}")
+    embeds = [main]
+    gallery = [f"attachment://{n}" for n in files if n.lower().endswith(IMG_EXT)] + images
+    for img in gallery[:3]:                         # same url = one gallery: the card first, then the screenshots
+        extra = discord.Embed(url=url, color=STATE_COLOR[phase])
+        extra.set_image(url=img)
+        embeds.append(extra)
+    content = ("**Videos / links**\n" + "\n".join(links))[:1800] if links else None
+    return embeds, content, png, name
 
 
 class EvButton(discord.ui.DynamicItem[discord.ui.Button],
@@ -454,13 +497,15 @@ def view_for(row, ending=False):
 
 
 async def refresh(interaction, rid, *, ending=False, phase=None, new_files=None):
-    """Redraws the report in the message that was clicked. The files already attached stay; new_files = [(name, bytes)]."""
+    """Redraws the report in the message that was clicked. The uploaded files stay; new_files = [(name, bytes)]."""
     row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (rid,))
-    embeds, content = await build_report(row, phase or phase_of(row, ending))
+    embeds, content, png, card_name = await build_report(row, phase or phase_of(row, ending))
     if not interaction.response.is_done():
         await interaction.response.defer()
-    keep = list(getattr(getattr(interaction, "message", None), "attachments", None) or [])
-    attachments = keep + [discord.File(io.BytesIO(data), filename=name) for name, data in (new_files or [])]
+    keep = [a for a in (getattr(getattr(interaction, "message", None), "attachments", None) or [])
+            if not a.filename.startswith("card-")]            # the old picture is replaced by the new one
+    attachments = (keep + [discord.File(io.BytesIO(data), filename=name) for name, data in (new_files or [])]
+                   + [discord.File(io.BytesIO(png), filename=card_name)])
     await interaction.edit_original_response(content=content, embeds=embeds, attachments=attachments,
                                              view=view_for(row, ending))
 
@@ -574,31 +619,18 @@ class VerdictBlacklistModal(discord.ui.Modal, title="Add to the blacklist"):
         # the blacklist post carries the evidence too: replay codes, links, screenshots / videos and the votes
         media = []
         for att in (getattr(getattr(interaction, "message", None), "attachments", None) or []):
+            if att.filename.startswith("card-"):
+                continue                                  # the summary picture is not evidence
             try:
                 media.append((att.filename, await att.read()))
             except Exception:
                 log.warning("Could not copy %s into the blacklist post", att.filename)
-        ev_embeds, ev_content = await build_report(row, "blacklisted", title=f"Evidence · report #{row['id']}")
+        ev_embeds, ev_content = await build_report_text(row, "blacklisted", title=f"Evidence · report #{row['id']}")
         await send_embed(core, interaction, "BLACKLIST_CHANNEL_ID",
                          embeds=[blacklist_embed(entry, "Added to the guild blacklist")] + ev_embeds,
                          content=ev_content, media=media, thread_name=entry["ign"])
         await close_report(interaction, row, "blacklisted", "Added to the blacklist", by=interaction.user,
                            details=[("Reason", entry["reason"]), ("Duration", entry["duration"])])
-
-
-def verdict_embed(row, status, verdict_text, details, yes, no, by):
-    icon = {"blacklisted": "✅", "insufficient": "❌", "cancelled": "🚫"}[status]
-    e = discord.Embed(title=f"Final verdict · report #{row['id']}", color=STATE_COLOR[status],
-                      url=f"https://namemc.com/profile/{row['uuid']}",
-                      description=f"**IGN** · `{row['ign']}`\n\n{icon} **{verdict_text}**")
-    e.set_thumbnail(url=head_url(row["uuid"], 160))
-    for label, text in details:
-        if text:
-            e.add_field(name=label, value=str(text)[:1000], inline=False)
-    if status != "cancelled" or yes or no:
-        votes_fields(e, yes, no)
-    e.set_footer(text=f"Decided by {by}")
-    return e
 
 
 async def close_report(interaction, row, status, verdict_text, *, by, details=None):
@@ -607,11 +639,13 @@ async def close_report(interaction, row, status, verdict_text, *, by, details=No
                 (status, verdict_text, by.display_name, row["id"]))
     row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (row["id"],))
     await refresh(interaction, row["id"], phase=status)
-    yes, no = await vote_lists(row["id"])
     if details is None:
         details = [("Reported for", row["reason"])]
-    await interaction.channel.send(embed=verdict_embed(row, status, verdict_text, details, yes, no, by.display_name),
-                                   allowed_mentions=NO_MENTIONS)
+    yes_names, no_names = await vote_names(row["id"])
+    heads = await g._fetch_heads([(row["uuid"], row["ign"])])
+    png = await asyncio.to_thread(ec.draw_verdict, row, status, verdict_text, details, yes_names, no_names,
+                                  heads.get(row["uuid"]), by.display_name)
+    await interaction.channel.send(file=discord.File(io.BytesIO(png), filename=f"verdict-{row['id']}.png"))
 
 
 async def create_report(core, interaction, uuid, ign, *, created_by, reason=None, source=None):
@@ -619,9 +653,10 @@ async def create_report(core, interaction, uuid, ign, *, created_by, reason=None
     rid = await q_run("INSERT INTO cheat_reports (uuid, ign, reason, status, source, created_by, created_at) "
                       "VALUES (?, ?, ?, 'open', ?, ?, ?)", (uuid, ign, reason, source, created_by, iso(now_utc())))
     row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (rid,))
-    embeds, content = await build_report(row)
+    embeds, content, png, card_name = await build_report(row)
     posted = await send_embed(core, interaction, "EVIDENCE_CHANNEL_ID", embeds=embeds, content=content,
-                              view=view_for(row), thread_name="Evidence", thread_key="evidence_thread")
+                              media=[(card_name, png)], view=view_for(row), thread_name="Evidence",
+                              thread_key="evidence_thread")
     if core.last_message is not None:
         await q_run("UPDATE cheat_reports SET channel_id = ?, message_id = ? WHERE id = ?",
                     (str(core.last_message.channel.id), str(core.last_message.id), rid))
@@ -753,15 +788,9 @@ def tags_signature(tags):
     return hashlib.sha1(json.dumps(sorted(tags)).encode()).hexdigest()
 
 
-def urchin_embed(uuid, name, tags):
-    e = discord.Embed(title="Urchin · tagged player in the guild", color=GOLD,
-                      url=f"https://namemc.com/profile/{uuid}",
-                      description=f"**IGN** · `{name}`\nThis guild member is tagged on Urchin.")
-    e.set_thumbnail(url=head_url(uuid, 160))
-    for kind, reason in tags[:10]:
-        e.add_field(name=str(kind)[:250], value=(str(reason) if reason else "No reason given")[:1000], inline=False)
-    e.set_footer(text="Press the button to open a cheating report")
-    return e
+async def urchin_card(core, uuid, name, tags):
+    head = await core.head_for(uuid, name)
+    return await asyncio.to_thread(ec.draw_urchin, name, tags, head)
 
 
 class UrchinReportButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:ur:(?P<uuid>[0-9a-f]{32})"):
@@ -799,9 +828,10 @@ class UrchinReportButton(discord.ui.DynamicItem[discord.ui.Button], template=r"n
 
 
 async def post_urchin_alert(core, uuid, name, tags):
+    png = await urchin_card(core, uuid, name, tags)
     view = discord.ui.View(timeout=None)
     view.add_item(UrchinReportButton(uuid))
-    return await core.post_to("EVIDENCE_CHANNEL_ID", embed=urchin_embed(uuid, name, tags), view=view,
+    return await core.post_to("EVIDENCE_CHANNEL_ID", data=png, filename="urchin.png", view=view,
                               thread_name="Evidence", thread_key="evidence_thread")
 
 
@@ -844,7 +874,8 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
             return
         view = discord.ui.View(timeout=None)
         view.add_item(UrchinReportButton(uuid))
-        await interaction.followup.send(embed=urchin_embed(uuid, name, tags), view=view)
+        png = await urchin_card(self.core, uuid, name, tags)
+        await interaction.followup.send(file=discord.File(io.BytesIO(png), filename="urchin.png"), view=view)
 
     @app_commands.command(name="test", description="Debug: show the raw answer of the Urchin API for a player")
     @app_commands.check(perm_check)

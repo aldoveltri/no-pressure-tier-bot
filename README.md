@@ -54,7 +54,7 @@ Daily post (`ROAD_POST_TIME_ET`, default 00:10 ET) in the road forum: GEXP gap t
 `/link /unlink /profile /history /matches /cancelled /paused /leaderboard /info /modes /rules /guide /ping` and staff `/settier /setelo /match /forfeit /undo /pause /resume /droppause /removeplayer /refreshnames`. Admin only: `/endseason /endyear /resetall` (resetall is for tests: remove before launch). Every 1v1 result is also posted in the 1v1 logs channel.
 
 ## 4. Project files
-main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, elo.py, config.py, mojang.py, hypixel.py, namesync.py, **gexpcalc.py** (requirement maths), **breaklist.py** (breaklist, excuses, gexp, notices, road), requirements.txt.
+main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, evidence_cards.py, elo.py, config.py, mojang.py, hypixel.py, namesync.py, **gexpcalc.py** (requirement maths), **breaklist.py** (breaklist, excuses, gexp, notices, road), requirements.txt.
 
 ## 5. Environment variables (host panel or `.env`)
 | Variable | Required | Meaning |

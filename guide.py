@@ -505,9 +505,11 @@ BLACKLIST_PAGES = [
         _b("Urchin: when a guild member is tagged on Urchin the bot posts it in the evidence channel."),
     ]},
     {"title": "Blacklist commands", "blocks": [
-        _c("/blacklist add ign reason duration", "Adds a player and posts the notice (with their skin) in "
-           "the blacklist channel. Reason and duration are free text: write what you want."),
-        _c("/blacklist edit ign [reason] [duration]", "Changes the reason and/or the duration."),
+        _c("/blacklist add ign reason duration [image] [image2] [image3]", "Adds a player and posts the notice (with their skin) "
+           "in the blacklist channel. Reason and duration are free text. You can attach up to 3 screenshots or "
+           "videos: they are shown in the post."),
+        _c("/blacklist edit ign [reason] [duration] [image]", "Changes the reason and/or the duration, and can add "
+           "screenshots or videos."),
         _c("/blacklist remove ign", "Takes the player off the blacklist and posts it."),
         _c("/blacklist list", "Everyone on the blacklist, with reason and duration."),
     ]},

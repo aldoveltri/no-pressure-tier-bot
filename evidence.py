@@ -124,7 +124,7 @@ async def send_embed(core, interaction, env_name, *, embed=None, embeds=None, co
 # ======================================================================================
 
 def blacklist_embed(row, title="Guild blacklist"):
-    e = discord.Embed(title=title, color=RED, timestamp=now_utc())
+    e = discord.Embed(title=title, color=RED, timestamp=now_utc(), url=f"https://namemc.com/profile/{row['uuid']}")
     e.set_thumbnail(url=head_url(row["uuid"]))
     e.add_field(name="Player", value=f"**{esc(row['ign'])}**", inline=True)
     e.add_field(name="Duration", value=row["duration"] or "Not specified", inline=True)
@@ -155,32 +155,64 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
     def core(self):
         return core_of(self.bot)
 
-    async def announce(self, interaction, row, title):
+    async def announce(self, interaction, row, title, media=None):
+        """Posts the entry in the blacklist channel. media = [(file name, bytes)]: images are shown in the post."""
         embed = blacklist_embed(row, title)
-        posted = await send_embed(self.core, interaction, "BLACKLIST_CHANNEL_ID", embed=embed, thread_name=row["ign"])
-        return posted
+        embeds = [embed]
+        pics = [f"attachment://{n}" for n, _ in (media or []) if n.lower().endswith(IMG_EXT)]
+        if pics:
+            embed.set_image(url=pics[0])
+            for pic in pics[1:4]:                       # same url = Discord shows them as one gallery
+                extra = discord.Embed(url=embed.url, color=RED)
+                extra.set_image(url=pic)
+                embeds.append(extra)
+        return await send_embed(self.core, interaction, "BLACKLIST_CHANNEL_ID", embeds=embeds, media=media or None,
+                                thread_name=row["ign"])
+
+    async def read_media(self, interaction, attachments):
+        """The files given to the command -> ([(name, bytes)], [skipped texts])."""
+        media, skipped = [], []
+        limit = getattr(interaction.guild, "filesize_limit", None) or 10 * 1024 * 1024
+        for att in attachments:
+            if att is None:
+                continue
+            if att.size > limit:
+                skipped.append(f"{att.filename} (too big)")
+                continue
+            media.append((f"bl{len(media) + 1}-{safe_name(att.filename)}", await att.read()))
+        return media, skipped
 
     @app_commands.command(name="add", description="Add a player to the guild blacklist")
-    @app_commands.describe(ign="Minecraft username", reason="Why (free text)", duration="For how long (free text)")
+    @app_commands.describe(ign="Minecraft username", reason="Why (free text)", duration="For how long (free text)",
+                           image="Screenshot or video (optional)", image2="Another screenshot or video (optional)",
+                           image3="Another screenshot or video (optional)")
     @app_commands.check(perm_check)
-    async def add(self, interaction: discord.Interaction, ign: str, reason: str, duration: str):
+    async def add(self, interaction: discord.Interaction, ign: str, reason: str, duration: str,
+                  image: Optional[discord.Attachment] = None, image2: Optional[discord.Attachment] = None,
+                  image3: Optional[discord.Attachment] = None):
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
             return
         uuid, name = r
+        media, skipped = await self.read_media(interaction, (image, image2, image3))
         row, created = await blacklist_upsert(uuid, name, reason, duration, interaction.user.id)
-        posted = await self.announce(interaction, row, "Added to the guild blacklist" if created else "Blacklist entry updated")
+        posted = await self.announce(interaction, row, "Added to the guild blacklist" if created else "Blacklist entry updated",
+                                     media)
         await interaction.followup.send(
             (f"**{esc(name)}** was added to the blacklist" if created else f"**{esc(name)}** was already blacklisted: entry updated")
-            + (f" ({posted})." if posted else "."), allowed_mentions=NO_MENTIONS)
+            + (f" ({posted})." if posted else ".")
+            + (f"\nNot added: {', '.join(skipped)}" if skipped else ""), allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="edit", description="Change the reason and/or the duration of a blacklist entry")
     @app_commands.describe(ign="Minecraft username", reason="New reason (leave empty to keep it)",
-                           duration="New duration (leave empty to keep it)")
+                           duration="New duration (leave empty to keep it)",
+                           image="Screenshot or video (optional)", image2="Another screenshot or video (optional)",
+                           image3="Another screenshot or video (optional)")
     @app_commands.check(perm_check)
     async def edit(self, interaction: discord.Interaction, ign: str, reason: Optional[str] = None,
-                   duration: Optional[str] = None):
+                   duration: Optional[str] = None, image: Optional[discord.Attachment] = None,
+                   image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None):
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
@@ -190,12 +222,14 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
         if not row:
             await interaction.followup.send(f"**{esc(name)}** is not on the blacklist.", allowed_mentions=NO_MENTIONS)
             return
-        if not reason and not duration:
-            await interaction.followup.send("Give a new reason and/or a new duration.")
+        media, skipped = await self.read_media(interaction, (image, image2, image3))
+        if not reason and not duration and not media:
+            await interaction.followup.send("Give a new reason, a new duration and/or images.")
             return
         row, _ = await blacklist_upsert(uuid, name, reason, duration, interaction.user.id)
-        posted = await self.announce(interaction, row, "Blacklist entry updated")
-        await interaction.followup.send(f"Entry of **{esc(name)}** updated" + (f" ({posted})." if posted else "."),
+        posted = await self.announce(interaction, row, "Blacklist entry updated", media)
+        await interaction.followup.send(f"Entry of **{esc(name)}** updated" + (f" ({posted})." if posted else ".")
+                                        + (f"\nNot added: {', '.join(skipped)}" if skipped else ""),
                                         allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="remove", description="Remove a player from the guild blacklist")
@@ -333,9 +367,9 @@ async def build_report_text(row, phase=None, *, title=None):
         else:
             (images if kind == "image" else links if kind == "link" else replays).append(text)
     file_images = [f"attachment://{n}" for n in files if n.lower().endswith(IMG_EXT)]
-    ev = ([f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
-          + [f"• 📎 {display_name(n)}" + (" (video)" if not n.lower().endswith(IMG_EXT) else "") for n in files])
-    value = "\n".join(ev)[:1000] if ev else "*Nothing added yet. Staff: press **Replay / media**.*"
+    ev = [f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
+    value = "\n".join(ev)[:1000] if ev else ("*Screenshots / videos are attached.*" if files
+                                             else "*Nothing added yet. Staff: press **Replay / media**.*")
     e.add_field(name="Evidence", value=value, inline=False)
     reason = (row["reason"] or "").strip()
     e.add_field(name="Reason", value=("> " + reason.replace("\n", "\n> "))[:1000] if reason
@@ -378,13 +412,16 @@ async def build_report(row, phase=None):
             files.append(text)
         else:
             (images if kind == "image" else links if kind == "link" else replays).append(text)
-    png = await asyncio.to_thread(ec.draw_report, row, yes, no, heads.get(row["uuid"]), phase, len(lines))
+    png = await asyncio.to_thread(ec.draw_report, row, yes, no, heads.get(row["uuid"]), phase)
     name = f"card-{row['id']}-{int(time.time() * 1000)}.png"
     url = f"https://namemc.com/profile/{row['uuid']}"
-    ev = ([f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
-          + [f"• 📎 {display_name(n)}" + (" (video)" if not n.lower().endswith(IMG_EXT) else "") for n in files])
-    text = ("**Evidence**\n" + "\n".join(ev))[:3800] if ev else \
-        "*No evidence yet. Staff: press **Replay / media** to add replay codes, screenshots or videos.*"
+    ev = [f"• `{t}`" for t in replays] + [f"• [{short_url(u)}]({u})" for u in links + images]
+    if ev:
+        text = ("**Evidence**\n" + "\n".join(ev))[:3800]
+    elif files:
+        text = None                                 # only uploaded files: they speak for themselves
+    else:
+        text = "*No evidence yet. Staff: press **Replay / media** to add replay codes, screenshots or videos.*"
     main = discord.Embed(url=url, color=STATE_COLOR[phase], description=text)
     main.set_image(url=f"attachment://{name}")
     embeds = [main]

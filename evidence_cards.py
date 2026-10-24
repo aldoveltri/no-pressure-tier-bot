@@ -262,7 +262,7 @@ def _finish(run, title, subtitle, pill_text, pill_color, footer):
 def draw_report(row, yes, no, head, phase, evidence_count=0):
     """The summary card. yes / no = names of who voted. phase: draft|voting|verdict|blacklisted|insufficient|cancelled."""
     text, color = STATES[phase]
-    sub = f"Reported by {clean(row['created_by'] or '?')} · {evidence_count} evidence item{'s' if evidence_count != 1 else ''}"
+    sub = f"Reported by {clean(row['created_by'] or '?')}"
     tags = [("SUSPECT", PANEL2)] + ([(clean(row["source"]).upper(), GOLD)] if row["source"] else [])
 
     def run(img, d, draw):

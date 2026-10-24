@@ -536,7 +536,7 @@ BLACKLIST_PAGES = [
     ]},
     {"title": "Urchin tags", "blocks": [
         _p("Urchin is a community cheater detection system that saves tagged players. The bot checks the "
-           "members of the guild about every 30 minutes."),
+           "members of the guild about every minute."),
         _b("When a member gets a new tag, the bot posts it in the evidence channel with the tags and a "
            "Create cheating report button. The report starts with the Urchin tags as the reason."),
         _b("The first check only remembers who is already tagged, so the channel is not flooded."),

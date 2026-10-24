@@ -37,7 +37,7 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - `/gexp setreq amount`: change the weekly requirement (saved).
 
 ### Blacklist, evidence, Urchin
-- `/blacklist add|edit|remove|list`, `/evidence add` (embed message: replay/media + reason, staff confirm, then public votes, end/cancel, final verdict message), `/urchin check|scan|test` and an automatic Urchin watch of the guild members every 30 minutes. Files: `evidence.py`, loaded by `main.py`.
+- `/blacklist add|edit|remove|list`, `/evidence add` (embed message: replay/media + reason, staff confirm, then public votes, end/cancel, final verdict message), `/urchin check|scan|test` and an automatic Urchin watch of the guild members every minute. Files: `evidence.py`, loaded by `main.py`.
 
 ### Automatic notices (#inactivity-notices)
 - Friday 12:00 AM Mountain Time: players under `FRIDAY_NOTICE_MAX_GEXP` (20,000) and in guild more than 7 days.
@@ -79,6 +79,7 @@ main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, elo.py
 | `EVIDENCE_STAFF_ONLY` | no | Empty or 0: everybody can use blacklist / evidence (test). 1: staff only (voting is always open to everybody once the report is confirmed) |
 | `URCHIN_API_KEY` | for Urchin | Key from the Urchin Discord (`/dashboard` command there) |
 | `URCHIN_URL` | no | API address, default `https://api.urchin.gg/v3` |
+| `URCHIN_INTERVAL_SECONDS` | no | How often Urchin is checked for new tags, default 60 (minimum 30) |
 | `URCHIN_KEY_HEADER` | no | Header name of the key, default `X-API-Key` |
 | `MUTE_PING_USER_ID` or `MUTE_PING_ROLE_ID` | no | Who gets pinged for mutes |
 | `MUTE_BRIDGE_ROLE_ID` | no | Discord role removed on mute and restored when it ends (needs the linked account) |

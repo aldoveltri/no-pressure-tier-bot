@@ -809,6 +809,11 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
     def __init__(self, bot):
         self.bot = bot
         super().__init__()
+        try:
+            seconds = max(30, int(_env("URCHIN_INTERVAL_SECONDS") or 60))
+        except ValueError:
+            seconds = 60
+        self.watch.change_interval(seconds=seconds)      # a new tag is posted within about a minute
         self.watch.start()
 
     def cog_unload(self):
@@ -863,14 +868,14 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
     async def scan(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            found = await self.scan_guild(post=True, only_new=False)
+            found = await self.scan_guild(post=True, only_new=False, force=True)
         except UrchinError as e:
             await interaction.followup.send(str(e), ephemeral=True)
             return
         await interaction.followup.send(f"Scan finished: {found} tagged member(s) posted.", ephemeral=True)
 
-    async def scan_guild(self, *, post, only_new):
-        members = await self.core.guild_members(force=True)
+    async def scan_guild(self, *, post, only_new, force=False):
+        members = await self.core.guild_members(force=force)
         uuids = [u.replace("-", "").lower() for u in members]
         tagged = await urchin_batch(uuids)                       # one request every 100 members
         found = 0
@@ -888,7 +893,7 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
                     found += 1
         return found
 
-    @tasks.loop(minutes=30)
+    @tasks.loop(seconds=60)
     async def watch(self):
         if not _env("URCHIN_API_KEY") or bl.chan_id("EVIDENCE_CHANNEL_ID") is None:
             return

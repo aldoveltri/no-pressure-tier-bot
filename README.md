@@ -77,9 +77,9 @@ main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, elo.py
 | `BLACKLIST_CHANNEL_ID` | no | Guild blacklist channel or forum |
 | `EVIDENCE_CHANNEL_ID` | no | Evidence channel or forum (cheating reports and Urchin alerts go in a thread named Evidence) |
 | `EVIDENCE_STAFF_ONLY` | no | Empty or 0: everybody can use blacklist / evidence (test). 1: staff only (voting is always open to everybody once the report is confirmed) |
-| `URCHIN_API_KEY` | for Urchin | Key from the Urchin Discord |
-| `URCHIN_URL` | no | Address template with {uuid} {name} {key}, if the default is not right |
-| `URCHIN_KEY_HEADER` | no | If Urchin wants the key in a header (for example Authorization) |
+| `URCHIN_API_KEY` | for Urchin | Key from the Urchin Discord (`/dashboard` command there) |
+| `URCHIN_URL` | no | API address, default `https://api.urchin.gg/v3` |
+| `URCHIN_KEY_HEADER` | no | Header name of the key, default `X-API-Key` |
 | `MUTE_PING_USER_ID` or `MUTE_PING_ROLE_ID` | no | Who gets pinged for mutes |
 | `MUTE_BRIDGE_ROLE_ID` | no | Discord role removed on mute and restored when it ends (needs the linked account) |
 | `VETERAN_DAYS` | no | 180 |

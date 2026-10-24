@@ -655,20 +655,31 @@ class EvidenceCog(commands.GroupCog, name="evidence", description="Cheating repo
 # ======================================================================================
 # Urchin (community cheater tags)
 # ======================================================================================
-# The exact API address and key format are set with variables, so they can be adjusted without touching the code:
-#   URCHIN_API_KEY      your key (from the Urchin Discord)
-#   URCHIN_URL          address template, {uuid} {name} {key} are replaced. Default below.
-#   URCHIN_KEY_HEADER   if the key goes in an HTTP header instead of the address (for example Authorization)
+# Official Urchin API (v3). The key is sent in the X-API-Key header. You get it with /dashboard in the Urchin Discord.
+#   URCHIN_API_KEY      your key
+#   URCHIN_URL          optional, the API address (default https://api.urchin.gg/v3)
+#   URCHIN_KEY_HEADER   optional, the header name of the key (default X-API-Key)
 
-URCHIN_DEFAULT_URL = "https://urchin.ws/player/{uuid}?sources=MANUAL&key={key}"
+URCHIN_DEFAULT_URL = "https://api.urchin.gg/v3"
 
 
 class UrchinError(Exception):
     pass
 
 
+def _tag_pair(t):
+    if isinstance(t, str):
+        return t, ""
+    kind = t.get("tag_type") or t.get("type") or t.get("tag") or "tag"
+    reason = str(t.get("reason") or "").strip()
+    by = t.get("added_by_username")
+    if by and not t.get("hide_username"):
+        reason = (reason + f"\nAdded by {by}").strip()
+    return str(kind), reason
+
+
 def parse_tags(data):
-    """Understands the usual shapes: {'tags': [...]}, [...] or {uuid: [...]}."""
+    """{'tags': [{'tag_type', 'reason', 'added_by_username', ...}]}  (also accepts a bare list)."""
     tags = None
     if isinstance(data, dict):
         tags = data.get("tags")
@@ -679,47 +690,63 @@ def parse_tags(data):
                     break
     elif isinstance(data, list):
         tags = data
-    out = []
-    for t in tags or []:
-        if isinstance(t, dict):
-            kind = t.get("type") or t.get("tag_type") or t.get("tag") or "tag"
-            out.append((str(kind), str(t.get("reason") or "").strip()))
-        elif isinstance(t, str):
-            out.append((t, ""))
-    return out
+    return [_tag_pair(t) for t in (tags or []) if isinstance(t, (dict, str))]
 
 
-async def urchin_fetch(uuid, name):
-    """Returns (http status, parsed JSON or text). Raises UrchinError when it is not configured."""
+async def urchin_request(method, path, *, params=None, body=None):
+    """Calls the Urchin API. Returns (http status, parsed JSON or text). Raises UrchinError when not configured."""
     key = _env("URCHIN_API_KEY")
     if not key:
         raise UrchinError("URCHIN_API_KEY is not set.")
-    url = _env("URCHIN_URL", URCHIN_DEFAULT_URL).format(uuid=uuid, name=name, key=key)
-    headers = {"User-Agent": "NoPressureBot"}
-    if _env("URCHIN_KEY_HEADER"):
-        headers[_env("URCHIN_KEY_HEADER")] = key
-    timeout = aiohttp.ClientTimeout(total=15)
+    base = _env("URCHIN_URL", URCHIN_DEFAULT_URL).rstrip("/")
+    headers = {"User-Agent": "NoPressureBot", "Accept": "application/json",
+               _env("URCHIN_KEY_HEADER", "X-API-Key"): key}
+    timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.get(url) as resp:
+        async with session.request(method, f"{base}/{path.lstrip('/')}", params=params, json=body) as resp:
             text = await resp.text()
             try:
-                body = json.loads(text)
+                data = json.loads(text)
             except ValueError:
-                body = text
-            return resp.status, body
+                data = text
+            return resp.status, data
+
+
+def _check_status(status):
+    if status in (401, 403):
+        raise UrchinError("The Urchin key was rejected (401/403): check URCHIN_API_KEY.")
+    if status == 429:
+        raise UrchinError("Urchin rate limit reached (429): wait a bit.")
+    if status >= 400 and status != 404:
+        raise UrchinError(f"Urchin answered HTTP {status}.")
+
+
+async def urchin_fetch(uuid, name):
+    """Raw answer for one player: GET /player/tags?player=<name>."""
+    return await urchin_request("GET", "player/tags", params={"player": name or uuid})
 
 
 async def urchin_tags(uuid, name):
     status, body = await urchin_fetch(uuid, name)
     if status == 404:
         return []
-    if status in (401, 403):
-        raise UrchinError("The Urchin key was rejected (401/403).")
-    if status == 429:
-        raise UrchinError("Urchin rate limit reached (429).")
-    if status >= 400:
-        raise UrchinError(f"Urchin answered HTTP {status}.")
+    _check_status(status)
     return parse_tags(body)
+
+
+async def urchin_batch(uuids):
+    """Tags of many players with POST /players (100 at a time). Returns {uuid without dashes: [(kind, reason)]}."""
+    out = {}
+    uuids = list(uuids)
+    for i in range(0, len(uuids), 100):
+        status, body = await urchin_request("POST", "players", body={"uuids": uuids[i:i + 100]})
+        _check_status(status)
+        players = body.get("players", {}) if isinstance(body, dict) else {}
+        for k, val in players.items():
+            tags = parse_tags(val if isinstance(val, list) else (val or {}))
+            if tags:
+                out[str(k).replace("-", "").lower()] = tags
+    return out
 
 
 def tags_signature(tags):
@@ -844,10 +871,11 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
 
     async def scan_guild(self, *, post, only_new):
         members = await self.core.guild_members(force=True)
+        uuids = [u.replace("-", "").lower() for u in members]
+        tagged = await urchin_batch(uuids)                       # one request every 100 members
         found = 0
-        for uuid in list(members):
-            name = await self.core.name_for(uuid)
-            tags = await urchin_tags(uuid, name)
+        for uuid in uuids:
+            tags = tagged.get(uuid, [])
             sig = tags_signature(tags) if tags else ""
             seen = await q_one("SELECT sig FROM urchin_seen WHERE uuid = ?", (uuid,))
             changed = (seen is None and tags) or (seen is not None and seen["sig"] != sig and tags)
@@ -855,9 +883,9 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
                         "ON CONFLICT(uuid) DO UPDATE SET sig = excluded.sig, seen_at = excluded.seen_at",
                         (uuid, sig, iso(now_utc())))
             if tags and (changed or not only_new) and post:
+                name = await self.core.name_for(uuid)
                 if await post_urchin_alert(self.core, uuid, name, tags):
                     found += 1
-            await asyncio.sleep(1.2)
         return found
 
     @tasks.loop(minutes=30)

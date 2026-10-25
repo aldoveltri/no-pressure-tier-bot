@@ -1,5 +1,6 @@
 """Community features: forum applications cross-post, guild bridge channel topic, guild party announcements."""
 import asyncio
+import html as htmllib
 import io
 import logging
 import os
@@ -7,6 +8,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import aiohttp
 import aiosqlite
 import discord
 from discord import app_commands
@@ -397,6 +399,151 @@ class CommunityEvents(commands.Cog):
         await asyncio.sleep(120)
 
 
+# ======================================================================================
+# applications on the Hypixel forums thread (hypixel.net)
+# ======================================================================================
+
+HX_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0 Safari/537.36", "Accept-Language": "en-US,en;q=0.9"}
+
+
+def parse_thread_page(page_html: str):
+    """Posts of a XenForo thread page: [{'id', 'author', 'text'}]."""
+    posts = []
+    for chunk in re.split(r'(?=<article[^>]*\bjs-post\b)', page_html):
+        m = re.match(r'<article[^>]*', chunk)
+        if not m:
+            continue
+        head = m.group(0)
+        pid = re.search(r'js-post-(\d+)', head) or re.search(r'id="post-(\d+)"', head)
+        author = re.search(r'data-author="([^"]*)"', head)
+        if not pid or not author:
+            continue
+        end = chunk.find("</article>")
+        body = chunk[: end if end > 0 else len(chunk)]
+        b = body.find("bbWrapper")
+        text = body[b:] if b >= 0 else ""
+        text = text.split("js-selectToQuoteEnd")[0]
+        text = re.sub(r"<[^>]*$", "", text)
+        text = re.sub(r"<blockquote.*?</blockquote>", "", text, flags=re.S)
+        text = re.sub(r"<br\s*/?>|</p>|</div>", "\n", text)
+        text = re.sub(r"<img[^>]*alt=\"([^\"]*)\"[^>]*>", r"\1", text)
+        text = htmllib.unescape(re.sub(r"<[^>]+>", "", text))
+        text = re.sub(r'^bbWrapper">', "", text).strip()
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        posts.append({"id": int(pid.group(1)), "author": htmllib.unescape(author.group(1)), "text": text})
+    return posts
+
+
+async def fetch_thread_posts(url: str, page: Optional[int] = None):
+    """(status, posts, last_page). page=None: the last page."""
+    base = re.sub(r"/page-\d+/?$", "", url.rstrip("/"))
+    target = f"{base}/page-{page}" if page else f"{base}/page-99999"
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout, headers=HX_HEADERS) as session:
+        async with session.get(target, allow_redirects=True) as r:
+            status = r.status
+            body = await r.text()
+            final = str(r.url)
+    if status != 200:
+        return status, [], None
+    m = re.search(r"/page-(\d+)", final)
+    return status, parse_thread_page(body), int(m.group(1)) if m else 1
+
+
+class ApplicationsCog(commands.GroupCog, name="applications", description="Guild applications on the Hypixel forums"):
+    def __init__(self, bot):
+        self.bot = bot
+        super().__init__()
+        self.watch.start()
+
+    def cog_unload(self):
+        self.watch.cancel()
+
+    def url(self):
+        return bl._env("HYPIXEL_THREAD_URL")
+
+    async def new_posts(self):
+        """Posts newer than the last one seen (None the first time: it only remembers where we are)."""
+        status, posts, page = await fetch_thread_posts(self.url())
+        if status != 200:
+            raise RuntimeError(f"the forum answered HTTP {status}")
+        if not posts:
+            raise RuntimeError("I could not read any post on the page (the site may have changed or blocked the bot)")
+        last = await kv_get("hx_last_post")
+        if page and page > 1 and last and posts[0]["id"] > int(last):
+            _, before, _ = await fetch_thread_posts(self.url(), page - 1)
+            posts = before + posts
+        newest = max(p["id"] for p in posts)
+        if last is None:
+            await kv_set("hx_last_post", newest)
+            return None
+        fresh = [p for p in posts if p["id"] > int(last)]
+        if fresh:
+            await kv_set("hx_last_post", newest)
+        return fresh
+
+    async def post_application(self, p):
+        target = bl.chan_id("APPLICATIONS_REVIEW_CHANNEL_ID")
+        if target is None:
+            return
+        link = f"{self.url().rstrip('/')}/post-{p['id']}".replace("/page-", "/page-")
+        link = re.sub(r"/page-\d+/", "/", link)
+        embed = discord.Embed(title=f"Reply by {p['author']}", url=link, color=0xF5A623)
+        embed.description = (p["text"][:1800] or "(no text: probably images only)")
+        embed.set_footer(text="From the guild thread on the Hypixel forums")
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Open on the forums", url=link))
+        ch = self.bot.get_channel(target) or await self.bot.fetch_channel(target)
+        role = bl._env("APPLICATIONS_PING_ROLE_ID")
+        await ch.send(content=f"<@&{role}> New reply in the guild thread" if role.isdigit() else "New reply in the guild thread",
+                      embed=embed, view=view, allowed_mentions=discord.AllowedMentions(roles=True))
+
+    @tasks.loop(minutes=5)
+    async def watch(self):
+        if not self.url() or bl.chan_id("APPLICATIONS_REVIEW_CHANNEL_ID") is None:
+            return
+        try:
+            fresh = await self.new_posts()
+            ignore = {x.strip().lower() for x in bl._env("HYPIXEL_THREAD_IGNORE_AUTHORS", "zCqmbo").split(",") if x.strip()}
+            for p in fresh or []:
+                if p["author"].lower() not in ignore:
+                    await self.post_application(p)
+        except Exception as e:
+            if not getattr(self, "_warned", False):
+                log.warning("The forum thread check failed: %s", e)
+                self._warned = True
+            return
+        self._warned = False
+
+    @watch.before_loop
+    async def _before(self):
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(60)
+
+    @app_commands.command(name="check", description="Test the Hypixel forums connection: shows the latest posts it can read (guild staff)")
+    @app_commands.check(staff_check)
+    async def check(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if not self.url():
+            await interaction.followup.send("HYPIXEL_THREAD_URL is not set on the host.", ephemeral=True)
+            return
+        try:
+            status, posts, page = await fetch_thread_posts(self.url())
+        except Exception as e:
+            await interaction.followup.send(f"Could not reach the forums: {e}", ephemeral=True)
+            return
+        if status != 200 or not posts:
+            await interaction.followup.send(f"HTTP {status}, posts read: {len(posts)}. The forum probably blocks the bot "
+                                            f"(Cloudflare) or its page layout is different.", ephemeral=True)
+            return
+        lines = [f"**#{p['id']}** {esc(p['author'])}: {esc(p['text'][:100]) or '(images)'}" for p in posts[-4:]]
+        last = await kv_get("hx_last_post")
+        await interaction.followup.send(f"Connection OK (page {page}, {len(posts)} posts read). Last post seen by the bot: "
+                                        f"{last or 'none yet (it starts counting from now)'}\n" + "\n".join(lines),
+                                        ephemeral=True)
+
+
 async def setup(bot: commands.Bot):
     async with aiosqlite.connect(bl.DB_PATH) as db:
         await db.executescript(SCHEMA)
@@ -404,3 +551,4 @@ async def setup(bot: commands.Bot):
     bot.add_dynamic_items(PartyButton)
     await bot.add_cog(PartyCog(bot))
     await bot.add_cog(CommunityEvents(bot))
+    await bot.add_cog(ApplicationsCog(bot))

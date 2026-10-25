@@ -617,7 +617,8 @@ EXTRA_PAGES = [
         _c("/party resend", "Staff. Posts the message again with the current lists."),
         _c("/party cancel", "Staff. Cancels the party."),
         _p("The bot posts the message again by itself 24 and 1 hours before the start (PARTY_REMINDER_HOURS). "
-           "Also automatic: new posts in the applications forum are copied to the review channel, and the guild "
+           "Also automatic: new replies in the guild thread on the Hypixel forums are copied to the review channel "
+           "(/applications check tests it), and the guild "
            "bridge channel topic shows the guild members and how many are online."),
     ]},
     {"title": "Settings and tests", "blocks": [

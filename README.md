@@ -22,6 +22,8 @@ Use `/guide` in Discord for the same, category by category.
 - `eligibility ign`: can they rejoin, days in guild (veteran at 180), debt to pay.
 - `history ign`: every break (reason, length) and how many times it was used.
 - `setdays ign days` (staff): fix/seed the banked days.
+- `adddays ign days [note]`, `days ign`, `removedays ign set` (staff): sets of days, each removable.
+- `move ign position` (staff): reorder `/breaklist guild`.
 - `remove ign` (staff): the player rejoined; days restart counting.
 Days in guild = banked days + time since the Hypixel join date while in guild. They freeze on the breaklist and are never lost.
 
@@ -48,7 +50,7 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - The card says why, and how much GEXP is needed. Buttons: **Breaklist Me** (posts "added" in the breaklist post) and **Excuse Me** (posts "excused" in the excuse list channel). Only staff and the pinged linked account can press them.
 
 ### Road to #6
-Daily post (`ROAD_POST_TIME_ET`, default 23:00 ET) in the road forum: GEXP gap to the three guilds above us, daily rates, ETA, chart. Needs `ROAD_GUILDS` (see below). After passing #6 the titles move up.
+Daily post (`ROAD_POST_TIME_ET`, default 23:59 ET) in the road forum: GEXP gap to the three guilds above us, daily rates, ETA, chart. Needs `ROAD_GUILDS` (see below). After passing #6 the titles move up.
 
 ### Test
 - `/test` (administrators): sends a test message to every channel set in the variables and tells you which ones work.
@@ -89,7 +91,7 @@ main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, eviden
 | `VETERAN_DAYS` | no | 180 |
 | `FRIDAY_NOTICE_MAX_GEXP` | no | 20000 |
 | `FINAL_NOTICE_HOURS_BEFORE_PURGE` | no | 12 |
-| `ROAD_POST_TIME_ET` | no | `23:00` |
+| `ROAD_POST_TIME_ET` | no | `23:59` |
 | `ROAD_GUILDS` | for Road | Exact names of ALL the guilds above us (today #6, #5, #4, #3, #2, #1), comma separated. The card goes up to #1 |
 | `ROAD_START_RANK` | no | Our rank today (default 7). Each listed guild we pass moves us up one place |
 | `AUTO_BACKUP_KEEP` | no | Automatic backups kept (14) |
@@ -119,3 +121,16 @@ Channels are read at every use: change the ID in the panel and restart, no code 
 - Commands missing: wait a minute, reload Discord (Ctrl+R).
 - Empty leaderboard after a deploy: `DB_PATH` points to a new place.
 - Square instead of a symbol: put `DejaVuSans.ttf` and `DejaVuSans-Bold.ttf` in a `fonts` folder next to `graphics.py`.
+
+
+## New
+- `/match ... date:` optional date; `/setdate` makes a new card.
+- `/elocalc p1_elo p2_elo` hypothetical elo change.
+- `/alerts [alert] [on|off]`: toggles 1v1 logs, match dates, blacklist posts, Urchin alerts (state in the `kv` table).
+- `/logins ign [days]`: login times (data saved by polling Hypixel `lastLogin`, ~15 min cycle, needs `HYPIXEL_API_KEY`).
+- Country flags show only when a country is set; 1v1 result/pause/settier/setelo cards have no flags.
+
+## Community (community.py)
+Variables: `PARTY_CHANNEL_ID`, `PARTY_PING_ROLE_ID` (optional), `PARTY_REMINDER_HOURS` (default `24,1`), `APPLICATIONS_FORUM_ID`, `APPLICATIONS_REVIEW_CHANNEL_ID`, `APPLICATIONS_PING_ROLE_ID` (optional), `GUILD_BRIDGE_CHANNEL_ID` (the bot needs Manage Channels there), `BRIDGE_TOPIC_PREFIX` (optional), `MESSAGE_CONTENT_INTENT=1` (only after enabling Message Content Intent in the Developer Portal: lets the application text be copied).
+
+Hypixel forums thread: `HYPIXEL_THREAD_URL` (the guild thread on hypixel.net), `APPLICATIONS_REVIEW_CHANNEL_ID`, `HYPIXEL_THREAD_IGNORE_AUTHORS` (default `zCqmbo`: staff replies are not copied), `APPLICATIONS_PING_ROLE_ID` (optional). Checked every 5 minutes; `/applications check` tests the connection. The first run only remembers the latest post.

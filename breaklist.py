@@ -159,6 +159,10 @@ CREATE TABLE IF NOT EXISTS mutes (
     uuid TEXT NOT NULL, ign TEXT, reason TEXT, start_at TEXT NOT NULL, end_at TEXT,
     status TEXT NOT NULL DEFAULT 'active', added_by TEXT, ended_at TEXT
 );
+CREATE TABLE IF NOT EXISTS warnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL, ign TEXT, reason TEXT, at TEXT NOT NULL, added_by TEXT, discord_id TEXT
+);
 CREATE TABLE IF NOT EXISTS road_history (
     day TEXT NOT NULL, guild TEXT NOT NULL, exp INTEGER NOT NULL, at TEXT, PRIMARY KEY (day, guild)
 );
@@ -173,7 +177,8 @@ async def setup_tables():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
         for table, col, kind in (("bl_requests", "channel_id", "TEXT"), ("bl_requests", "message_id", "TEXT"),
-                                 ("road_history", "at", "TEXT"), ("guild_seen", "in_guild", "INTEGER DEFAULT 1")):
+                                 ("road_history", "at", "TEXT"), ("guild_seen", "in_guild", "INTEGER DEFAULT 1"),
+                                 ("mutes", "discord_id", "TEXT")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             except aiosqlite.OperationalError:
@@ -2222,27 +2227,42 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         self.core = core
         super().__init__()
 
-    async def bridge_role(self, uuid, give: bool):
-        """Optional: removes / restores a Discord role (MUTE_BRIDGE_ROLE_ID) of the linked member."""
-        rid = _env("MUTE_BRIDGE_ROLE_ID")
-        did = await self.core.linked_discord(uuid)
-        if not rid.isdigit() or not did:
+    async def target_id(self, uuid, user):
+        """Who is pinged and gets the role: the member given with `user`, else the linked Discord account."""
+        if user is not None:
+            return user.id
+        return await self.core.linked_discord(uuid)
+
+    async def bridge_role(self, did, give: bool):
+        """Gives (mute) or removes (mute over) the 'No Guild Bridge' role. The role is MUTE_ROLE_ID, or the role
+        named 'No Guild Bridge'. Returns True when it worked, False when it could not be done."""
+        if not did:
             return False
+        rid = _env("MUTE_ROLE_ID")
         for guild in self.core.bot.guilds:
-            member, role = guild.get_member(did), guild.get_role(int(rid))
-            if member and role:
-                try:
-                    await (member.add_roles(role, reason="Mute ended") if give
-                           else member.remove_roles(role, reason="Muted"))
-                    return True
-                except discord.HTTPException:
-                    return False
+            role = guild.get_role(int(rid)) if rid.isdigit() else \
+                next((r for r in guild.roles if r.name.lower() == "no guild bridge"), None)
+            if role is None:
+                continue
+            try:
+                member = guild.get_member(int(did)) or await guild.fetch_member(int(did))
+            except discord.HTTPException:
+                continue
+            try:
+                await (member.add_roles(role, reason="Guild bridge mute") if give
+                       else member.remove_roles(role, reason="Guild bridge mute ended"))
+                return True
+            except discord.HTTPException as e:
+                log.warning("Could not change the No Guild Bridge role of %s: %s", did, e)
+                return False
         return False
 
-    @app_commands.command(name="add", description="Log a mute with its length and reason (guild staff)")
-    @app_commands.describe(ign="Minecraft username", length="3d, 12h, 1d12h, 2w, 30m or perm", reason="Why they were muted")
+    @app_commands.command(name="add", description="Mute a player from the guild bridge: role, ping and log (guild staff)")
+    @app_commands.describe(ign="Minecraft username", length="3d, 12h, 1d12h, 2w, 30m or perm", reason="Why they were muted",
+                           user="The Discord member to ping and give the role to (only if they are not linked)")
     @app_commands.check(staff_check)
-    async def add(self, interaction: discord.Interaction, ign: str, length: str, reason: str):
+    async def add(self, interaction: discord.Interaction, ign: str, length: str, reason: str,
+                  user: Optional[discord.Member] = None):
         await interaction.response.defer()
         td = parse_mute_length(length)
         if td is None:
@@ -2257,24 +2277,63 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             return
         now = now_utc()
         end = None if td == "perm" else now + td
-        mid = await q_run("INSERT INTO mutes (uuid, ign, reason, start_at, end_at, status, added_by) "
-                          "VALUES (?, ?, ?, ?, ?, 'active', ?)",
-                          (uuid, name, reason, iso(now), iso(end) if end else None, str(interaction.user.id)))
-        auto = await self.bridge_role(uuid, give=False)
+        did = await self.target_id(uuid, user)
+        mid = await q_run("INSERT INTO mutes (uuid, ign, reason, start_at, end_at, status, added_by, discord_id) "
+                          "VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+                          (uuid, name, reason, iso(now), iso(end) if end else None, str(interaction.user.id),
+                           str(did) if did else None))
+        gave = await self.bridge_role(did, give=True)
         embed = discord.Embed(title="Mute logged", color=0xE74C3C, timestamp=now)
         embed.add_field(name="Player", value=f"**{esc(name)}**", inline=True)
         embed.add_field(name="Length", value="Permanent" if end is None else gc.fmt_duration(td.total_seconds()), inline=True)
-        embed.add_field(name="Ends", value="Never" if end is None else gc.fmt_et(end), inline=True)
+        embed.add_field(name="Expires", value="Never" if end is None
+                        else f"{gc.fmt_et(end)}\n<t:{int(end.timestamp())}:R>", inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.set_footer(text=f"Mute #{mid} · by {interaction.user.display_name}")
-        todo = ("Guild bridge permissions removed automatically." if auto
-                else "Please remove their guild bridge permissions manually.")
-        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=f"{mute_ping()} {todo}".strip(), embed=embed,
-                                         mentions=MUTE_MENTIONS)
+        if did:
+            when = "This mute does not expire." if end is None else f"It expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)."
+            text = (f"<@{did}> you have been muted in the guild bridge. {when} "
+                    + ("The **No Guild Bridge** role was added: you can't write there until the mute ends."
+                       if gave else "Staff will remove your guild bridge permissions."))
+        else:
+            text = (f"**{esc(name)}** has been muted in the guild bridge, but I don't know their Discord account: "
+                    "link it with `/link` or give it with the `user` option.")
+        if not gave:
+            text += "\nThe **No Guild Bridge** role could not be added automatically: please add it manually."
+        content = f"{mute_ping()} {text}".strip()
+        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, embed=embed, mentions=MUTE_MENTIONS)
         if not posted:
-            await interaction.followup.send(content=f"{mute_ping()} {todo}".strip(), embed=embed, allowed_mentions=MUTE_MENTIONS)
+            await interaction.followup.send(content=content, embed=embed, allowed_mentions=MUTE_MENTIONS)
         else:
             await interaction.followup.send(f"Mute logged in {posted}.")
+
+    @app_commands.command(name="warn", description="Log a verbal warning: it changes nothing, it is only recorded (guild staff)")
+    @app_commands.describe(ign="Minecraft username", reason="Why they got the warning",
+                           user="The Discord member to ping (only if they are not linked)")
+    @app_commands.check(staff_check)
+    async def warn(self, interaction: discord.Interaction, ign: str, reason: str, user: Optional[discord.Member] = None):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        did = await self.target_id(uuid, user)
+        now = now_utc()
+        wid = await q_run("INSERT INTO warnings (uuid, ign, reason, at, added_by, discord_id) VALUES (?, ?, ?, ?, ?, ?)",
+                          (uuid, name, reason, iso(now), str(interaction.user.id), str(did) if did else None))
+        count = (await q_one("SELECT COUNT(*) AS c FROM warnings WHERE uuid = ?", (uuid,)))["c"]
+        embed = discord.Embed(title="Verbal warning", color=0xF1C40F, timestamp=now)
+        embed.add_field(name="Player", value=f"**{esc(name)}**", inline=True)
+        embed.add_field(name="Warnings so far", value=str(count), inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(text=f"Warning #{wid} · by {interaction.user.display_name}")
+        who = f"<@{did}> " if did else ""
+        content = f"{who}you received a verbal warning. Nothing else happens, it is only recorded.".strip()
+        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, embed=embed, mentions=MUTE_MENTIONS)
+        if not posted:
+            await interaction.followup.send(content=content, embed=embed, allowed_mentions=MUTE_MENTIONS)
+        else:
+            await interaction.followup.send(f"Verbal warning logged in {posted}.")
 
     @app_commands.command(name="end", description="Lift a mute now (guild staff)")
     @app_commands.check(staff_check)
@@ -2292,10 +2351,18 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         await self.announce_end(uuid, name, row["id"], by=interaction.user.display_name, interaction=interaction)
 
     async def announce_end(self, uuid, name, mid, *, by, interaction=None):
-        auto = await self.bridge_role(uuid, give=True)
-        todo = ("Guild bridge permissions restored automatically." if auto
-                else "Please restore their guild bridge permissions.")
-        text = f"{mute_ping()} The mute of **{esc(name)}** (#{mid}) is over ({by}). {todo}".strip()
+        row = await q_one("SELECT discord_id FROM mutes WHERE id = ?", (mid,))
+        did = (row["discord_id"] if row and row["discord_id"] else None) or await self.core.linked_discord(uuid)
+        removed = await self.bridge_role(did, give=False)
+        if did:
+            text = (f"<@{did}> your mute is over ({by}). "
+                    + ("The **No Guild Bridge** role was removed: you can write in the guild bridge again."
+                       if removed else "Staff will give you back your guild bridge permissions."))
+        else:
+            text = f"The mute of **{esc(name)}** (#{mid}) is over ({by})."
+        if not removed:
+            text += "\nThe **No Guild Bridge** role could not be removed automatically: please remove it manually."
+        text = f"{mute_ping()} {text}".strip()
         posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=text, mentions=MUTE_MENTIONS)
         if interaction is not None:
             if posted:
@@ -2311,18 +2378,22 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             return
         uuid, name = r
         rows = await q_all("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", (uuid,))
-        if not rows:
-            await interaction.followup.send(f"**{esc(name)}** has no mutes.")
+        warns = await q_all("SELECT * FROM warnings WHERE uuid = ? ORDER BY id DESC", (uuid,))
+        if not rows and not warns:
+            await interaction.followup.send(f"**{esc(name)}** has no mutes or warnings.")
             return
         embed = discord.Embed(title=f"Mutes of {name}", color=0x00C8E6)
-        embed.description = f"Total: **{len(rows)}**"
+        embed.description = f"Mutes: **{len(rows)}** · Verbal warnings: **{len(warns)}**"
         for row in rows[:8]:
             when = gc.fmt_date(from_iso(row["start_at"]))
             state = "Active" if row["status"] == "active" else "Ended"
             embed.add_field(name=f"#{row['id']} · {state} · {mute_length_text(row)} · {when}",
                             value=row["reason"] or "-", inline=False)
+        for w in warns[:4]:
+            embed.add_field(name=f"Verbal warning #{w['id']} · {gc.fmt_date(from_iso(w['at']))}",
+                            value=w["reason"] or "-", inline=False)
         if len(rows) > 8:
-            embed.set_footer(text=f"Showing the latest 8 of {len(rows)}")
+            embed.set_footer(text=f"Showing the latest 8 mutes of {len(rows)}")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="list", description="Players with an active mute (guild staff)")

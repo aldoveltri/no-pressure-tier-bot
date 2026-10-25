@@ -578,13 +578,16 @@ EXTRA_PAGES = [
         _c("/country view ign", "Everyone. Shows the country of a player."),
     ]},
     {"title": "Mute logs", "blocks": [
-        _c("/mute add ign length reason", "Staff. Length: 3d, 12h, 1d12h, 2w, 30m or perm. It is logged in the "
-           "mute logs channel with a ping to remove the guild bridge permissions."),
-        _c("/mute end ign", "Staff. Lifts the mute now and pings to restore the guild bridge permissions."),
-        _c("/mute view ign", "Everyone. Every mute of a player, with length and reason."),
+        _c("/mute add ign length reason [user]", "Staff. Length: 3d, 12h, 1d12h, 2w, 30m or perm. The muted "
+           "player gets the No Guild Bridge role, so they can't write in the guild bridge, and is pinged in the mute "
+           "logs channel with the date when the mute expires. Use user if their account is not linked."),
+        _c("/mute end ign", "Staff. Lifts the mute now: the role is removed and the player is pinged."),
+        _c("/mute warn ign reason [user]", "Staff. A verbal warning: it changes nothing, it is only recorded in the "
+           "mute logs (with a ping to the player) and counted."),
+        _c("/mute view ign", "Everyone. Every mute and verbal warning of a player, with reason."),
         _c("/mute list", "Staff. The active mutes."),
-        _p("When a timed mute ends the bot posts the reminder by itself. If a bridge role is set up and the "
-           "player linked their account, the role is removed and restored automatically."),
+        _p("When a timed mute ends, the bot removes the No Guild Bridge role by itself and pings the player to say "
+           "they can write in the guild bridge again."),
     ]},
     {"title": "Settings and tests", "blocks": [
         _c("/gexp setreq amount", "Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and "

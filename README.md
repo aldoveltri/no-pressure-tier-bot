@@ -34,7 +34,7 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 ### Requests, country, mutes, requirement
 - **Breaklist Me / Excuse Me** open a form and send a REQUEST to `REQUESTS_CHANNEL_ID`: reason, how long, will they stay guildless (if not: which guild). Staff presses Accept or Decline; the player is pinged. **Ignore** posts a professional message in that channel and stops the notices for that player until the next week.
 - `/country set|remove|view`: flag next to the name on the cards.
-- `/mute add|end|view|list`: mute logs in `MUTE_LOG_CHANNEL_ID`, with a ping; optional automatic Discord role for the guild bridge (`MUTE_BRIDGE_ROLE_ID`).
+- `/mute add|end|warn|view|list`: mute logs in `MUTE_LOG_CHANNEL_ID`. A mute pings the player with the expiry date and gives them the **No Guild Bridge** role (removed when the mute ends); `/mute warn` is a verbal warning that only logs. The player is the linked account or the `user` option.
 - `/gexp setreq amount`: change the weekly requirement (saved).
 - `/gexp missing`: without a join time it uses the exact moment the player joined the guild (never before this week's purge).
 - `/purge evaders [cycle] [ign] [page]` (staff): members who left the guild, what they earned and what they owed for the time they were in (55,000 x time in the cycle / week length, down to the minute). Statuses: suspect, met, breaklist, excused. The leave time is the last snapshot where they were still in the guild (snapshot every 5 minutes); departures before this feature existed are not known.
@@ -85,7 +85,7 @@ main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, eviden
 | `URCHIN_INTERVAL_SECONDS` | no | How often Urchin is checked for new tags, default 60 (minimum 30) |
 | `URCHIN_KEY_HEADER` | no | Header name of the key, default `X-API-Key` |
 | `MUTE_PING_USER_ID` or `MUTE_PING_ROLE_ID` | no | Who gets pinged for mutes |
-| `MUTE_BRIDGE_ROLE_ID` | no | Discord role removed on mute and restored when it ends (needs the linked account) |
+| `MUTE_ROLE_ID` | no | The No Guild Bridge role (if empty the bot looks for a role named "No Guild Bridge"). The bot needs Manage Roles and its role must be above it |
 | `VETERAN_DAYS` | no | 180 |
 | `FRIDAY_NOTICE_MAX_GEXP` | no | 20000 |
 | `FINAL_NOTICE_HOURS_BEFORE_PURGE` | no | 12 |

@@ -49,7 +49,7 @@ HYPIXEL_GUILD_NAME = _env("HYPIXEL_GUILD_NAME", "No Pressure")
 VETERAN_DAYS = _int_env("VETERAN_DAYS", 180)
 FRIDAY_MAX_GEXP = _int_env("FRIDAY_NOTICE_MAX_GEXP", 20000)
 FINAL_HOURS_BEFORE_PURGE = _int_env("FINAL_NOTICE_HOURS_BEFORE_PURGE", 12)
-ROAD_POST_TIME = _env("ROAD_POST_TIME_ET", "23:00")      # HH:MM, Eastern Time (11 PM: the day is almost complete)
+ROAD_POST_TIME = _env("ROAD_POST_TIME_ET", "23:59")      # HH:MM, Eastern Time (11:59 PM: the day is complete)
 AUTO_BACKUP_KEEP = _int_env("AUTO_BACKUP_KEEP", 14)
 ROAD_START_RANK = _int_env("ROAD_START_RANK", 7)             # our guild rank today (the guilds in ROAD_GUILDS are above us)
 
@@ -2701,9 +2701,11 @@ class Scheduler(commands.Cog):
     def __init__(self, core: Core):
         self.core = core
         self.loop.start()
+        self.road_loop.start()
 
     def cog_unload(self):
         self.loop.cancel()
+        self.road_loop.cancel()
 
     async def _due(self, key: str, when: datetime, window_hours: float) -> bool:
         """True once per key, when 'when' has passed (and not more than window_hours ago)."""
@@ -2732,14 +2734,6 @@ class Scheduler(commands.Cog):
                 await self.core.run_notices("final")
         except Exception:
             log.exception("The inactivity notices failed")
-        try:
-            hh, mm = (int(x) for x in ROAD_POST_TIME.split(":"))
-            today = datetime.now(gc.ET).date()
-            road_et = datetime(today.year, today.month, today.day, hh, mm, tzinfo=gc.ET)
-            if await self._due(f"road:{today.isoformat()}", road_et, 1):
-                await self.core.post_road()
-        except Exception:
-            log.exception("The Road post failed")
         try:
             mutes = getattr(self.core, "mute_cog", None)
             for row in await q_all("SELECT * FROM mutes WHERE status = 'active' AND end_at IS NOT NULL"):
@@ -2770,6 +2764,22 @@ class Scheduler(commands.Cog):
     async def _before(self):
         await self.core.bot.wait_until_ready()
         await asyncio.sleep(30)
+
+    @tasks.loop(seconds=15)
+    async def road_loop(self):
+        """The Road post is checked every 15 seconds so it goes out at the exact minute (default 11:59 PM ET)."""
+        try:
+            hh, mm = (int(x) for x in ROAD_POST_TIME.split(":"))
+            today = datetime.now(gc.ET).date()
+            road_et = datetime(today.year, today.month, today.day, hh, mm, tzinfo=gc.ET)
+            if await self._due(f"road:{today.isoformat()}", road_et, 0.5):
+                await self.core.post_road()
+        except Exception:
+            log.exception("The Road post failed")
+
+    @road_loop.before_loop
+    async def _road_before(self):
+        await self.core.bot.wait_until_ready()
 
 
 def prune_auto_backups(keep: int):

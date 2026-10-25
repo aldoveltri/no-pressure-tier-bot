@@ -55,10 +55,7 @@ log.setLevel(logging.INFO)
 log.addHandler(_handler)
 log.addHandler(logging.StreamHandler())
 
-_intents = discord.Intents.default()
-if os.getenv("MESSAGE_CONTENT_INTENT", "").strip() == "1":
-    _intents.message_content = True      # only after switching it on in the Developer Portal (Bot > Privileged intents)
-bot = commands.Bot(command_prefix="!", intents=_intents)
+bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
 NO_MENTIONS = discord.AllowedMentions.none()
 SEASON_ELO_LOSS = 100

@@ -608,6 +608,18 @@ EXTRA_PAGES = [
         _p("When a timed mute ends, the bot removes the No Guild Bridge role by itself and pings the player to say "
            "they can write in the guild bridge again."),
     ]},
+    {"title": "Guild parties", "blocks": [
+        _c("/party create when description [host] [title] [image]", "Staff. Posts the party announcement with the "
+           "date, a countdown and the buttons Showing up / Maybe / Not showing up. Names come from linked accounts "
+           "and show the 1v1 tier."),
+        _c("/party stats", "Staff (also the button on the message). Tier, 1v1 record, GEXP of the last 7 days, days in "
+           "guild and last login of everyone who answered, so you know who to expect."),
+        _c("/party resend", "Staff. Posts the message again with the current lists."),
+        _c("/party cancel", "Staff. Cancels the party."),
+        _p("The bot posts the message again by itself 24 and 1 hours before the start (PARTY_REMINDER_HOURS). "
+           "Also automatic: new posts in the applications forum are copied to the review channel, and the guild "
+           "bridge channel topic shows the guild members and how many are online."),
+    ]},
     {"title": "Settings and tests", "blocks": [
         _c("/gexp setreq amount", "Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and "
            "used by every new calculation, card and notice."),

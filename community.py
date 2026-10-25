@@ -1,0 +1,406 @@
+"""Community features: forum applications cross-post, guild bridge channel topic, guild party announcements."""
+import asyncio
+import io
+import logging
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import aiosqlite
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+
+import breaklist as bl
+import gexpcalc as gc
+from breaklist import q_one, q_all, q_run, kv_get, kv_set, esc, now_utc, iso, from_iso, staff_check, lookup, n
+from config import tier_from_elo
+from database import get_player, get_stats
+
+log = logging.getLogger("community")
+NO_MENTIONS = discord.AllowedMentions.none()
+UTC = timezone.utc
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS parties (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT, host TEXT, host_uuid TEXT, description TEXT, start_at TEXT NOT NULL,
+    image BLOB, image_name TEXT, channel_id TEXT, message_id TEXT,
+    status TEXT NOT NULL DEFAULT 'active', created_by TEXT
+);
+CREATE TABLE IF NOT EXISTS party_votes (
+    party_id INTEGER NOT NULL, discord_id TEXT NOT NULL, name TEXT, uuid TEXT, vote TEXT NOT NULL,
+    PRIMARY KEY (party_id, discord_id)
+);
+"""
+
+VOTES = {"y": ("Showing Up", "✅"), "m": ("Maybe Showing Up", "❔"), "n": ("Not Showing Up", "❌")}
+
+
+# ======================================================================================
+# guild party
+# ======================================================================================
+
+def header_line(start: datetime) -> str:
+    t = start.astimezone(gc.ET)
+    hour = t.strftime("%I").lstrip("0") or "12"
+    clock = f"{hour} {t.strftime('%p')}" if t.minute == 0 else f"{hour}:{t.strftime('%M %p')}"
+    return f"{t.strftime('%A, %B')} {t.day} @ {clock} ET"
+
+
+async def voter_identity(discord_id, fallback):
+    """(display name, uuid or None): the Minecraft name when the Discord account is linked."""
+    try:
+        row = await q_one("SELECT uuid, ign FROM links WHERE discord_id = ?", (str(discord_id),))
+    except Exception:
+        row = None
+    if row:
+        return row["ign"], row["uuid"]
+    return fallback, None
+
+
+async def tier_tag(uuid):
+    if not uuid:
+        return ""
+    try:
+        p = await get_player(uuid)
+    except Exception:
+        p = None
+    return f" ({tier_from_elo(p['elo'])})" if p else ""
+
+
+async def party_embed(party):
+    start = from_iso(party["start_at"])
+    embed = discord.Embed(color=0x9B7BE8)
+    embed.set_author(name=party["title"] or "Guild Party")
+    embed.title = header_line(start)
+    ts = int(start.timestamp())
+    text = (party["description"] or "").strip()
+    if party["host"]:
+        text = text or f"Join as {party['host']} hosts the guild party."
+    text += f"\n\nStarts <t:{ts}:F> (<t:{ts}:R>)"
+    votes = await q_all("SELECT * FROM party_votes WHERE party_id = ? ORDER BY rowid", (party["id"],))
+    for key in ("y", "m", "n"):
+        label = VOTES[key][0]
+        names = []
+        for v in votes:
+            if v["vote"] == key:
+                names.append(f"{esc(v['name'])}{await tier_tag(v['uuid'])}")
+        text += f"\n\n__{label}:__\n" + (", ".join(names) if names else "-")
+    embed.description = text[:4000]
+    if party["host_uuid"]:
+        embed.set_thumbnail(url=f"https://mc-heads.net/head/{party['host_uuid']}")
+    if party["image"]:
+        embed.set_image(url=f"attachment://{party['image_name']}")
+    embed.set_footer(text=f"Party #{party['id']} · the tier is the 1v1 tier")
+    return embed
+
+
+def party_view(pid):
+    view = discord.ui.View(timeout=None)
+    view.add_item(PartyButton("y", pid))
+    view.add_item(PartyButton("m", pid))
+    view.add_item(PartyButton("n", pid))
+    view.add_item(PartyButton("st", pid))
+    return view
+
+
+class PartyButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pt:(?P<act>y|m|n|st):(?P<pid>\d+)"):
+    def __init__(self, act, pid):
+        labels = {"y": ("Showing up", discord.ButtonStyle.success), "m": ("Maybe", discord.ButtonStyle.secondary),
+                  "n": ("Not showing up", discord.ButtonStyle.danger), "st": ("Attendee stats (staff)", discord.ButtonStyle.primary)}
+        label, style = labels[act]
+        super().__init__(discord.ui.Button(label=label, style=style, custom_id=f"pt:{act}:{pid}"))
+        self.act, self.pid = act, int(pid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["act"], int(match["pid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        party = await q_one("SELECT * FROM parties WHERE id = ?", (self.pid,))
+        if party is None or party["status"] != "active":
+            await interaction.response.send_message("This party is over or was cancelled.", ephemeral=True)
+            return
+        if self.act == "st":
+            if not bl.is_guild_staff(interaction.user):
+                await interaction.response.send_message("Only guild staff can see this.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            core = interaction.client.np_core
+            embeds = await attendee_stats(core, party)
+            await interaction.followup.send(embeds=embeds[:4], ephemeral=True)
+            return
+        name, uuid = await voter_identity(interaction.user.id, interaction.user.display_name)
+        row = await q_one("SELECT vote FROM party_votes WHERE party_id = ? AND discord_id = ?",
+                          (self.pid, str(interaction.user.id)))
+        if row and row["vote"] == self.act:                  # same button again: take the answer back
+            await q_run("DELETE FROM party_votes WHERE party_id = ? AND discord_id = ?", (self.pid, str(interaction.user.id)))
+        else:
+            await q_run("INSERT INTO party_votes (party_id, discord_id, name, uuid, vote) VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT(party_id, discord_id) DO UPDATE SET name = excluded.name, uuid = excluded.uuid, "
+                        "vote = excluded.vote", (self.pid, str(interaction.user.id), name, uuid, self.act))
+        await interaction.response.edit_message(embed=await party_embed(party), view=party_view(self.pid))
+
+
+async def attendee_stats(core, party):
+    """One embed per answer (showing / maybe / not): tier, 1v1 record, GEXP, days in guild, last login."""
+    votes = await q_all("SELECT * FROM party_votes WHERE party_id = ? ORDER BY rowid", (party["id"],))
+    now = now_utc()
+    embeds = []
+    for key in ("y", "m", "n"):
+        lines = []
+        for v in [x for x in votes if x["vote"] == key]:
+            if not v["uuid"]:
+                lines.append(f"**{esc(v['name'])}** · Discord account not linked: no stats")
+                continue
+            p = await get_player(v["uuid"])
+            wins, losses = await get_stats(v["uuid"])
+            gexp, cnt = await core.window_sum(v["uuid"], now - timedelta(days=6), now)
+            days, _ = await core.days_info(v["uuid"])
+            last = await q_one("SELECT login_at FROM logins WHERE uuid = ? ORDER BY login_at DESC LIMIT 1", (v["uuid"],))
+            tier = f"{tier_from_elo(p['elo'])} ({p['elo']})" if p else "no tier"
+            lines.append(f"**{esc(v['name'])}** · {tier} · 1v1 {wins}W-{losses}L · GEXP 7d {n(gexp)} · "
+                         f"{int(days)} days in guild · last login {gc.fmt_date(from_iso(last['login_at'])) if last else '?'}")
+        e = discord.Embed(title=f"{VOTES[key][1]} {VOTES[key][0]} ({len(lines)})", color=0x9B7BE8)
+        e.description = ("\n".join(lines) or "-")[:4000]
+        embeds.append(e)
+    return embeds
+
+
+async def send_party(bot, party, ping=None):
+    """Posts the party message (a new one) in its channel and remembers it. Returns the message or None."""
+    cid = bl.chan_id("PARTY_CHANNEL_ID") or (int(party["channel_id"]) if party["channel_id"] else None)
+    if cid is None:
+        return None
+    ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
+    kwargs = {"embed": await party_embed(party), "view": party_view(party["id"]),
+              "allowed_mentions": discord.AllowedMentions(roles=True)}
+    if ping:
+        kwargs["content"] = ping
+    if party["image"]:
+        kwargs["file"] = discord.File(io.BytesIO(party["image"]), filename=party["image_name"])
+    msg = await ch.send(**kwargs)
+    if party["message_id"] and party["channel_id"]:             # the old message loses its buttons
+        try:
+            old = await (bot.get_channel(int(party["channel_id"])) or await bot.fetch_channel(int(party["channel_id"]))
+                         ).fetch_message(int(party["message_id"]))
+            await old.edit(view=None)
+        except discord.HTTPException:
+            pass
+    await q_run("UPDATE parties SET channel_id = ?, message_id = ? WHERE id = ?", (str(ch.id), str(msg.id), party["id"]))
+    return msg
+
+
+class PartyCog(commands.GroupCog, name="party", description="Guild party announcements"):
+    def __init__(self, bot):
+        self.bot = bot
+        super().__init__()
+        self.loop.start()
+
+    def cog_unload(self):
+        self.loop.cancel()
+
+    @app_commands.command(name="create", description="Announce a guild party with Showing up / Maybe / Not buttons (guild staff)")
+    @app_commands.describe(when="Start (Eastern Time): 2026/08/29 7:00 PM", description="What the party is about",
+                           host="Minecraft username of the host (optional)", title="Default: Guild Party",
+                           image="Picture shown under the text (optional)")
+    @app_commands.check(staff_check)
+    async def create(self, interaction: discord.Interaction, when: str, description: str, host: Optional[str] = None,
+                     title: Optional[str] = None, image: Optional[discord.Attachment] = None):
+        await interaction.response.defer(ephemeral=True)
+        start = gc.parse_et(when)
+        if start is None or not re.search(r"\d:\d|am|pm", when, re.I):
+            await interaction.followup.send("I couldn't read the start. Use the date and the time, for example "
+                                            "`2026/08/29 7:00 PM` (Eastern Time).", ephemeral=True)
+            return
+        if start.astimezone(UTC) <= now_utc():
+            await interaction.followup.send("That time is in the past.", ephemeral=True)
+            return
+        host_uuid = host_name = None
+        if host:
+            r = await lookup(interaction, host)
+            if r is None:
+                return
+            host_uuid, host_name = r
+        data = name = None
+        if image is not None:
+            data = await image.read()
+            name = "party" + (os.path.splitext(image.filename or "")[1] or ".png")
+        pid = await q_run(
+            "INSERT INTO parties (title, host, host_uuid, description, start_at, image, image_name, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (title or "Guild Party", host_name, host_uuid, description, iso(start), data, name, str(interaction.user.id)))
+        party = await q_one("SELECT * FROM parties WHERE id = ?", (pid,))
+        ping = bl._env("PARTY_PING_ROLE_ID")
+        msg = await send_party(self.bot, party, ping=f"<@&{ping}>" if ping.isdigit() else None)
+        if msg is None:
+            await interaction.followup.send("PARTY_CHANNEL_ID is not set (or I can't post there): the party is saved, "
+                                            "use `/party resend` after fixing it.", ephemeral=True)
+            return
+        await interaction.followup.send(f"Party #{pid} posted in {msg.channel.mention}. The bot reposts it by itself "
+                                        f"before the start (default 24 and 1 hours).", ephemeral=True)
+
+    async def _pick(self, pid):
+        if pid is not None:
+            return await q_one("SELECT * FROM parties WHERE id = ?", (pid,))
+        return await q_one("SELECT * FROM parties WHERE status = 'active' ORDER BY start_at LIMIT 1")
+
+    @app_commands.command(name="resend", description="Post the party message again with the current lists (guild staff)")
+    @app_commands.describe(party_id="Default: the next party")
+    @app_commands.check(staff_check)
+    async def resend(self, interaction: discord.Interaction, party_id: Optional[int] = None):
+        await interaction.response.defer(ephemeral=True)
+        party = await self._pick(party_id)
+        if party is None or party["status"] != "active":
+            await interaction.followup.send("There is no active party.", ephemeral=True)
+            return
+        msg = await send_party(self.bot, party)
+        await interaction.followup.send(f"Posted in {msg.channel.mention}." if msg else "I couldn't post it (PARTY_CHANNEL_ID).",
+                                        ephemeral=True)
+
+    @app_commands.command(name="stats", description="Tier, 1v1 record, GEXP and last login of everyone who answered (guild staff)")
+    @app_commands.describe(party_id="Default: the next party")
+    @app_commands.check(staff_check)
+    async def stats(self, interaction: discord.Interaction, party_id: Optional[int] = None):
+        await interaction.response.defer(ephemeral=True)
+        party = await self._pick(party_id)
+        if party is None:
+            await interaction.followup.send("There is no party.", ephemeral=True)
+            return
+        await interaction.followup.send(embeds=(await attendee_stats(self.bot.np_core, party))[:4], ephemeral=True)
+
+    @app_commands.command(name="cancel", description="Cancel a party: its buttons stop working (guild staff)")
+    @app_commands.describe(party_id="Default: the next party")
+    @app_commands.check(staff_check)
+    async def cancel(self, interaction: discord.Interaction, party_id: Optional[int] = None):
+        await interaction.response.defer(ephemeral=True)
+        party = await self._pick(party_id)
+        if party is None or party["status"] != "active":
+            await interaction.followup.send("There is no active party.", ephemeral=True)
+            return
+        await q_run("UPDATE parties SET status = 'cancelled' WHERE id = ?", (party["id"],))
+        await self._close_message(party, "Party cancelled")
+        await interaction.followup.send(f"Party #{party['id']} cancelled.", ephemeral=True)
+
+    async def _close_message(self, party, note):
+        if not (party["channel_id"] and party["message_id"]):
+            return
+        try:
+            ch = self.bot.get_channel(int(party["channel_id"])) or await self.bot.fetch_channel(int(party["channel_id"]))
+            msg = await ch.fetch_message(int(party["message_id"]))
+            embed = msg.embeds[0]
+            embed.set_footer(text=f"Party #{party['id']} · {note}")
+            await msg.edit(embed=embed, view=None)
+        except (discord.HTTPException, IndexError):
+            pass
+
+    @tasks.loop(minutes=2)
+    async def loop(self):
+        try:
+            hours = [float(x) for x in bl._env("PARTY_REMINDER_HOURS", "24,1").split(",") if x.strip()]
+            now = now_utc()
+            for party in await q_all("SELECT * FROM parties WHERE status = 'active'"):
+                start = from_iso(party["start_at"])
+                if now > start + timedelta(hours=3):
+                    await q_run("UPDATE parties SET status = 'done' WHERE id = ?", (party["id"],))
+                    await self._close_message(party, "Party over")
+                    continue
+                for h in sorted(hours, reverse=True):
+                    key = f"party:{party['id']}:{h:g}"
+                    due = start - timedelta(hours=h)
+                    # only when the moment passed less than 30 minutes ago (a party created later skips old reminders)
+                    if due <= now < min(start, due + timedelta(minutes=30)) and not await kv_get(key):
+                        await kv_set(key, iso(now))
+                        ping = bl._env("PARTY_PING_ROLE_ID")
+                        await send_party(self.bot, party, ping=f"<@&{ping}>" if ping.isdigit() else None)
+                        break
+        except Exception:
+            log.exception("The party reminders failed")
+
+    @loop.before_loop
+    async def _before(self):
+        await self.bot.wait_until_ready()
+
+
+# ======================================================================================
+# applications cross-post and bridge channel topic
+# ======================================================================================
+
+class CommunityEvents(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.topic_loop.start()
+        self._topic_warned = False
+
+    def cog_unload(self):
+        self.topic_loop.cancel()
+
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread):
+        forum = bl.chan_id("APPLICATIONS_FORUM_ID")
+        target = bl.chan_id("APPLICATIONS_REVIEW_CHANNEL_ID")
+        if forum is None or target is None or thread.parent_id != forum:
+            return
+        await asyncio.sleep(2)                               # let Discord create the first message
+        text = ""
+        try:
+            first = await thread.fetch_message(thread.id)
+            text = first.content or ""
+        except discord.HTTPException:
+            pass
+        owner = f"<@{thread.owner_id}>" if thread.owner_id else "?"
+        embed = discord.Embed(title=thread.name[:250], url=thread.jump_url, color=0x00C8E6)
+        embed.description = (text[:1800] if text else "Open the post to read the application.")
+        embed.add_field(name="Applicant", value=owner, inline=True)
+        tags = ", ".join(t.name for t in getattr(thread, "applied_tags", []))
+        if tags:
+            embed.add_field(name="Tags", value=tags, inline=True)
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Open application", url=thread.jump_url))
+        try:
+            ch = self.bot.get_channel(target) or await self.bot.fetch_channel(target)
+            role = bl._env("APPLICATIONS_PING_ROLE_ID")
+            await ch.send(content=f"<@&{role}> New guild application" if role.isdigit() else "New guild application",
+                          embed=embed, view=view, allowed_mentions=discord.AllowedMentions(roles=True))
+        except discord.HTTPException as e:
+            log.warning("Could not cross-post the application: %s", e)
+
+    @tasks.loop(minutes=10)
+    async def topic_loop(self):
+        cid = bl.chan_id("GUILD_BRIDGE_CHANNEL_ID")
+        if cid is None:
+            return
+        try:
+            core = self.bot.np_core
+            members = await core.guild_members()
+            if not members:
+                return
+            online = (await q_one("SELECT COUNT(*) AS c FROM guild_seen WHERE COALESCE(in_guild, 1) = 1 "
+                                  "AND COALESCE(online, 0) = 1"))["c"]
+            prefix = bl._env("BRIDGE_TOPIC_PREFIX")
+            topic = (f"{prefix + ' | ' if prefix else ''}Guild members: {len(members)} | Online now: {online}")[:1000]
+            ch = self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)
+            if ch.topic != topic:
+                await ch.edit(topic=topic, reason="Guild member count")
+        except discord.Forbidden:
+            if not self._topic_warned:
+                log.warning("I can't change the topic of the guild bridge channel: give me Manage Channels there")
+                self._topic_warned = True
+        except Exception:
+            log.exception("The channel topic update failed")
+
+    @topic_loop.before_loop
+    async def _before(self):
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(120)
+
+
+async def setup(bot: commands.Bot):
+    async with aiosqlite.connect(bl.DB_PATH) as db:
+        await db.executescript(SCHEMA)
+        await db.commit()
+    bot.add_dynamic_items(PartyButton)
+    await bot.add_cog(PartyCog(bot))
+    await bot.add_cog(CommunityEvents(bot))

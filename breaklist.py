@@ -187,7 +187,7 @@ async def setup_tables():
         for table, col, kind in (("bl_requests", "channel_id", "TEXT"), ("bl_requests", "message_id", "TEXT"),
                                  ("road_history", "at", "TEXT"), ("guild_seen", "in_guild", "INTEGER DEFAULT 1"),
                                  ("mutes", "discord_id", "TEXT"), ("bl_entries", "ord", "INTEGER"),
-                                 ("guild_seen", "login_polled_at", "TEXT")):
+                                 ("guild_seen", "login_polled_at", "TEXT"), ("guild_seen", "online", "INTEGER")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             except aiosqlite.OperationalError:
@@ -1116,6 +1116,32 @@ class Core:
         await q_run("UPDATE bl_entries SET days_total = ? WHERE uuid = ? AND status = 'active'", (new, uuid))
         return sid, new
 
+    async def guild_history_text(self, uuid):
+        """Short text with the guilds we know about for a player: our own stays and the guild they are in now.
+        (Hypixel's API does not give the guilds a player was in before, only the current one.)"""
+        lines = []
+        try:
+            stays = await q_all("SELECT joined_at, left_at FROM guild_left WHERE uuid = ? ORDER BY left_at DESC LIMIT 5",
+                                (uuid,))
+            for x in stays:
+                a, b = from_iso(x["joined_at"]), from_iso(x["left_at"])
+                span = f"{max(0, int((b - a).total_seconds() // 86400))} days" if a and b else "unknown length"
+                lines.append(f"• **{esc(HYPIXEL_GUILD_NAME or 'This guild')}**: "
+                             f"{gc.fmt_date(a) if a else '?'} → {gc.fmt_date(b)} ({span})")
+            other = await api_guild({"player": uuid})
+            if other:
+                m = next((x for x in other.get("members", []) if x.get("uuid") == uuid), None)
+                since = (datetime.fromtimestamp(m["joined"] / 1000, tz=UTC) if m and m.get("joined") else None)
+                if other.get("name", "").lower() != (HYPIXEL_GUILD_NAME or "").lower():
+                    lines.insert(0, f"• **Now in {esc(other.get('name', '?'))}**"
+                                 + (f" since {gc.fmt_date(since)}" if since else ""))
+                    lines.append("⚠️ They joined another guild: that removes the breaklist.")
+        except Exception:
+            log.exception("The guild history failed")
+        if not lines:
+            return ""
+        return "\n**Guild history we know:**\n" + "\n".join(lines)
+
     # ----- logins (Hypixel only gives the last login/logout, so we keep every one we see) -----
 
     async def poll_logins(self, batch=20):
@@ -1141,6 +1167,7 @@ class Core:
             ms_in, ms_out = player.get("lastLogin"), player.get("lastLogout")
             if not ms_in:
                 continue
+            await q_run("UPDATE guild_seen SET online = ? WHERE uuid = ?", (1 if ms_in > (ms_out or 0) else 0, uuid))
             login = iso(datetime.fromtimestamp(ms_in / 1000, tz=UTC))
             name = player.get("displayname") or ""
             await q_run("INSERT OR IGNORE INTO logins (uuid, ign, login_at) VALUES (?, ?, ?)", (uuid, name, login))
@@ -1303,7 +1330,7 @@ class Core:
 
     async def announce_breaklist(self, name, res, channel):
         card = await self.breaklist_card(res["entry"], "BREAKLISTED", res["count"])
-        text = f"✅ **{esc(name)}** was added to the breaklist."
+        text = f"✅ **{esc(name)}** was added to the breaklist." + await self.guild_history_text(res["entry"]["uuid"])
         posted = await self.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
                                     thread_name=name)
         if not posted:
@@ -1781,7 +1808,9 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             await interaction.followup.send(res["error"])
             return
         card = await self.core.breaklist_card(res["entry"], "BREAKLISTED", res["count"])
-        posted = await self.core.post_to("BREAKLIST_CHANNEL_ID", content=f"✅ **{esc(name)}** was added to the breaklist.",
+        history = await self.core.guild_history_text(uuid)
+        posted = await self.core.post_to("BREAKLIST_CHANNEL_ID",
+                                         content=f"✅ **{esc(name)}** was added to the breaklist." + history,
                                          data=card, filename="breaklist.png", thread_name=name)
         if posted:
             await interaction.followup.send(f"✅ **{esc(name)}** was added to the breaklist. Notice posted in {posted}.")

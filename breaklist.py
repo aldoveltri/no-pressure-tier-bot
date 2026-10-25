@@ -1901,7 +1901,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.describe(ign="Minecraft username of the player", days="Days to add",
                            note="What these days are for (optional)")
     @app_commands.check(staff_check)
-    async def adddays(self, interaction: discord.Interaction, ign: str, days: app_commands.Range[float, 0.01, 5000],
+    async def adddays(self, interaction: discord.Interaction, ign: str, days: app_commands.Range[float, 0.01, 5000.0],
                       note: Optional[str] = None):
         await interaction.response.defer()
         r = await lookup(interaction, ign)

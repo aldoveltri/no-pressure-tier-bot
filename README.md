@@ -26,7 +26,8 @@ Use `/guide` in Discord for the same, category by category.
 Days in guild = banked days + time since the Hypixel join date while in guild. They freeze on the breaklist and are never lost.
 
 ### GEXP and excuses
-- `/gexp missing ign join start_gexp [current] [debt] [save]`: normal requirement (55,000 x time left until Tuesday 12:00 AM ET / week length, to the second), starting GEXP, current GEXP, extra debt, total target, remaining debt. Date format in commands: `2026/10/21 6:00 PM` (ET), or without the year `10/21 6:00 PM`, or `2026/10/21 18:00`. The cards always show MM/DD/YYYY. `save:True` stores the remaining debt.
+- `/purge evaders [cycle] [ign] [page]`: members who left the guild, with the GEXP they earned vs the proportional requirement for the time they were in the cycle (continuous, to the second); breaklisted/excused are marked as legitimate. Leaves are recorded from the guild checks (every 15 min), so tracking starts at install.
+- `/gexp missing ign [join] start_gexp [current] [debt] [save]`: normal requirement (55,000 x time left until Tuesday 12:00 AM ET / week length, to the second), starting GEXP, current GEXP, extra debt, total target, remaining debt. Date format in commands: `2026/10/21 6:00 PM` (ET), or without the year `10/21 6:00 PM`, or `2026/10/21 18:00`. The cards always show MM/DD/YYYY. `save:True` stores the remaining debt.
 - Debt rule: the normal requirement is met first, only the GEXP beyond it pays the debt (owe 9,286+40: earn 9,326 = clear; 9,300 = 26 left). Debt carries over weeks and through the breaklist.
 - `/excuse add|remove|list ...` (staff): excusal list stored in the database.
 
@@ -35,6 +36,8 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - `/country set|remove|view`: flag next to the name on the cards.
 - `/mute add|end|view|list`: mute logs in `MUTE_LOG_CHANNEL_ID`, with a ping; optional automatic Discord role for the guild bridge (`MUTE_BRIDGE_ROLE_ID`).
 - `/gexp setreq amount`: change the weekly requirement (saved).
+- `/gexp missing`: without a join time it uses the exact moment the player joined the guild (never before this week's purge).
+- `/purge evaders [cycle] [ign] [page]` (staff): members who left the guild, what they earned and what they owed for the time they were in (55,000 x time in the cycle / week length, down to the minute). Statuses: suspect, met, breaklist, excused. The leave time is the last snapshot where they were still in the guild (snapshot every 5 minutes); departures before this feature existed are not known.
 
 ### Blacklist, evidence, Urchin
 - `/blacklist add|edit|remove|list`, `/evidence add` (embed message: replay/media + reason, staff confirm, then public votes, end/cancel, final verdict message), `/urchin check|scan|test` and an automatic Urchin watch of the guild members every minute. Files: `evidence.py`, loaded by `main.py`.
@@ -45,7 +48,7 @@ Days in guild = banked days + time since the Hypixel join date while in guild. T
 - The card says why, and how much GEXP is needed. Buttons: **Breaklist Me** (posts "added" in the breaklist post) and **Excuse Me** (posts "excused" in the excuse list channel). Only staff and the pinged linked account can press them.
 
 ### Road to #6
-Daily post (`ROAD_POST_TIME_ET`, default 00:10 ET) in the road forum: GEXP gap to the three guilds above us, daily rates, ETA, chart. Needs `ROAD_GUILDS` (see below). After passing #6 the titles move up.
+Daily post (`ROAD_POST_TIME_ET`, default 23:00 ET) in the road forum: GEXP gap to the three guilds above us, daily rates, ETA, chart. Needs `ROAD_GUILDS` (see below). After passing #6 the titles move up.
 
 ### Test
 - `/test` (administrators): sends a test message to every channel set in the variables and tells you which ones work.
@@ -86,7 +89,7 @@ main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, eviden
 | `VETERAN_DAYS` | no | 180 |
 | `FRIDAY_NOTICE_MAX_GEXP` | no | 20000 |
 | `FINAL_NOTICE_HOURS_BEFORE_PURGE` | no | 12 |
-| `ROAD_POST_TIME_ET` | no | `00:10` |
+| `ROAD_POST_TIME_ET` | no | `23:00` |
 | `ROAD_GUILDS` | for Road | Exact names of ALL the guilds above us (today #6, #5, #4, #3, #2, #1), comma separated. The card goes up to #1 |
 | `ROAD_START_RANK` | no | Our rank today (default 7). Each listed guild we pass moves us up one place |
 | `AUTO_BACKUP_KEEP` | no | Automatic backups kept (14) |

@@ -398,15 +398,34 @@ GEXP_PAGES = [
             _b("Earns 9,286: the requirement is met, but the 40 are still owed."),
             _b("Earns 9,326: the requirement is met and the debt is paid completely."),
             _b("Earns 9,300: the requirement is met and the debt goes down by 14, so 26 are still owed."),
-            _c("/gexp missing ign joined [start_gexp] [current_gexp] [debt] [save]",
+            _c("/gexp missing ign [joined] [start_gexp] [current_gexp] [debt] [save]",
                f"({GUILD_ROLE}) Calculates what a player must earn this week. Write the day and exact time "
                f"they joined, in Eastern Time (for example 2026/10/21 6:00 PM, the year is optional), and the GEXP they had at that "
                f"moment. The card shows the normal requirement, the starting GEXP, the current GEXP, the extra "
                f"debt, the total target and the remaining debt after the progress."),
+            _b("joined: if you leave it empty, the bot uses the exact time the player joined the guild (from "
+               "Hypixel). If they joined before this week, the full week counts."),
             _b("current_gexp: if you leave it empty, the bot reads it from Hypixel (the GEXP since the start "
                "of the week)."),
             _b("debt: if you leave it empty, the bot uses the saved debt of the player."),
             _b("save:True saves the remaining debt as the player's new debt, so it carries over."),
+        ],
+    },
+    {
+        "title": "Purge evasion",
+        "blocks": [
+            _p("The bot notes when a member leaves the guild (it checks the guild every 15 minutes: Hypixel does not "
+               "tell the exact time, so the time is the last check where the member was still there). "
+               "A member who leaves only owes the GEXP in proportion to the time they were in the cycle."),
+            _b("The requirement grows continuously, to the second: 55,000 over the whole week (Tuesday 12:00 AM ET "
+               "to the next Tuesday). Leaving after 1 day and 1 minute needs a little more than leaving after "
+               "exactly 1 day, and nobody owes the full 55,000 just for leaving during the week."),
+            _b("Members who joined during the week count from their exact join time."),
+            _c("/purge evaders [cycle] [ign] [page]", f"({GUILD_ROLE}) Lists who left the guild, what they earned, "
+               "what they needed and what is missing. SUSPECT = short of the GEXP; BREAKLISTED / EXCUSED = a "
+               "legitimate break; MET IT = they earned enough. cycle: this cycle (default) or the last one (after the "
+               "purge). With ign it shows every time that player left."),
+            _b("The tracking starts when the feature is installed: earlier departures are not known."),
         ],
     },
     {
@@ -460,7 +479,8 @@ ROAD_PAGES = [
             _h("How it works"),
             _b("The bot compares the total guild GEXP of our guild with the guilds listed by the staff in the "
                "host settings (ROAD_GUILDS)."),
-            _b("It posts at the daily GEXP reset, in the Road to #6 guild forum."),
+            _b("It posts every day at 11:00 PM Eastern Time (so the day is almost complete), in the Road to #6 guild "
+               "forum. The GEXP per day and the ETA use the real time between two readings."),
             _b("From the second day it shows how much GEXP per day we and they earn, and how many days it would "
                "take to catch up. The chart needs two days of data."),
             _b("When we pass a guild, it leaves the card and we take its place: the title goes from #6 to #5, "

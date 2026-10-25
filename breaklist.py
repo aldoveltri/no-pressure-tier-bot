@@ -49,7 +49,7 @@ HYPIXEL_GUILD_NAME = _env("HYPIXEL_GUILD_NAME", "No Pressure")
 VETERAN_DAYS = _int_env("VETERAN_DAYS", 180)
 FRIDAY_MAX_GEXP = _int_env("FRIDAY_NOTICE_MAX_GEXP", 20000)
 FINAL_HOURS_BEFORE_PURGE = _int_env("FINAL_NOTICE_HOURS_BEFORE_PURGE", 12)
-ROAD_POST_TIME = _env("ROAD_POST_TIME_ET", "00:10")      # HH:MM, Eastern Time
+ROAD_POST_TIME = _env("ROAD_POST_TIME_ET", "23:00")      # HH:MM, Eastern Time (11 PM: the day is almost complete)
 AUTO_BACKUP_KEEP = _int_env("AUTO_BACKUP_KEEP", 14)
 ROAD_START_RANK = _int_env("ROAD_START_RANK", 7)             # our guild rank today (the guilds in ROAD_GUILDS are above us)
 
@@ -160,7 +160,11 @@ CREATE TABLE IF NOT EXISTS mutes (
     status TEXT NOT NULL DEFAULT 'active', added_by TEXT, ended_at TEXT
 );
 CREATE TABLE IF NOT EXISTS road_history (
-    day TEXT NOT NULL, guild TEXT NOT NULL, exp INTEGER NOT NULL, PRIMARY KEY (day, guild)
+    day TEXT NOT NULL, guild TEXT NOT NULL, exp INTEGER NOT NULL, at TEXT, PRIMARY KEY (day, guild)
+);
+CREATE TABLE IF NOT EXISTS guild_left (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL, ign TEXT, joined_at TEXT, left_at TEXT NOT NULL, detected_at TEXT, rejoined_at TEXT
 );
 """
 
@@ -168,11 +172,12 @@ CREATE TABLE IF NOT EXISTS road_history (
 async def setup_tables():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
-        for col in ("channel_id", "message_id"):
+        for table, col, kind in (("bl_requests", "channel_id", "TEXT"), ("bl_requests", "message_id", "TEXT"),
+                                 ("road_history", "at", "TEXT"), ("guild_seen", "in_guild", "INTEGER DEFAULT 1")):
             try:
-                await db.execute(f"ALTER TABLE bl_requests ADD COLUMN {col} TEXT")
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             except aiosqlite.OperationalError:
-                pass
+                pass                                   # the column already exists
         await db.commit()
 
 
@@ -460,6 +465,54 @@ def draw_breaklist_list(rows, heads, page, pages, total):
         d.text((640, cy), str(int(e["days_total"])), font=g.get_font(20, True), fill=g.TEXT, anchor="mm")
         owed = e["owed"]
         d.text((780, cy), n(owed), font=g.get_font(20, True), fill=g.RED if owed > 0 else g.GREEN, anchor="mm")
+    g._footer(d, height, f"Page {page}/{pages}")
+    return g._png(img)
+
+
+# ---------- purge evasion check ----------
+
+PURGE_STATUS = {"suspect": ("SUSPECT", g.RED), "breaklist": ("BREAKLISTED", (241, 196, 15)),
+                "excused": ("EXCUSED", (241, 196, 15)), "met": ("MET IT", g.GREEN)}
+
+
+def short_et(dt):
+    local = dt.astimezone(gc.ET)
+    return f"{local.strftime('%m/%d')} {(local.strftime('%I').lstrip('0') or '12')}:{local.strftime('%M %p')}"
+
+
+def draw_purge(rows, heads, title, subtitle, page, pages):
+    row_h = 96
+    top = g.HEADER_H + 40
+    height = top + max(1, len(rows)) * row_h + g.FOOTER_H
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, title, subtitle)
+    sy = g.HEADER_H + 22
+    for label, x in (("EARNED", 640), ("NEEDED", 736), ("SHORT", 828)):
+        d.text((x, sy), label, font=g.get_font(15, True), fill=g.MUTED, anchor="mm")
+    if not rows:
+        d.text((g.WIDTH // 2, top + row_h // 2), "Nobody left the guild in this period.",
+               font=g.get_font(22), fill=g.MUTED, anchor="mm")
+    for i, e in enumerate(rows):
+        y0 = top + i * row_h
+        cy = y0 + (row_h - 8) // 2
+        label, color = PURGE_STATUS[e["status"]]
+        d.rounded_rectangle([g.PAD, y0, g.WIDTH - g.PAD, y0 + row_h - 8], radius=14, fill=g.ROW_BG)
+        d.rounded_rectangle([g.PAD, y0, g.PAD + 8, y0 + row_h - 8], radius=4, fill=color)
+        hx = g.PAD + 28
+        g._paste_head(img, d, heads.get(e["uuid"]), hx, cy - 28, 56)
+        nx = hx + 56 + 14
+        g.name_flag(img, d, nx, cy - 16, e["ign"], 24, h=24, max_w=230)
+        g._badge(d, 478, cy - 16, label, color, w=118, h=28, font_size=14)
+        detail = f"In {short_et(e['start'])} · Out {short_et(e['left'])} · {gc.fmt_duration(e['stay'])}"
+        if e["rejoined"]:
+            detail += " · rejoined"
+        d.text((nx, cy + 18), detail, font=g.get_font(14), fill=g.MUTED, anchor="lm")
+        d.text((640, cy), n(e["earned"]), font=g.get_font(20, True), fill=g.TEXT, anchor="mm")
+        d.text((736, cy), n(e["required"]), font=g.get_font(20, True), fill=g.TEXT, anchor="mm")
+        short = e["short"]
+        d.text((828, cy), f"-{n(short)}" if short else "0", font=g.get_font(22, True),
+               fill=(g.RED if e["status"] == "suspect" else g.MUTED) if short else g.GREEN, anchor="mm")
     g._footer(d, height, f"Page {page}/{pages}")
     return g._png(img)
 
@@ -812,19 +865,91 @@ class Core:
     async def _save_snapshot(self, members):
         stamp = iso(now_utc())
         async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute("SELECT uuid FROM guild_seen WHERE COALESCE(in_guild, 1) = 1")
+            before = {r[0] for r in await cur.fetchall()}
             for uuid, m in members.items():
                 joined = m.get("joined")
                 joined_iso = iso(datetime.fromtimestamp(joined / 1000, tz=UTC)) if joined else None
                 await db.execute(
-                    "INSERT INTO guild_seen (uuid, joined_at, rank, last_seen) VALUES (?, ?, ?, ?) "
+                    "INSERT INTO guild_seen (uuid, joined_at, rank, last_seen, in_guild) VALUES (?, ?, ?, ?, 1) "
                     "ON CONFLICT(uuid) DO UPDATE SET joined_at = COALESCE(excluded.joined_at, guild_seen.joined_at), "
-                    "rank = excluded.rank, last_seen = excluded.last_seen",
+                    "rank = excluded.rank, last_seen = excluded.last_seen, in_guild = 1",
                     (uuid, joined_iso, m.get("rank"), stamp))
                 for day, value in (m.get("expHistory") or {}).items():
                     await db.execute(
                         "INSERT INTO gexp_history (uuid, day, gexp) VALUES (?, ?, ?) "
                         "ON CONFLICT(uuid, day) DO UPDATE SET gexp = excluded.gexp", (uuid, day, int(value)))
+            await self._track_departures(db, before, set(members), stamp)
             await db.commit()
+
+    async def _track_departures(self, db, before, current, stamp):
+        """Members that were in the guild at the last snapshot and are not now have left: remember when
+        (Hypixel does not say, so the time is the last snapshot where they were still here)."""
+        if before:
+            cur = await db.execute("SELECT value FROM kv WHERE key = 'left_tracking'")
+            started = await cur.fetchone()
+            gone = before - current
+            if gone and not started:
+                # first run of this feature: whoever is already missing left at an unknown time, do not guess
+                await db.execute("UPDATE guild_seen SET in_guild = 0 WHERE uuid IN (%s)" % ",".join("?" * len(gone)),
+                                 tuple(gone))
+            elif gone and len(current) < 0.5 * len(before):
+                log.warning("The guild list looks incomplete (%d of %d members): departures not recorded",
+                            len(current), len(before))
+            else:
+                for uuid in gone:
+                    cur = await db.execute("SELECT joined_at, last_seen FROM guild_seen WHERE uuid = ?", (uuid,))
+                    row = await cur.fetchone()
+                    await db.execute(
+                        "INSERT INTO guild_left (uuid, joined_at, left_at, detected_at) VALUES (?, ?, ?, ?)",
+                        (uuid, row[0] if row else None, (row[1] if row and row[1] else stamp), stamp))
+                    await db.execute("UPDATE guild_seen SET in_guild = 0 WHERE uuid = ?", (uuid,))
+        await db.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('left_tracking', ?)", (stamp,))
+        if current:
+            await db.execute("UPDATE guild_left SET rejoined_at = ? WHERE rejoined_at IS NULL AND uuid IN (%s)"
+                             % ",".join("?" * len(current)), (stamp, *current))
+
+    async def purge_rows(self, *, cycle=None, uuid=None):
+        """Members that left the guild, each with what they should have earned until they left.
+        cycle: 'this' (the week that ends with the next purge) or 'last' (already purged); uuid: one player, any week.
+        A member only owes GEXP in proportion to the time they were in the cycle: the requirement grows
+        continuously (55,000 over the whole week), so leaving after 1 day and 1 minute needs a little more
+        than leaving after exactly 1 day."""
+        if uuid:
+            left_rows = await q_all("SELECT * FROM guild_left WHERE uuid = ? ORDER BY left_at DESC LIMIT 10", (uuid,))
+        else:
+            ws = gc.week_start(now_utc())
+            if cycle == "last":
+                ws = ws - timedelta(days=7)
+            first, last = iso(ws), iso(ws + timedelta(days=7))
+            left_rows = await q_all("SELECT * FROM guild_left WHERE left_at >= ? AND left_at < ? ORDER BY left_at",
+                                    (first, last))
+        out = []
+        for r in left_rows:
+            left = from_iso(r["left_at"])
+            joined = from_iso(r["joined_at"])
+            ws_l = gc.week_start(left)
+            start = max(joined, ws_l) if joined else ws_l
+            required = gc.required_elapsed(start, left)
+            earned, _count = await self.window_sum(r["uuid"], start, left)
+            short = max(0, required - earned)
+            status = "met" if short == 0 else "suspect"
+            if await q_one("SELECT id FROM bl_entries WHERE uuid = ? AND added_at >= ?",
+                           (r["uuid"], iso(left - timedelta(days=1)))):
+                status = "breaklist"
+            elif await q_one("SELECT uuid FROM excuses WHERE uuid = ? AND week = ?",
+                             (r["uuid"], ws_l.date().isoformat())):
+                status = "excused"
+            ign = r["ign"]
+            if not ign:
+                ign = await self.name_for(r["uuid"])
+                await q_run("UPDATE guild_left SET ign = ? WHERE id = ?", (ign, r["id"]))
+            out.append({"uuid": r["uuid"], "ign": ign, "start": start, "left": left, "stay": max(0, gc.secs(start, left)),
+                        "required": required, "earned": earned, "short": short, "status": status,
+                        "rejoined": bool(r["rejoined_at"])})
+        order = {"suspect": 0, "breaklist": 1, "excused": 1, "met": 2}
+        out.sort(key=lambda e: (order[e["status"]], -e["short"], e["left"]))
+        return out
 
     async def joined_for(self, uuid):
         m = self._members.get(uuid)
@@ -1211,8 +1336,9 @@ class Core:
 
         day = datetime.now(gc.ET).date().isoformat()
         for nm, exp in others + [(our_name, our_exp)]:
-            await q_run("INSERT INTO road_history (day, guild, exp) VALUES (?, ?, ?) "
-                        "ON CONFLICT(day, guild) DO UPDATE SET exp = excluded.exp", (day, nm, exp))
+            await q_run("INSERT INTO road_history (day, guild, exp, at) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(day, guild) DO UPDATE SET exp = excluded.exp, at = excluded.at",
+                        (day, nm, exp, iso(now_utc())))
 
         above = sorted([o for o in others if o[1] > our_exp], key=lambda o: o[1])
         # We start at ROAD_START_RANK (7) with every listed guild above us; each listed guild we pass moves us up one place.
@@ -1220,19 +1346,28 @@ class Core:
         if not above:
             return None, "No guild in ROAD_GUILDS is above us: we are #1!"
         targets = []
-        hist = await q_all("SELECT day, guild, exp FROM road_history WHERE day >= ? ORDER BY day",
+        hist = await q_all("SELECT day, guild, exp, at FROM road_history WHERE day >= ? ORDER BY day",
                            ((datetime.now(gc.ET) - timedelta(days=14)).date().isoformat(),))
-        by_guild = {}
+        by_guild, taken = {}, {}
         for r in hist:
             by_guild.setdefault(r["guild"], {})[r["day"]] = r["exp"]
+            taken.setdefault(r["guild"], {})[r["day"]] = r["at"]
 
         def rate(guild):
+            """GEXP per day. It uses the real time between the two readings (so a reading taken at 11 PM and one
+            taken at 12:10 AM are not both counted as a whole day); old readings without a time use the days."""
             days_ = sorted(by_guild.get(guild, {}))
             if len(days_) < 2:
                 return None
             a, b = days_[max(0, len(days_) - 8)], days_[-1]
+            gain = by_guild[guild][b] - by_guild[guild][a]
+            at_a, at_b = taken[guild].get(a), taken[guild].get(b)
+            if at_a and at_b:
+                span = (from_iso(at_b) - from_iso(at_a)).total_seconds() / 86400
+                if span >= 0.5:
+                    return max(0, int(gain / span))
             span = (datetime.fromisoformat(b) - datetime.fromisoformat(a)).days
-            return max(0, (by_guild[guild][b] - by_guild[guild][a]) // span) if span else None
+            return max(0, gain // span) if span else None
 
         rate_us = rate(our_name)
         series = {}
@@ -1827,20 +1962,20 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")
     @app_commands.describe(
         ign="Minecraft username of the player",
-        joined="When they joined or rejoined, Eastern Time: 2026/10/21 6:00 PM (the year is optional: 10/21 6:00 PM)",
+        joined="Join time, Eastern Time: 2026/10/21 6:00 PM (year optional). Empty = their join time in the guild",
         start_gexp="The GEXP they had at that moment (default 0)",
         current_gexp="Their GEXP now (default: taken from Hypixel)",
         debt="Extra GEXP debt (default: the saved debt)",
         save="Save the remaining debt as the player's new debt")
     @app_commands.check(staff_check)
-    async def missing(self, interaction: discord.Interaction, ign: str, joined: str,
+    async def missing(self, interaction: discord.Interaction, ign: str, joined: Optional[str] = None,
                       start_gexp: app_commands.Range[int, 0, 100_000_000] = 0,
                       current_gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                       debt: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                       save: bool = False):
         await interaction.response.defer()
-        join_dt = gc.parse_et(joined)
-        if join_dt is None:
+        join_dt = gc.parse_et(joined) if joined else None
+        if joined and join_dt is None:
             await interaction.followup.send(
                 "I couldn't read the join time. Use year/month/day and the time in Eastern Time, "
                 "for example `2026/10/21 6:00 PM`, `2026/10/21 18:00` or without year `10/21 6:00 PM`.")
@@ -1850,6 +1985,18 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
             return
         uuid, name = r
         now = now_utc()
+        auto_join = None
+        if join_dt is None:
+            # no time given: the exact moment they joined the guild (Hypixel), and never before this week's start
+            await self.core.guild_members()
+            real_join = await self.core.joined_for(uuid)
+            if real_join is None:
+                await interaction.followup.send(
+                    f"I don't know when **{esc(name)}** joined the guild (they are not a member). "
+                    "Give the time with `joined`, for example `2026/10/21 6:00 PM`.", allowed_mentions=NO_MENTIONS)
+                return
+            join_dt = max(real_join, gc.week_start(now))
+            auto_join = real_join
         if join_dt.astimezone(UTC) > now:
             await interaction.followup.send("The join time is in the future.")
             return
@@ -1866,6 +2013,10 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         if debt is None:
             row = await q_one("SELECT amount FROM debts WHERE uuid = ?", (uuid,))
             debt = row["amount"] if row else 0
+        if auto_join is not None:
+            where = ("joined before this week: the full week counts" if auto_join < gc.week_start(now)
+                     else "join time taken from the guild")
+            note = ((note + " ") if note else "") + f"No time given: {where} ({gc.fmt_et(auto_join)})."
         normal = gc.required_from(join_dt)
         res = gc.settle_debt(normal, debt, current_gexp - start_gexp)
         purge = gc.week_end(join_dt)
@@ -1880,6 +2031,49 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         head = await self.core.head_for(uuid, name)
         card = await asyncio.to_thread(draw_missing, name, head, join_dt, purge, res, start_gexp, current_gexp, note)
         await interaction.followup.send(file=send_file(card, "gexp_missing.png"))
+
+
+class PurgeCog(commands.GroupCog, name="purge", description="Purge evasion checks (guild staff)"):
+    PER_PAGE = 7
+
+    def __init__(self, core: Core):
+        self.core = core
+        super().__init__()
+
+    @app_commands.command(name="evaders", description="Members who left the guild without earning the GEXP they owed (guild staff)")
+    @app_commands.describe(
+        cycle="Which weekly cycle (each one ends with the Tuesday 12:00 AM ET purge). Default: this one",
+        ign="Check only this player (all the times they left)",
+        page="Page of the list")
+    @app_commands.choices(cycle=[app_commands.Choice(name="This cycle (until the next purge)", value="this"),
+                                 app_commands.Choice(name="Last cycle (already purged)", value="last")])
+    @app_commands.check(staff_check)
+    async def evaders(self, interaction: discord.Interaction, cycle: str = "this", ign: Optional[str] = None,
+                      page: app_commands.Range[int, 1, 50] = 1):
+        await interaction.response.defer()
+        uuid = None
+        if ign:
+            r = await lookup(interaction, ign)
+            if r is None:
+                return
+            uuid = r[0]
+        rows = await self.core.purge_rows(cycle=cycle, uuid=uuid)
+        if uuid and not rows:
+            await interaction.followup.send(f"I have no record of **{esc(r[1])}** leaving the guild.",
+                                            allowed_mentions=NO_MENTIONS)
+            return
+        pages = max(1, math.ceil(len(rows) / self.PER_PAGE))
+        page = min(page, pages)
+        chunk = rows[(page - 1) * self.PER_PAGE: page * self.PER_PAGE]
+        heads = await g._fetch_heads([(e["uuid"], e["ign"]) for e in chunk])
+        ws = gc.week_start(now_utc()) - (timedelta(days=7) if cycle == "last" and not uuid else timedelta(0))
+        subtitle = (f"{GUILD_NAME_DISPLAY} · {r[1]}" if uuid else
+                    f"{GUILD_NAME_DISPLAY} · {'last' if cycle == 'last' else 'this'} cycle from {gc.fmt_date(ws)}")
+        title = "PURGE CHECK"
+        card = await asyncio.to_thread(draw_purge, chunk, heads, title, subtitle, page, pages)
+        suspects = sum(1 for e in rows if e["status"] == "suspect")
+        text = f"**{suspects}** of {len(rows)} member(s) who left are short of the GEXP they owed for the time they were in."
+        await interaction.followup.send(content=text, file=send_file(card, "purge.png"))
 
 
 class RoadCog(commands.Cog):
@@ -2189,7 +2383,7 @@ class Scheduler(commands.Cog):
             hh, mm = (int(x) for x in ROAD_POST_TIME.split(":"))
             today = datetime.now(gc.ET).date()
             road_et = datetime(today.year, today.month, today.day, hh, mm, tzinfo=gc.ET)
-            if await self._due(f"road:{today.isoformat()}", road_et, 6):
+            if await self._due(f"road:{today.isoformat()}", road_et, 1):
                 await self.core.post_road()
         except Exception:
             log.exception("The Road post failed")
@@ -2203,7 +2397,7 @@ class Scheduler(commands.Cog):
             log.exception("The mute expiry check failed")
         try:
             last = await kv_get("snapshot_at")
-            if not last or (now - from_iso(last)).total_seconds() > 6 * 3600:
+            if not last or (now - from_iso(last)).total_seconds() > 5 * 60:
                 await kv_set("snapshot_at", iso(now))
                 members = await self.core.guild_members(force=True)
                 log.info("GEXP snapshot saved for %d guild members", len(members))
@@ -2250,6 +2444,7 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(Excuse(core))
     await bot.add_cog(GexpTools(core))
     await bot.add_cog(RoadCog(core))
+    await bot.add_cog(PurgeCog(core))
     await bot.add_cog(CountryCog(core))
     core.mute_cog = MuteCog(core)
     await bot.add_cog(core.mute_cog)

@@ -30,6 +30,7 @@ import gexpcalc as gc
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, MODES, tier_from_elo
 from elo import calcola, FIRST_TO
+import alerts
 from guide import GUIDE_PAGES, GUIDE_CATEGORIES
 from guide_cards import render_page
 from graphics import (build_leaderboard_image, build_match_image, build_profile_image,
@@ -119,7 +120,10 @@ async def send_card(interaction: discord.Interaction, data: bytes, filename: str
     return await interaction.followup.send(content=content, file=png_file(data, filename), **kwargs)
 
 
-async def post_1v1_log(interaction, png_bytes, filename="match.png", text=None):
+async def post_1v1_log(interaction, png_bytes, filename="match.png", text=None, kind="1v1_logs"):
+    """Posts in the 1v1 logs channel, unless the alert is switched off with /alerts (data is saved anyway)."""
+    if not await alerts.enabled(kind):
+        return
     cid = os.getenv("LOGS_1V1_CHANNEL_ID", "").strip()
     if not cid.isdigit():
         return
@@ -235,8 +239,22 @@ async def resolve_target(interaction: discord.Interaction, ign):
     return link_row["uuid"], link_row["ign"], False
 
 
+def parse_match_date(text):
+    """'2026/10/21', '2026/10/21 6:00 PM' or '10/21' (Eastern Time) -> (aware datetime, None) or (None, error).
+    No time given: midday, so the date never shifts. Future dates are refused."""
+    new = gc.parse_et(text)
+    if new is None:
+        return None, ("I couldn't read the date. Use `2026/10/21`, `2026/10/21 6:00 PM` or without the year "
+                      "`10/21` (Eastern Time).")
+    if not re.search(r"\d:\d|am|pm", text, re.I):
+        new = new.replace(hour=12)
+    if new.astimezone(timezone.utc) > datetime.now(timezone.utc):
+        return None, "That date is in the future."
+    return new, None
+
+
 async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, name_l,
-                    score_name: str, loser_games: int, forfeit: bool = False, md=None) -> bool:
+                    score_name: str, loser_games: int, forfeit: bool = False, md=None, played=None) -> bool:
     """Registers a finished match, updates the elo and sends the result card.
     Returns False if the match could not be logged (a message has been sent)."""
     mode_id = md["id"] if md else None
@@ -257,7 +275,7 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
     gain, loss = calcola(p_w["elo"], p_l["elo"], loser_games, system)
     new_w, new_l = p_w["elo"] + gain, p_l["elo"] + loss
 
-    now = datetime.now(timezone.utc)
+    now = played or datetime.now(timezone.utc)
     match_id = await save_match(uuid_w, uuid_l, p_w["elo"], new_w, p_l["elo"], new_l,
                                 score_name, played_at=now.isoformat(), forfeit=forfeit, mode_id=mode_id)
 
@@ -267,7 +285,7 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
          "delta": new_l - p_l["elo"],
          "tier_before": tier_from_elo(p_l["elo"]), "tier_after": tier_from_elo(new_l)}
 
-    date = now.strftime("%m/%d/%Y") + (f" · {md['name']}" if md else "")
+    date = (now.astimezone(gc.ET) if played else now).strftime("%m/%d/%Y") + (f" · {md['name']}" if md else "")
     data = await build_match_image(w, l, score_name, match_id, date, forfeit=forfeit,
                                    first_to=FIRST_TO[system])
     await send_card(interaction, data, "match.png", md)
@@ -656,11 +674,18 @@ async def setelo(interaction: discord.Interaction, ign: str, elo: app_commands.R
 @bot.tree.command(name="match", description="Log a 1v1 result (staff only)")
 @app_commands.describe(winner="Username of the winner", loser="Username of the loser",
                        score="Final score, for example 3-1 (in Classic 1v1 a match is first to 5: 5-3)",
-                       mode="Game mode (leave empty for the normal mode)")
+                       mode="Game mode (leave empty for the normal mode)",
+                       date="Optional: when it was played, 2026/10/21 or 2026/10/21 6:00 PM (Eastern Time). Default: now")
 @staff_only()
 async def match(interaction: discord.Interaction, winner: str, loser: str, score: str,
-                mode: Optional[str] = None):
+                mode: Optional[str] = None, date: Optional[str] = None):
     await interaction.response.defer()
+    played = None
+    if date:
+        played, err = parse_match_date(date)
+        if err:
+            await interaction.followup.send(err)
+            return
     ok, md = await resolve_mode(interaction, mode)
     if not ok:
         return
@@ -686,7 +711,7 @@ async def match(interaction: discord.Interaction, winner: str, loser: str, score
         return
 
     await log_match(interaction, uuid_w, name_w, uuid_l, name_l,
-                    f"{first_to}-{loser_games}", loser_games, md=md)
+                    f"{first_to}-{loser_games}", loser_games, md=md, played=played)
 
 
 @bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses (staff only)")
@@ -819,7 +844,21 @@ async def undo(interaction: discord.Interaction, match_id: int):
     await post_1v1_log(interaction, data, filename="undo.png", text=f"**{esc(md['name'])}**" if md else None)
 
 
-@bot.tree.command(name="setdate", description="Change the date of a logged match (staff only)")
+async def match_card(m, md, date_iso):
+    """The result card of a stored match row, drawn again (used when its date changes)."""
+    w = {"uuid": m["winner_uuid"], "name": m["winner_ign"], "before": m["winner_elo_before"],
+         "after": m["winner_elo_after"], "delta": m["winner_elo_after"] - m["winner_elo_before"],
+         "tier_before": tier_from_elo(m["winner_elo_before"]), "tier_after": tier_from_elo(m["winner_elo_after"])}
+    l = {"uuid": m["loser_uuid"], "name": m["loser_ign"], "before": m["loser_elo_before"],
+         "after": m["loser_elo_after"], "delta": m["loser_elo_after"] - m["loser_elo_before"],
+         "tier_before": tier_from_elo(m["loser_elo_before"]), "tier_after": tier_from_elo(m["loser_elo_after"])}
+    date = fmt_date(date_iso) + (f" · {md['name']}" if md else "")
+    return await build_match_image(w, l, m["score"] or "-", m["num"], date,
+                                   title="MATCH CANCELLED" if m["cancelled"] else "MATCH RESULT",
+                                   forfeit=bool(m["forfeit"]), first_to=FIRST_TO[mode_system(md)])
+
+
+@bot.tree.command(name="setdate", description="Change the date of a logged match: a new card is made (staff only)")
 @app_commands.describe(match_id="Match number (the # shown on the match card)",
                        date="New date: 2026/10/21, or 2026/10/21 6:00 PM, or without the year: 10/21 (Eastern Time)")
 @staff_only()
@@ -829,23 +868,72 @@ async def setdate(interaction: discord.Interaction, match_id: int, date: str):
     if m is None:
         await interaction.followup.send(f"Match #{match_id} does not exist.")
         return
-    new = gc.parse_et(date)
-    if new is None:
-        await interaction.followup.send(
-            "I couldn't read the date. Use `2026/10/21`, `2026/10/21 6:00 PM` or without the year `10/21` "
-            "(Eastern Time).")
-        return
-    if not re.search(r"\d:\d|am|pm", date, re.I):
-        new = new.replace(hour=12)          # no time given: midday, so the date never shifts
-    if new.astimezone(timezone.utc) > datetime.now(timezone.utc):
-        await interaction.followup.send("That date is in the future.")
+    new, err = parse_match_date(date)
+    if err:
+        await interaction.followup.send(err)
         return
     old_text = fmt_date(m["played_at"])
     await set_match_date(m["id"], new.isoformat())
+    md = await get_mode(m["mode_id"]) if m["mode_id"] is not None else None
     text = (f"📅 Match **#{match_id}** ({esc(m['winner_ign'])} vs {esc(m['loser_ign'])}): "
             f"date changed from **{old_text}** to **{new.strftime('%m/%d/%Y')}**.")
-    await interaction.followup.send(text, allowed_mentions=NO_MENTIONS)
-    await post_1v1_log(interaction, None, text=text)
+    data = await match_card(m, md, new.isoformat())
+    await interaction.followup.send(content=text, file=png_file(data, "match.png"), allowed_mentions=NO_MENTIONS)
+    if await alerts.enabled("match_dates"):
+        await post_1v1_log(interaction, data, filename="match.png", text=text, kind="match_dates")
+
+
+@bot.tree.command(name="elocalc", description="What if: the elo each player would gain or lose in a match (nothing is saved)")
+@app_commands.describe(player1_elo="Elo of player 1", player2_elo="Elo of player 2",
+                       mode="Game mode (leave empty for the normal mode)")
+async def elocalc(interaction: discord.Interaction, player1_elo: app_commands.Range[int, 0, 100000],
+                  player2_elo: app_commands.Range[int, 0, 100000], mode: Optional[str] = None):
+    await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    system = mode_system(md)
+    first_to = FIRST_TO[system]
+
+    def lines(elo_w, elo_l):
+        out = []
+        for lg in range(first_to):
+            gain, loss = calcola(elo_w, elo_l, lg, system)
+            out.append(f"**{first_to}-{lg}**: winner {gain:+d} → {elo_w + gain} · loser {loss:+d} → {elo_l + loss}")
+        return "\n".join(out)
+
+    embed = discord.Embed(title="Hypothetical match" + (f" · {md['name']}" if md else ""), color=0x00C8E6)
+    embed.description = (f"**Player 1**: {player1_elo} ({tier_from_elo(player1_elo)})\n"
+                         f"**Player 2**: {player2_elo} ({tier_from_elo(player2_elo)})")
+    embed.add_field(name="If player 1 wins", value=lines(player1_elo, player2_elo), inline=False)
+    embed.add_field(name="If player 2 wins", value=lines(player2_elo, player1_elo), inline=False)
+    embed.set_footer(text="Nothing is saved: it is only a calculation.")
+    await interaction.followup.send(embed=embed)
+
+
+ALERT_CHOICES = [app_commands.Choice(name=v[0], value=k) for k, v in alerts.ALERTS.items()]
+
+
+@bot.tree.command(name="alerts", description="Switch the automatic posts on or off (staff only). No options: show the state")
+@app_commands.describe(alert="Which automatic post (or all of them)", state="on or off")
+@app_commands.choices(alert=ALERT_CHOICES + [app_commands.Choice(name="All of them", value="all")],
+                      state=[app_commands.Choice(name="on", value="on"), app_commands.Choice(name="off", value="off")])
+@staff_only()
+async def alerts_cmd(interaction: discord.Interaction, alert: Optional[str] = None, state: Optional[str] = None):
+    await interaction.response.defer(ephemeral=True)
+    if alert and state:
+        names = list(alerts.ALERTS) if alert == "all" else [alert]
+        for k in names:
+            await alerts.set_enabled(k, state == "on")
+    elif alert or state:
+        await interaction.followup.send("Give both the alert and the state, or nothing to see the list.", ephemeral=True)
+        return
+    rows = []
+    for k, (label, what) in alerts.ALERTS.items():
+        rows.append(f"{'🟢 ON ' if await alerts.enabled(k) else '🔴 OFF'} **{label}** - {what}")
+    await interaction.followup.send(
+        "\n".join(rows) + "\n\nChange one with `/alerts alert:<name> state:on|off`. "
+        "While an alert is off the data is still saved: only the automatic post is skipped.", ephemeral=True)
 
 
 @bot.tree.command(name="removeplayer", description="Remove a player from the leaderboard and profiles (staff only)")

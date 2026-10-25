@@ -207,10 +207,17 @@ TIER_PAGES += [
             _c("/settier ign tier",
                "Assigns a tier after a tier test. The elo is set to the minimum of that tier."),
             _c("/setelo ign elo", "Sets a player's elo by hand (0 to 5000)."),
-            _c("/match winner loser score",
+            _c("/match winner loser score [mode] [date]",
                "Logs a finished 1v1. The score is for example 3-1 (5-3 in Classic 1v1): the bot suggests "
                "the valid scores. Both players need a tier in that mode. The elo is calculated "
-               "automatically, the result card shows the match number and it is also posted in the 1v1 logs channel."),
+               "automatically, the result card shows the match number and it is also posted in the 1v1 logs channel "
+               "(unless /alerts has switched that off). The optional date (2026/10/21 or 2026/10/21 6:00 PM, "
+               "Eastern Time) logs a match played in the past."),
+            _c("/elocalc player1_elo player2_elo [mode]",
+               "What if: the elo each player would gain or lose for every score, whoever wins. Nothing is saved."),
+            _c("/alerts [alert] [state]",
+               "Staff. Switches the automatic posts on or off: 1v1 logs, match date changes, blacklist posts, "
+               "Urchin alerts (or all). Without options it shows what is on. The data is always saved."),
             _c("/forfeit player opponent [player_games] [opponent_games] [pause_id]",
                "The player who left loses by forfeit: the elo changes like the biggest loss (3-0, or 5-0 in "
                "Classic 1v1), but the card shows the real score before the forfeit if you give the games "
@@ -223,7 +230,7 @@ TIER_PAGES += [
                "Cancels a match (of any mode) and restores the elo. It only works on the latest match of "
                "both players, in the current season or year, and if their elo wasn't changed by hand since."),
             _c("/setdate match_id date",
-               "Changes the date of a logged match. Write 2026/10/21 (or 2026/10/21 6:00 PM); the year is "
+               "Changes the date of a logged match and makes a new card with the new date. Write 2026/10/21 (or 2026/10/21 6:00 PM); the year is "
                "optional (10/21). Cards still show MM/DD/YYYY. A new match takes the number of a cancelled one."),
             _c("/removeplayer ign",
                "Removes a player from the leaderboard and /profile. Their matches stay in the history. "
@@ -343,6 +350,13 @@ BREAKLIST_PAGES = [
                "Sets the days a player already has banked. For someone on the breaklist, it is their total days "
                "in the guild. For someone who is in the guild, it is the days from their previous stays (the "
                "days of the current stay are added automatically from the Hypixel join date)."),
+            _c("/breaklist adddays ign days [note]",
+               "Adds a set of days to a player. Every set gets a number, so a mistake can be undone."),
+            _c("/breaklist days ign", "Lists every set of days added to a player."),
+            _c("/breaklist removedays ign set",
+               "Removes one set of days (the others stay). Use the number shown by /breaklist days."),
+            _c("/breaklist move ign position",
+               "Moves a player to another position in /breaklist guild (1 = first)."),
             _c("/breaklist debt ign amount",
                "Sets the extra GEXP debt of a player by hand. 0 clears it."),
             _c("/breaklist notice ign [kind]",
@@ -584,7 +598,12 @@ EXTRA_PAGES = [
         _c("/mute end ign", "Staff. Lifts the mute now: the role is removed and the player is pinged."),
         _c("/mute warn ign reason [user]", "Staff. A verbal warning: it changes nothing, it is only recorded in the "
            "mute logs (with a ping to the player) and counted."),
-        _c("/mute view ign", "Everyone. Every mute and verbal warning of a player, with reason."),
+        _c("/mute view ign", "Everyone. The full mute history of a player: every mute and verbal warning, newest "
+           "first, with date, length and reason."),
+        _c("/logins ign [days]", "Guild staff. Earliest and latest login, every login of each day, average "
+           "session and time on per day (Eastern Time). Useful before an early kick. The bot saves the logins of "
+           "guild members every few minutes, so the data starts from the day it was installed; players who hide "
+           "their online status on Hypixel may show nothing."),
         _c("/mute list", "Staff. The active mutes."),
         _p("When a timed mute ends, the bot removes the No Guild Bridge role by itself and pings the player to say "
            "they can write in the guild bridge again."),

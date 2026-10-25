@@ -21,6 +21,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+import alerts
 import breaklist as bl
 import evidence_cards as ec
 import graphics as g
@@ -157,6 +158,8 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
 
     async def announce(self, interaction, row, title, media=None):
         """Posts the entry in the blacklist channel. media = [(file name, bytes)]: images are shown in the post."""
+        if not await alerts.enabled("blacklist"):
+            return None                                 # /alerts: blacklist posts are off, the entry is only saved
         embed = blacklist_embed(row, title)
         embeds = [embed]
         pics = [f"attachment://{n}" for n, _ in (media or []) if n.lower().endswith(IMG_EXT)]
@@ -247,7 +250,8 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
         await q_run("UPDATE blacklist SET status = 'removed', updated_at = ? WHERE id = ?", (iso(now_utc()), row["id"]))
         embed = blacklist_embed(row, "Removed from the guild blacklist")
         embed.color = GREY
-        posted = await send_embed(self.core, interaction, "BLACKLIST_CHANNEL_ID", embed=embed, thread_name=row["ign"])
+        posted = (await send_embed(self.core, interaction, "BLACKLIST_CHANNEL_ID", embed=embed, thread_name=row["ign"])
+                  if await alerts.enabled("blacklist") else None)
         await interaction.followup.send(f"**{esc(name)}** was removed from the blacklist" + (f" ({posted})." if posted else "."),
                                         allowed_mentions=NO_MENTIONS)
 
@@ -1001,7 +1005,7 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
         try:
             baseline = await kv_get("urchin_baseline")
             # the very first pass only remembers who is already tagged (no flood of old tags)
-            await self.scan_guild(post=bool(baseline), only_new=True)
+            await self.scan_guild(post=bool(baseline) and await alerts.enabled("urchin"), only_new=True)
             if not baseline:
                 await kv_set("urchin_baseline", iso(now_utc()))
         except UrchinError as e:

@@ -163,6 +163,14 @@ CREATE TABLE IF NOT EXISTS warnings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     uuid TEXT NOT NULL, ign TEXT, reason TEXT, at TEXT NOT NULL, added_by TEXT, discord_id TEXT
 );
+CREATE TABLE IF NOT EXISTS day_sets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL, ign TEXT, days REAL NOT NULL, note TEXT, added_by TEXT, added_at TEXT NOT NULL,
+    removed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS logins (
+    uuid TEXT NOT NULL, ign TEXT, login_at TEXT NOT NULL, logout_at TEXT, PRIMARY KEY (uuid, login_at)
+);
 CREATE TABLE IF NOT EXISTS road_history (
     day TEXT NOT NULL, guild TEXT NOT NULL, exp INTEGER NOT NULL, at TEXT, PRIMARY KEY (day, guild)
 );
@@ -178,7 +186,8 @@ async def setup_tables():
         await db.executescript(SCHEMA)
         for table, col, kind in (("bl_requests", "channel_id", "TEXT"), ("bl_requests", "message_id", "TEXT"),
                                  ("road_history", "at", "TEXT"), ("guild_seen", "in_guild", "INTEGER DEFAULT 1"),
-                                 ("mutes", "discord_id", "TEXT")):
+                                 ("mutes", "discord_id", "TEXT"), ("bl_entries", "ord", "INTEGER"),
+                                 ("guild_seen", "login_polled_at", "TEXT")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             except aiosqlite.OperationalError:
@@ -240,6 +249,26 @@ async def api_guild(params: dict):
         log.warning("Hypixel guild API failed: %s", e)
         return None
     return data.get("guild")
+
+
+async def api_player(uuid: str):
+    """The 'player' object of the Hypixel API, None (no data) or False (rate limit / error: stop polling)."""
+    key = _read_key()
+    if not key:
+        return False
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("https://api.hypixel.net/v2/player", params={"uuid": uuid},
+                                   headers={"API-Key": key}) as r:
+                if r.status != 200:
+                    log.warning("Hypixel player API answered with status %s", r.status)
+                    return False
+                data = await r.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        log.warning("Hypixel player API failed: %s", e)
+        return False
+    return data.get("player")
 
 
 # ======================================================================================
@@ -314,10 +343,6 @@ if not hasattr(g, "name_flag"):
         if flag is not None:
             w = int(flag.width * h / flag.height)
             img.paste(flag.resize((w, h)), (fx, y - h // 2))
-        else:
-            d.rounded_rectangle([fx, y - h // 2, fx + int(h * 1.5), y + h // 2], radius=6, fill=(96, 102, 116),
-                                outline=(150, 156, 170), width=2)
-            d.text((fx + int(h * 0.75), y), "?", font=g.get_font(22, True), fill=(235, 238, 245), anchor="mm")
     g.name_flag = _old_name_flag
 
 FLAGS = g.FLAGS      # player name (lower case) -> (country code, PIL image or None); shared with graphics.py
@@ -353,7 +378,7 @@ async def load_flag(uuid, name):
 
 
 def _name_flag(img, d, x, y, name, font):
-    """Name + flag (grey '?' flag when the country is not set). The drawing lives in graphics.py."""
+    """Name + flag (the name only when the country is not set). The drawing lives in graphics.py."""
     g.name_flag(img, d, x, y, name, font)
 
 
@@ -1077,6 +1102,54 @@ class Core:
             return banked + max(0.0, (now_utc() - joined).total_seconds() / 86400), "guild"
         return banked, "unknown"
 
+    async def add_day_set(self, uuid, name, days, note, by):
+        """Adds (or, with a negative number, takes away) days and remembers them as a set that can be removed."""
+        row = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+        banked = (row["banked"] if row else 0.0)
+        new = max(0.0, banked + days)
+        stamp = iso(now_utc())
+        sid = await q_run("INSERT INTO day_sets (uuid, ign, days, note, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)",
+                          (uuid, name, new - banked, note, str(by) if by else None, stamp))
+        await q_run("INSERT INTO player_days (uuid, ign, banked, updated_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign, banked = excluded.banked, "
+                    "updated_at = excluded.updated_at", (uuid, name, new, stamp))
+        await q_run("UPDATE bl_entries SET days_total = ? WHERE uuid = ? AND status = 'active'", (new, uuid))
+        return sid, new
+
+    # ----- logins (Hypixel only gives the last login/logout, so we keep every one we see) -----
+
+    async def poll_logins(self, batch=20):
+        """Looks at the oldest-checked guild members and stores each new login. Called every 2 minutes."""
+        members = await self.guild_members()
+        if not members:
+            return 0
+        if not await kv_get("logins_since"):
+            await kv_set("logins_since", iso(now_utc()))
+        rows = await q_all(
+            "SELECT uuid FROM guild_seen WHERE COALESCE(in_guild, 1) = 1 "
+            "ORDER BY login_polled_at IS NOT NULL, login_polled_at LIMIT ?", (batch * 3,))
+        todo = [r["uuid"] for r in rows if r["uuid"] in members][:batch]
+        done = 0
+        for uuid in todo:
+            player = await api_player(uuid)
+            if player is False:
+                break
+            await q_run("UPDATE guild_seen SET login_polled_at = ? WHERE uuid = ?", (iso(now_utc()), uuid))
+            done += 1
+            if not player:
+                continue
+            ms_in, ms_out = player.get("lastLogin"), player.get("lastLogout")
+            if not ms_in:
+                continue
+            login = iso(datetime.fromtimestamp(ms_in / 1000, tz=UTC))
+            name = player.get("displayname") or ""
+            await q_run("INSERT OR IGNORE INTO logins (uuid, ign, login_at) VALUES (?, ?, ?)", (uuid, name, login))
+            if ms_out and ms_out >= ms_in:
+                await q_run("UPDATE logins SET logout_at = ? WHERE uuid = ? AND login_at = ?",
+                            (iso(datetime.fromtimestamp(ms_out / 1000, tz=UTC)), uuid, login))
+            await asyncio.sleep(0.4)
+        return done
+
     # ----- breaklist -----
 
     async def do_breaklist(self, uuid, name, *, reason, added_by, start=None, end=None, gexp=None,
@@ -1113,6 +1186,9 @@ class Core:
         await q_run("INSERT INTO player_days (uuid, ign, banked, updated_at) VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign, banked = excluded.banked, "
                     "updated_at = excluded.updated_at", (uuid, name, days, stamp))
+        if days - banked_old > 0.01:
+            await q_run("INSERT INTO day_sets (uuid, ign, days, note, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (uuid, name, days - banked_old, "added with the breaklist", str(added_by), stamp))
         await q_run("INSERT INTO debts (uuid, ign, amount, updated_at) VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign, amount = excluded.amount, "
                     "updated_at = excluded.updated_at", (uuid, name, total_debt, stamp))
@@ -1761,7 +1837,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.describe(page="Page number")
     async def list_guild(self, interaction: discord.Interaction, page: app_commands.Range[int, 1, 100] = 1):
         await interaction.response.defer()
-        rows = await q_all("SELECT * FROM bl_entries WHERE status = 'active' ORDER BY added_at DESC")
+        rows = await q_all("SELECT * FROM bl_entries WHERE status = 'active' ORDER BY ord IS NOT NULL, ord, added_at DESC")
         if not rows:
             await interaction.followup.send("Nobody is on the breaklist.")
             return
@@ -1813,14 +1889,102 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if r is None:
             return
         uuid, name = r
-        await q_run("INSERT INTO player_days (uuid, ign, banked, updated_at) VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign, banked = excluded.banked, "
-                    "updated_at = excluded.updated_at", (uuid, name, days, iso(now_utc())))
-        await q_run("UPDATE bl_entries SET days_total = ? WHERE uuid = ? AND status = 'active'", (days, uuid))
+        old = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+        await self.core.add_day_set(uuid, name, days - (old["banked"] if old else 0.0), "set with /breaklist setdays",
+                                    interaction.user.id)
         total, state = await self.core.days_info(uuid)
         await interaction.followup.send(
             f"✅ **{esc(name)}**: {days:g} days banked. Total days in guild now: **{int(total)}** "
             f"(veteran at {VETERAN_DAYS}).")
+
+    @app_commands.command(name="adddays", description="Add a set of days to a player: it can be removed later (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player", days="Days to add",
+                           note="What these days are for (optional)")
+    @app_commands.check(staff_check)
+    async def adddays(self, interaction: discord.Interaction, ign: str, days: app_commands.Range[float, 0.01, 5000],
+                      note: Optional[str] = None):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        sid, new = await self.core.add_day_set(uuid, name, days, note or "added with /breaklist adddays",
+                                               interaction.user.id)
+        total, _ = await self.core.days_info(uuid)
+        await interaction.followup.send(
+            f"✅ Set **#{sid}** added to **{esc(name)}**: +{days:g} days. Total days in guild now: **{int(total)}**. "
+            f"Remove this set with `/breaklist removedays ign:{name} set:{sid}`.", allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="days", description="Every set of days added to a player (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player")
+    @app_commands.check(staff_check)
+    async def days_sets(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        rows = await q_all("SELECT * FROM day_sets WHERE uuid = ? ORDER BY id DESC", (uuid,))
+        total, _ = await self.core.days_info(uuid)
+        banked = (await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,)) or {"banked": 0})["banked"]
+        lines = []
+        for x in rows[:20]:
+            mark = "~~" if x["removed"] else ""
+            lines.append(f"{mark}**Set #{x['id']}** · {x['days']:+g} days · {gc.fmt_date(from_iso(x['added_at']))} · "
+                         f"{x['note'] or '-'}{mark}{' (removed)' if x['removed'] else ''}")
+        live = sum(x["days"] for x in rows if not x["removed"])
+        if abs(banked - live) > 0.01:
+            lines.append(f"Days from before the sets were recorded: **{banked - live:g}**")
+        await interaction.followup.send(
+            f"**{esc(name)}** · banked days: **{banked:g}** · total days in guild: **{int(total)}**\n"
+            + ("\n".join(lines) if lines else "No sets recorded yet."), allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="removedays", description="Remove one set of days from a player (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player", set="Set number (see /breaklist days)")
+    @app_commands.check(staff_check)
+    async def removedays(self, interaction: discord.Interaction, ign: str, set: int):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        row = await q_one("SELECT * FROM day_sets WHERE id = ? AND uuid = ?", (set, uuid))
+        if row is None or row["removed"]:
+            await interaction.followup.send(f"**{esc(name)}** has no active set #{set}. See `/breaklist days`.",
+                                            allowed_mentions=NO_MENTIONS)
+            return
+        prev = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+        new = max(0.0, (prev["banked"] if prev else 0.0) - row["days"])
+        await q_run("UPDATE day_sets SET removed = 1 WHERE id = ?", (set,))
+        await q_run("UPDATE player_days SET banked = ?, updated_at = ? WHERE uuid = ?", (new, iso(now_utc()), uuid))
+        await q_run("UPDATE bl_entries SET days_total = ? WHERE uuid = ? AND status = 'active'", (new, uuid))
+        total, _ = await self.core.days_info(uuid)
+        await interaction.followup.send(
+            f"✅ Set **#{set}** ({row['days']:+g} days) removed from **{esc(name)}**. "
+            f"Total days in guild now: **{int(total)}**.", allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="move", description="Move a player to another position in /breaklist guild (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player on the breaklist", position="New position (1 = first)")
+    @app_commands.check(staff_check)
+    async def move(self, interaction: discord.Interaction, ign: str, position: app_commands.Range[int, 1, 500]):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        rows = await q_all("SELECT id, uuid FROM bl_entries WHERE status = 'active' "
+                           "ORDER BY ord IS NOT NULL, ord, added_at DESC")
+        mine = next((x for x in rows if x["uuid"] == uuid), None)
+        if mine is None:
+            await interaction.followup.send(f"**{esc(name)}** is not on the breaklist.", allowed_mentions=NO_MENTIONS)
+            return
+        rows.remove(mine)
+        position = min(position, len(rows) + 1)
+        rows.insert(position - 1, mine)
+        for i, x in enumerate(rows, 1):
+            await q_run("UPDATE bl_entries SET ord = ? WHERE id = ?", (i, x["id"]))
+        await interaction.followup.send(f"✅ **{esc(name)}** is now number **{position}** of {len(rows)} in "
+                                        f"`/breaklist guild`.", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="debt", description="Set a player's extra GEXP debt by hand (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player", amount="Extra GEXP owed (0 clears the debt)")
@@ -2370,7 +2534,8 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             else:
                 await interaction.followup.send(text, allowed_mentions=MUTE_MENTIONS)
 
-    @app_commands.command(name="view", description="Show the mutes of a player: length and reason")
+    @app_commands.command(name="view", description="Full mute history of a player: every mute and verbal warning")
+    @app_commands.describe(ign="Minecraft username")
     async def view(self, interaction: discord.Interaction, ign: str):
         await interaction.response.defer()
         r = await lookup(interaction, ign)
@@ -2380,21 +2545,32 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         rows = await q_all("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", (uuid,))
         warns = await q_all("SELECT * FROM warnings WHERE uuid = ? ORDER BY id DESC", (uuid,))
         if not rows and not warns:
-            await interaction.followup.send(f"**{esc(name)}** has no mutes or warnings.")
+            await interaction.followup.send(f"**{esc(name)}** has no mutes or warnings.", allowed_mentions=NO_MENTIONS)
             return
-        embed = discord.Embed(title=f"Mutes of {name}", color=0x00C8E6)
-        embed.description = f"Mutes: **{len(rows)}** · Verbal warnings: **{len(warns)}**"
-        for row in rows[:8]:
-            when = gc.fmt_date(from_iso(row["start_at"]))
-            state = "Active" if row["status"] == "active" else "Ended"
-            embed.add_field(name=f"#{row['id']} · {state} · {mute_length_text(row)} · {when}",
-                            value=row["reason"] or "-", inline=False)
-        for w in warns[:4]:
-            embed.add_field(name=f"Verbal warning #{w['id']} · {gc.fmt_date(from_iso(w['at']))}",
-                            value=w["reason"] or "-", inline=False)
-        if len(rows) > 8:
-            embed.set_footer(text=f"Showing the latest 8 mutes of {len(rows)}")
-        await interaction.followup.send(embed=embed)
+        events = [(from_iso(x["start_at"]), "mute", x) for x in rows] + [(from_iso(x["at"]), "warn", x) for x in warns]
+        events.sort(key=lambda e: e[0], reverse=True)
+        lines = []
+        for when, kind, x in events:
+            day = gc.fmt_date(when)
+            reason = (x["reason"] or "-").replace("\n", " ")[:160]
+            if kind == "mute":
+                state = "🔴 active" if x["status"] == "active" else "ended"
+                lines.append(f"**Mute #{x['id']}** · {day} · {mute_length_text(x)} · {state}\n> {reason}")
+            else:
+                lines.append(f"**Verbal warning #{x['id']}** · {day}\n> {reason}")
+        text, shown = "", 0
+        for line in lines:
+            if len(text) + len(line) + 1 > 3900:
+                break
+            text += line + "\n"
+            shown += 1
+        embed = discord.Embed(title=f"Mute history of {name}", color=0x00C8E6)
+        embed.description = text
+        embed.add_field(name="Mutes", value=str(len(rows)), inline=True)
+        embed.add_field(name="Verbal warnings", value=str(len(warns)), inline=True)
+        if shown < len(lines):
+            embed.set_footer(text=f"Showing the latest {shown} of {len(lines)} entries")
+        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="list", description="Players with an active mute (guild staff)")
     @app_commands.check(staff_check)
@@ -2409,6 +2585,83 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             ends = "never" if not r["end_at"] else gc.fmt_et(from_iso(r["end_at"]))
             lines.append(f"**{esc(r['ign'])}** · {mute_length_text(r)} · ends {ends}\n{r['reason'] or '-'}")
         await interaction.followup.send("\n\n".join(lines)[:1900])
+
+
+# ======================================================================================
+# logins
+# ======================================================================================
+
+def _clock(minutes):
+    h, m = divmod(int(round(minutes)) % 1440, 60)
+    return f"{(h % 12) or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+
+def _span(seconds):
+    m = int(seconds // 60)
+    return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
+
+
+class LoginsCog(commands.Cog):
+    def __init__(self, core):
+        self.core = core
+
+    @app_commands.command(name="logins", description="When a player logs in: earliest, latest, every day, average time on (guild staff)")
+    @app_commands.describe(ign="Minecraft username", days="How many days back (default 14)")
+    @app_commands.check(staff_check)
+    async def logins(self, interaction: discord.Interaction, ign: str, days: app_commands.Range[int, 1, 120] = 14):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        since_all = await kv_get("logins_since")
+        cutoff = now_utc() - timedelta(days=days)
+        rows = await q_all("SELECT * FROM logins WHERE uuid = ? AND login_at >= ? ORDER BY login_at", (uuid, iso(cutoff)))
+        if not rows:
+            tracked = f" (tracking started {gc.fmt_date(from_iso(since_all))})" if since_all else ""
+            await interaction.followup.send(
+                f"No logins saved for **{esc(name)}** in the last {days} days{tracked}. The bot saves the logins of "
+                "guild members every few minutes; players who hide their online status in Hypixel may give no data.",
+                allowed_mentions=NO_MENTIONS)
+            return
+        by_day = {}
+        sessions = []
+        for x in rows:
+            t = from_iso(x["login_at"]).astimezone(gc.ET)
+            by_day.setdefault(t.date(), []).append((t, x))
+            if x["logout_at"]:
+                length = (from_iso(x["logout_at"]) - from_iso(x["login_at"])).total_seconds()
+                if 0 < length < 86400:
+                    sessions.append((t.date(), length))
+        mins = [t.hour * 60 + t.minute for lst in by_day.values() for t, _ in lst]
+        firsts = [min(t.hour * 60 + t.minute for t, _ in lst) for lst in by_day.values()]
+        earliest = min(((t, x) for lst in by_day.values() for t, x in lst), key=lambda p: p[0].hour * 60 + p[0].minute)[0]
+        latest = max(((t, x) for lst in by_day.values() for t, x in lst), key=lambda p: p[0].hour * 60 + p[0].minute)[0]
+        per_day = {}
+        for d, ln in sessions:
+            per_day[d] = per_day.get(d, 0) + ln
+        embed = discord.Embed(title=f"Logins of {name}", color=0x00C8E6)
+        embed.description = (
+            f"Last {days} days · active on **{len(by_day)}** days · **{len(rows)}** logins (times are Eastern Time)")
+        embed.add_field(name="Earliest login", value=f"{_clock(earliest.hour * 60 + earliest.minute)}\n{earliest.strftime('%m/%d')}")
+        embed.add_field(name="Latest login", value=f"{_clock(latest.hour * 60 + latest.minute)}\n{latest.strftime('%m/%d')}")
+        embed.add_field(name="Usual first login", value=_clock(sum(firsts) / len(firsts)))
+        if sessions:
+            embed.add_field(name="Average session", value=_span(sum(l for _, l in sessions) / len(sessions)))
+            embed.add_field(name="Average time on per active day", value=_span(sum(per_day.values()) / len(per_day)))
+        embed.add_field(name="Logins per active day", value=f"{len(rows) / len(by_day):.1f}")
+        lines = []
+        for d in sorted(by_day, reverse=True)[:20]:
+            times = ", ".join(_clock(t.hour * 60 + t.minute) for t, _ in by_day[d])
+            on = f" · on {_span(per_day[d])}" if d in per_day else ""
+            lines.append(f"**{d.strftime('%a %m/%d')}**: {times}{on}")
+        embed.add_field(name="Every day", value="\n".join(lines)[:1000], inline=False)
+        notes = []
+        if since_all and from_iso(since_all) > cutoff:
+            notes.append(f"the bot has only been saving logins since {gc.fmt_date(from_iso(since_all))}")
+        notes.append("logins are saved when the bot checks the player (about every 15 minutes): two logins in between can be merged")
+        embed.set_footer(text="Note: " + "; ".join(notes))
+        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
 
 
 # ======================================================================================
@@ -2467,6 +2720,10 @@ class Scheduler(commands.Cog):
         except Exception:
             log.exception("The mute expiry check failed")
         try:
+            await self.core.poll_logins()
+        except Exception:
+            log.exception("The login tracking failed")
+        try:
             last = await kv_get("snapshot_at")
             if not last or (now - from_iso(last)).total_seconds() > 5 * 60:
                 await kv_set("snapshot_at", iso(now))
@@ -2519,4 +2776,5 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(CountryCog(core))
     core.mute_cog = MuteCog(core)
     await bot.add_cog(core.mute_cog)
+    await bot.add_cog(LoginsCog(core))
     await bot.add_cog(Scheduler(core))

@@ -162,24 +162,32 @@ async def _fetch_heads(items):
 # ---------- country flags next to player names ----------
 # FLAGS is filled by the breaklist extension (name in lower case -> (country code, PIL image or None)).
 # FLAG_LOADER is an async function set by that extension: it receives [(uuid, name), ...] and fills FLAGS.
-# Without the extension both stay empty and the cards simply draw the neutral "?" flag.
+# Without the extension both stay empty and the cards simply show the names.
 
 FLAGS = {}
 FLAG_LOADER = None
 UNSET_FLAG = ((96, 102, 116), (150, 156, 170))
 
 
-def name_flag(img, d, x, y, name, font, h=34, fill=None, max_w=None, align="left", flag_for=None):
-    """Draws a player name and, right after it, the country flag (a grey '?' flag when none is set).
+def name_flag(img, d, x, y, name, font, h=34, fill=None, max_w=None, align="left", flag_for=None, flag=True):
+    """Draws a player name and, right after it, the country flag (nothing when no country is set).
     x is the left edge (align='left') or the center (align='center'); y is the vertical middle.
     max_w: the name is made smaller when name + flag would not fit. flag_for: the player whose flag is shown,
-    when the text drawn is not just the name (e.g. 'vs Name')."""
+    when the text drawn is not just the name (e.g. 'vs Name'). flag=False: name only (used by the 1v1 log cards)."""
     fill = fill or TEXT
     if isinstance(font, int):
         font = get_font(font, True)
-    entry = FLAGS.get((flag_for or name).lower())
-    flag = entry[1] if entry else None
-    fw = int(flag.width * h / flag.height) if flag is not None else (56 if entry else int(h * 1.5))
+    entry = FLAGS.get((flag_for or name).lower()) if flag else None
+    img_flag = entry[1] if entry else None
+    if not entry:
+        size = getattr(font, "size", 20)
+        while max_w and size > 12 and d.textlength(name, font=font) > max_w:
+            size -= 1
+            font = get_font(size, True)
+        w = d.textlength(name, font=font)
+        d.text((x - w / 2 if align == "center" else x, y), name, font=font, fill=fill, anchor="lm")
+        return
+    fw = int(img_flag.width * h / img_flag.height) if img_flag is not None else 56
     size = getattr(font, "size", 20)
     gap = max(10, h // 3)
     while max_w and size > 12 and d.textlength(name, font=font) + gap + fw > max_w:
@@ -189,13 +197,8 @@ def name_flag(img, d, x, y, name, font, h=34, fill=None, max_w=None, align="left
     start = x - total / 2 if align == "center" else x
     d.text((start, y), name, font=font, fill=fill, anchor="lm")
     fx = int(start + d.textlength(name, font=font) + gap)
-    if not entry:
-        d.rounded_rectangle([fx, y - h // 2, fx + fw, y + h // 2], radius=6, fill=UNSET_FLAG[0],
-                            outline=UNSET_FLAG[1], width=2)
-        d.text((fx + fw // 2, y), "?", font=get_font(max(14, int(h * 0.65)), True), fill=(235, 238, 245),
-               anchor="mm")
-    elif flag is not None:
-        small = flag.resize((fw, h))
+    if img_flag is not None:
+        small = img_flag.resize((fw, h))
         mask = Image.new("L", (fw, h), 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, fw - 1, h - 1], radius=6, fill=255)
         img.paste(small, (fx, y - h // 2), mask)
@@ -354,7 +357,7 @@ def _match_panel(img, d, x0, y0, p, accent, label, head_data):
                         fill=ROW_BG, outline=accent, width=3)
     _badge(d, cx, y0, label, accent, w=116, h=30, font_size=16)
     _paste_head(img, d, head_data, cx - 60, y0 + 32, 120, radius=14)
-    name_flag(img, d, cx, y0 + 184, p["name"], 32, h=30, max_w=PANEL_W - 30, align="center")
+    name_flag(img, d, cx, y0 + 184, p["name"], 32, h=30, max_w=PANEL_W - 30, align="center", flag=False)
 
     ty = y0 + 224
     if p["tier_before"] != p["tier_after"]:
@@ -408,7 +411,7 @@ def _pause_panel(img, d, x0, y0, p, head_data):
     d.rounded_rectangle([x0, y0, x0 + PANEL_W, y0 + PANEL_H], radius=18,
                         fill=ROW_BG, outline=MUTED, width=3)
     _paste_head(img, d, head_data, cx - 60, y0 + 32, 120, radius=14)
-    name_flag(img, d, cx, y0 + 184, p["name"], 32, h=30, max_w=PANEL_W - 30, align="center")
+    name_flag(img, d, cx, y0 + 184, p["name"], 32, h=30, max_w=PANEL_W - 30, align="center", flag=False)
     _badge(d, cx, y0 + 224, p["tier"], _tier_color(p["tier"]), w=60, h=30, font_size=18)
     d.text((cx, y0 + 252), "GAMES WON", font=get_font(14, True), fill=MUTED, anchor="mm")
     d.text((cx, y0 + 284), str(p["games"]), font=get_font(40, True), fill=ACCENT, anchor="mm")
@@ -457,12 +460,12 @@ def _draw_paused_list(entries, total, heads):
         d.text((PAD + 24, cy + 14), e["date"], font=get_font(15), fill=MUTED, anchor="lm")
 
         _paste_head(img, d, heads.get(e["p1_uuid"]), 178, cy - 20, 40)
-        name_flag(img, d, 226, cy, e["p1"], 20, h=20, max_w=190)
+        name_flag(img, d, 226, cy, e["p1"], 20, h=20, max_w=190, flag=False)
 
         d.text((450, cy), f"{e['g1']} - {e['g2']}", font=get_font(22, True), fill=ACCENT, anchor="mm")
 
         _paste_head(img, d, heads.get(e["p2_uuid"]), 494, cy - 20, 40)
-        name_flag(img, d, 542, cy, e["p2"], 20, h=20, max_w=205)
+        name_flag(img, d, 542, cy, e["p2"], 20, h=20, max_w=205, flag=False)
 
         d.text((WIDTH - PAD - 28, cy), "to continue", font=get_font(15), fill=MUTED, anchor="rm")
 
@@ -655,7 +658,7 @@ def _draw_settier(uuid, name, old_tier, new_tier, elo, heads):
     _paste_head(img, d, heads.get(uuid), PAD + 34, y0 + 25, 100, radius=12)
 
     nx = PAD + 34 + 100 + 26
-    name_flag(img, d, nx, y0 + 52, name, 38, h=34, max_w=430)
+    name_flag(img, d, nx, y0 + 52, name, 38, h=34, max_w=430, flag=False)
     by = y0 + 106
     if old_tier and old_tier != new_tier:
         _badge(d, nx + 32, by, old_tier, _tier_color(old_tier), w=64, h=34, font_size=20)
@@ -695,7 +698,7 @@ def _draw_setelo(uuid, name, old_elo, new_elo, heads):
     _paste_head(img, d, heads.get(uuid), PAD + 34, y0 + 25, 100, radius=12)
 
     nx = PAD + 34 + 100 + 26
-    name_flag(img, d, nx, y0 + 52, name, 38, h=34, max_w=430)
+    name_flag(img, d, nx, y0 + 52, name, 38, h=34, max_w=430, flag=False)
     by = y0 + 106
     if old_tier and old_tier != new_tier:
         _badge(d, nx + 32, by, old_tier, _tier_color(old_tier), w=64, h=34, font_size=20)

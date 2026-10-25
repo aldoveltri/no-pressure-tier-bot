@@ -448,9 +448,10 @@ class EvButton(discord.ui.DynamicItem[discord.ui.Button],
               "bk": discord.ButtonStyle.secondary}
     ROWS = {"rp": 0, "rs": 0, "cf": 1, "ys": 0, "ns": 0, "end": 1, "cx": 1, "bl": 0, "ie": 0, "bk": 1}
 
-    def __init__(self, act: str, rid: int, disabled: bool = False):
+    def __init__(self, act: str, rid: int, disabled: bool = False, row: Optional[int] = None):
         super().__init__(discord.ui.Button(label=self.LABELS[act], style=self.STYLES[act],
-                                           custom_id=f"np:ev:{act}:{rid}", row=self.ROWS[act], disabled=disabled))
+                                           custom_id=f"np:ev:{act}:{rid}", row=self.ROWS[act] if row is None else row,
+                                           disabled=disabled))
         self.act = act
         self.rid = int(rid)
 
@@ -480,12 +481,11 @@ class EvButton(discord.ui.DynamicItem[discord.ui.Button],
         if not allowed(interaction.user):
             await deny(interaction)
             return
-        if self.act in ("rp", "rs"):
-            if phase != "draft":
-                await interaction.response.send_message("The evidence is locked: the report is already confirmed.",
-                                                        ephemeral=True)
+        if self.act in ("rp", "rs"):                      # staff can add or change evidence while drafting AND while voting
+            if phase not in ("draft", "voting"):
+                await interaction.response.send_message("The evidence can't be changed now.", ephemeral=True)
             elif self.act == "rp":
-                await interaction.response.send_modal(ReplayModal(self.rid))
+                await interaction.response.send_modal(ReplayModal(self.rid, text_lines(row["replays"])))
             else:
                 await interaction.response.send_modal(ReasonModal(self.rid, row["reason"] or ""))
         elif self.act == "cf":
@@ -523,8 +523,12 @@ def view_for(row, ending=False):
         view.add_item(EvButton("cf", rid, disabled=not ready))
         view.add_item(EvButton("cx", rid))
     elif phase == "voting":
-        for act in ("ys", "ns", "end", "cx"):
-            view.add_item(EvButton(act, rid))
+        view.add_item(EvButton("ys", rid))
+        view.add_item(EvButton("ns", rid))
+        view.add_item(EvButton("rp", rid, row=1))          # staff can still add / change the evidence
+        view.add_item(EvButton("rs", rid, row=1))
+        view.add_item(EvButton("end", rid, row=2))
+        view.add_item(EvButton("cx", rid, row=2))
     elif phase == "verdict":
         for act in ("bl", "ie", "bk"):
             view.add_item(EvButton(act, rid))
@@ -550,6 +554,16 @@ async def refresh(interaction, rid, *, ending=False, phase=None, new_files=None)
 MAX_FILES_PER_REPORT = 8
 
 
+def text_lines(replays):
+    """The codes / links of a report as plain text, one per line (the uploaded files are not part of it)."""
+    out = []
+    for x in (replays or "").splitlines():
+        x = x.strip()
+        if x and not x.lstrip("•-* ").startswith("📎"):
+            out.append(x.lstrip("•-* ").strip())
+    return "\n".join(out)
+
+
 def safe_name(name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)[-50:] or "file"
 
@@ -557,10 +571,11 @@ def safe_name(name):
 class ReplayModal(discord.ui.Modal, title="Replay codes / media"):
     """Replay codes and links as text, and screenshots / videos uploaded straight into the report."""
 
-    def __init__(self, rid):
+    def __init__(self, rid, current=""):
         super().__init__()
         self.rid = rid
         self.codes = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=1500, required=False,
+                                          default=(current[:1500] or None),
                                           placeholder="One per line: replay codes, YouTube / Medal links")
         self.files = discord.ui.FileUpload(required=False, min_values=0, max_values=5)
         self.add_item(discord.ui.Label(text="Replay codes and/or links", component=self.codes))
@@ -569,14 +584,17 @@ class ReplayModal(discord.ui.Modal, title="Replay codes / media"):
 
     async def on_submit(self, interaction: discord.Interaction):
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
-        if phase_of(row) != "draft":
-            await interaction.response.send_message("The evidence is locked: the report is already confirmed.",
-                                                    ephemeral=True)
+        phase = phase_of(row)
+        if phase not in ("draft", "voting"):
+            await interaction.response.send_message("The evidence can't be changed now.", ephemeral=True)
             return
+        # the text box shows the current codes / links: what is written now REPLACES them (so they can be edited or removed);
+        # the files already uploaded stay, new ones are added
         lines = [x.strip() for x in (self.codes.value or "").splitlines() if x.strip()]
-        new_lines = [f"• {x}" for x in lines]
-        new_files, skipped = [], []
-        have = sum(1 for x in (row["replays"] or "").splitlines() if x.lstrip("•-* ").startswith("📎"))
+        old_files = [x for x in (row["replays"] or "").splitlines() if x.lstrip("•-* ").startswith("📎")]
+        text_part = [f"• {x}" for x in lines]
+        new_files, new_file_lines, skipped = [], [], []
+        have = len(old_files)
         limit = getattr(interaction.guild, "filesize_limit", None) or 10 * 1024 * 1024
         await interaction.response.defer()
         for att in (self.files.values or []):
@@ -588,13 +606,20 @@ class ReplayModal(discord.ui.Modal, title="Replay codes / media"):
                 continue
             name = f"ev{self.rid}-{have + len(new_files) + 1}-{safe_name(att.filename)}"
             new_files.append((name, await att.read()))
-            new_lines.append(f"📎 {name}")
-        if not new_lines:
-            await interaction.followup.send("Nothing added.", ephemeral=True)
+            new_file_lines.append(f"📎 {name}")
+        merged = "\n".join(text_part + old_files + new_file_lines)
+        if not merged:
+            await interaction.followup.send("The report needs at least one replay, link or file.", ephemeral=True)
             return
-        merged = ((row["replays"] + "\n") if row["replays"] else "") + "\n".join(new_lines)
+        if merged == (row["replays"] or "") and not new_files:
+            await interaction.followup.send("Nothing changed.", ephemeral=True)
+            return
         await q_run("UPDATE cheat_reports SET replays = ? WHERE id = ?", (merged[:3500], self.rid))
         await refresh(interaction, self.rid, new_files=new_files)
+        if phase == "voting":
+            await interaction.channel.send(f"✏️ The evidence of report #{self.rid} was updated by "
+                                           f"{esc(interaction.user.display_name)}. Check it before you vote.",
+                                           allowed_mentions=NO_MENTIONS)
         if skipped:
             await interaction.followup.send("Not added: " + "; ".join(skipped), ephemeral=True)
 
@@ -610,12 +635,20 @@ class ReasonModal(discord.ui.Modal, title="Reason"):
 
     async def on_submit(self, interaction: discord.Interaction):
         row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (self.rid,))
-        if phase_of(row) != "draft":
-            await interaction.response.send_message("The evidence is locked: the report is already confirmed.",
-                                                    ephemeral=True)
+        phase = phase_of(row)
+        if phase not in ("draft", "voting"):
+            await interaction.response.send_message("The reason can't be changed now.", ephemeral=True)
             return
-        await q_run("UPDATE cheat_reports SET reason = ? WHERE id = ?", (self.reason.value.strip(), self.rid))
+        new = self.reason.value.strip()
+        if not new:
+            await interaction.response.send_message("The reason can't be empty.", ephemeral=True)
+            return
+        await q_run("UPDATE cheat_reports SET reason = ? WHERE id = ?", (new, self.rid))
         await refresh(interaction, self.rid)
+        if phase == "voting" and new != (row["reason"] or ""):
+            await interaction.channel.send(f"✏️ The reason of report #{self.rid} was changed by "
+                                           f"{esc(interaction.user.display_name)}. Check it before you vote.",
+                                           allowed_mentions=NO_MENTIONS)
 
 
 class CancelModal(discord.ui.Modal, title="Cancel the report"):

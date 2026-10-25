@@ -539,9 +539,10 @@ BLACKLIST_PAGES = [
         _h("Step 1: staff fill in the evidence"),
         _b("Replay / media: replay codes and/or links, and you can upload screenshots or videos straight from "
            "your device (up to 5 per time, 8 per report): they are shown inside the report as if you had posted "
-           "them. Press the button as many times as you like: each time it adds."),
+           "them. The text box shows what is already there: change or delete lines, and the new files are added."),
         _b("Reason: why the player is suspected."),
-        _b("Confirm & open voting: it works only when both fields are filled. After that the evidence is locked."),
+        _b("Confirm & open voting: it works only when both fields are filled. Staff can still add or change evidence "
+           "and the reason while people vote: the bot posts a note so the voters know."),
         _h("Step 2: everybody votes"),
         _b("Sufficient evidence / Insufficient evidence: voting opens only after the confirmation. One vote "
            "each, you can change it. Votes are public: the report shows the name of who voted."),

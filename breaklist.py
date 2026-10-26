@@ -1676,17 +1676,31 @@ class Core:
         return await asyncio.to_thread(draw_road, data["ours"], data["targets"], data["series"], data["title"])
 
     async def post_road(self):
+        """Posts the Road to #N card. Returns True on success; the reason of a failure is in self.road_error."""
+        self.road_error = None
         if chan_id("ROAD_CHANNEL_ID") is None:
-            log.info("ROAD_CHANNEL_ID is not set: the Road post was skipped")
+            self.road_error = "ROAD_CHANNEL_ID is not set on the host."
+            log.info(self.road_error)
             return False
-        data, err = await self.road_status()
-        if err:
-            log.warning("Road post skipped: %s", err)
+        try:
+            data, err = await self.road_status()
+            if err:
+                self.road_error = err
+                log.warning("Road post skipped: %s", err)
+                return False
+            card = await self.road_card(data)
+        except Exception as e:
+            log.exception("The Road card failed")
+            self.road_error = f"Error while building the card: {type(e).__name__}: {e}"
             return False
-        card = await self.road_card(data)
         top = data["targets"][0]["rank"]
-        return bool(await self.post_to("ROAD_CHANNEL_ID", content=data["text"], data=card, filename="road.png",
-                                       thread_name=f"Road to #{top} guild", thread_key="road_thread"))
+        posted = await self.post_to("ROAD_CHANNEL_ID", content=data["text"], data=card, filename="road.png",
+                                    thread_name=f"Road to #{top} guild", thread_key="road_thread")
+        if not posted:
+            self.road_error = ("I couldn't post in the Road channel (check ROAD_CHANNEL_ID and my permissions there: "
+                               f"View Channel, Send Messages, Create Posts, Send Messages in Posts, Attach Files). {self.last_error or ''}")
+            return False
+        return True
 
 
 # ======================================================================================
@@ -3326,6 +3340,7 @@ class Scheduler(commands.Cog):
         self.core = core
         self.loop.start()
         self.road_loop.start()
+        log.info("The Road to guild post is scheduled every day at %s ET", ROAD_POST_TIME)
 
     def cog_unload(self):
         self.loop.cancel()
@@ -3399,13 +3414,13 @@ class Scheduler(commands.Cog):
             for day in (et_now.date() - timedelta(days=1), et_now.date()):
                 road_et = datetime(day.year, day.month, day.day, hh, mm, tzinfo=gc.ET)
                 key = f"road:{day.isoformat()}"
-                if not (road_et.astimezone(UTC) <= now < road_et.astimezone(UTC) + timedelta(hours=3)):
+                if not (road_et.astimezone(UTC) <= now < road_et.astimezone(UTC) + timedelta(minutes=30)):
                     continue
                 if await kv_get(key):
                     continue
                 last_try = await kv_get(f"road_try:{day.isoformat()}")
                 if last_try and (now - from_iso(last_try)).total_seconds() < 300:
-                    continue                                   # a failed post is tried again every 5 minutes (3 hours)
+                    continue                                   # a failed post is tried again every 5 minutes (for 30 minutes)
                 await kv_set(f"road_try:{day.isoformat()}", iso(now))
                 if await self.core.post_road():
                     await kv_set(key, iso(now))

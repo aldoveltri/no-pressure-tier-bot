@@ -643,6 +643,22 @@ EXTRA_PAGES = [
         _c("/breaklist guildhistory ign", "Staff. Adds a screenshot or text of the guild history to the breaklist post "
            "(there is also a button on the post)."),
     ]},
+    {"title": "Breaklist management", "blocks": [
+        _c("/breaklist guild", "The breaklist with a menu to sort it: newest, oldest, days in guild, first joined, GEXP owed, "
+           "name, or the manual order."),
+        _c("/breaklist all [only]", "Staff. Everyone who has ever been on the breaklist, also who is back, with pages."),
+        _c("/breaklist import [dry_run]", "Staff. Adds everyone who has a post in the breaklist forum (days start at 0)."),
+        _c("/breaklist resetplayer ign [include_days]", "Staff. Deletes one player's whole breaklist history."),
+        _c("/breaklist reset confirm", "Administrators. Deletes the whole breaklist after a backup. "
+           "Write RESET BREAKLIST to confirm."),
+        _c("/gexp remind ign", "Staff. Sends the GEXP reminder of one player now, with its buttons."),
+        _c("/purgetime [when]", "Everyone. The Discord timestamp of the upcoming purge, ready to copy."),
+        _c("/wipeplayer ign [mode] [confirm]", "Tier Tester. Cheater: cancels all their matches and gives back the "
+           "elo to their opponents. Without confirm it only shows what would change."),
+        _p("Mutes and warnings have two buttons: Give feedback and Appeal. The message goes to the staff channel "
+           "(APPEALS_CHANNEL_ID), where staff can mark it reviewed or open a ticket. If someone on the breaklist "
+           "joins another guild, the bot pings the guild master."),
+    ]},
     {"title": "Settings and tests", "blocks": [
         _c("/gexp setreq amount", "Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and "
            "used by every new calculation, card and notice."),

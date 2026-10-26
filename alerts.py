@@ -7,6 +7,7 @@ ALERTS = {
     "1v1_logs": ("1v1 logs", "The match / forfeit / undo images the bot posts in the 1v1 logs channel"),
     "match_dates": ("Match date changes", "The note posted in the 1v1 logs channel when /setdate changes a date"),
     "blacklist": ("Blacklist posts", "The posts in the blacklist channel when someone is added, edited or removed"),
+    "match_numbers": ("Match numbers on the result cards", "The 'Match #12' text at the bottom of the match / undo cards (off = only the date)"),
     "urchin": ("Urchin alerts", "The automatic post in the evidence channel when a guild member gets an Urchin tag"),
 }
 _cache = {}

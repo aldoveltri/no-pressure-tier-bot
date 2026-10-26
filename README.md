@@ -134,3 +134,6 @@ Channels are read at every use: change the ID in the panel and restart, no code 
 Variables: `PARTY_CHANNEL_ID`, `PARTY_PING_ROLE_ID` (optional), `PARTY_REMINDER_HOURS` (default `24,1`), `APPLICATIONS_FORUM_ID`, `APPLICATIONS_REVIEW_CHANNEL_ID`, `APPLICATIONS_PING_ROLE_ID` (optional), `GUILD_BRIDGE_CHANNEL_ID` (the bot needs Manage Channels there), `BRIDGE_TOPIC_PREFIX` (optional).
 
 Hypixel forums thread: `HYPIXEL_THREAD_URL` (the guild thread on hypixel.net), `APPLICATIONS_REVIEW_CHANNEL_ID`, `HYPIXEL_THREAD_IGNORE_AUTHORS` (default `zCqmbo`: staff replies are not copied), `APPLICATIONS_PING_ROLE_ID` (optional). Checked every 5 minutes; `/applications check` tests the connection. The first run only remembers the latest post.
+
+## Staff tools
+Variables: `APPEALS_CHANNEL_ID` (where feedback and appeals arrive), `BETRAYAL_PING_USER_ID` or `BETRAYAL_PING_ROLE_ID`, `BETRAYAL_CHANNEL_ID` (optional, default the breaklist channel). Commands: `/breaklist all|reset|resetplayer|import`, sort menu on `/breaklist guild`, `/gexp remind`, `/purgetime`, `/wipeplayer`, `/alerts` also switches the match numbers on the result cards. A failed Road post is retried every 5 minutes for 3 hours.

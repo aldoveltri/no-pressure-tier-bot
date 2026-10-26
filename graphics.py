@@ -166,6 +166,7 @@ async def _fetch_heads(items):
 
 FLAGS = {}
 FLAG_LOADER = None
+SHOW_MATCH_NUMBERS = True      # switched with /alerts (alert 'match_numbers')
 UNSET_FLAG = ((96, 102, 116), (150, 156, 170))
 
 
@@ -393,7 +394,7 @@ def _draw_match(w, l, score, match_id, date, heads, title, forfeit, first_to=3):
     if forfeit:
         d.text((WIDTH // 2, mid + 62), "by forfeit", font=get_font(16, True), fill=RED, anchor="mm")
 
-    _footer(d, height, f"Match #{match_id} · {date}")
+    _footer(d, height, f"Match #{match_id} · {date}" if SHOW_MATCH_NUMBERS else date)
     return _png(img)
 
 

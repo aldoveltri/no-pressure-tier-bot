@@ -423,11 +423,14 @@ async def setup_hook():
     await init_seasons()
     await init_modes()
     await seed_modes([m["name"] for m in MODES])
+    import graphics as _graphics
+    _graphics.SHOW_MATCH_NUMBERS = await alerts.enabled("match_numbers")
     await bot.load_extension("namesync")
     await bot.load_extension("breaklist")
     await bot.load_extension("evidence")
     await bot.load_extension("community")
     await bot.load_extension("extras")
+    await bot.load_extension("staff2")
 
 bot.setup_hook = setup_hook
 
@@ -1084,6 +1087,8 @@ async def alerts_cmd(interaction: discord.Interaction, alert: Optional[str] = No
         names = list(alerts.ALERTS) if alert == "all" else [alert]
         for k in names:
             await alerts.set_enabled(k, state == "on")
+        import graphics as _graphics
+        _graphics.SHOW_MATCH_NUMBERS = await alerts.enabled("match_numbers")
     elif alert or state:
         await interaction.followup.send("Give both the alert and the state, or nothing to see the list.", ephemeral=True)
         return

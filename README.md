@@ -136,4 +136,7 @@ Variables: `PARTY_CHANNEL_ID`, `PARTY_PING_ROLE_ID` (optional), `PARTY_REMINDER_
 Hypixel forums thread: `HYPIXEL_THREAD_URL` (the guild thread on hypixel.net), `APPLICATIONS_REVIEW_CHANNEL_ID`, `HYPIXEL_THREAD_IGNORE_AUTHORS` (default `zCqmbo`: staff replies are not copied), `APPLICATIONS_PING_ROLE_ID` (optional). Checked every 5 minutes; `/applications check` tests the connection. The first run only remembers the latest post.
 
 ## Staff tools
-Variables: `APPEALS_CHANNEL_ID` (where feedback and appeals arrive), `BETRAYAL_PING_USER_ID` or `BETRAYAL_PING_ROLE_ID`, `BETRAYAL_CHANNEL_ID` (optional, default the breaklist channel). Commands: `/breaklist all|reset|resetplayer|import`, sort menu on `/breaklist guild`, `/gexp remind`, `/purgetime`, `/wipeplayer`, `/alerts` also switches the match numbers on the result cards. A failed Road post is retried every 5 minutes for 3 hours.
+Variables: `APPEALS_CHANNEL_ID` (where feedback and appeals arrive), `BETRAYAL_PING_USER_ID` or `BETRAYAL_PING_ROLE_ID`, `BETRAYAL_CHANNEL_ID` (optional, default the breaklist channel). Commands: `/breaklist all|reset|resetplayer|import`, sort menu on `/breaklist guild`, `/gexp remind`, `/purgetime`, `/wipeplayer`, `/alerts` also switches the match numbers on the result cards. A failed Road post is retried every 5 minutes for 30 minutes; if the bot is off at the post time, nothing is posted late.
+
+## Custom tag votes (tags.py)
+`/tag suggest`. Variables: `ACTIVE_RANK_NAME` (default `Active`: the Hypixel guild rank of active players), `TAG_CHANNEL_ID` (where the votes are posted, default the channel of the command), `TAG_PING_USER_ID` (who is pinged to change the tag, default `BETRAYAL_PING_USER_ID`).

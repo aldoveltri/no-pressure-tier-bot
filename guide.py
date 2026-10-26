@@ -659,6 +659,14 @@ EXTRA_PAGES = [
            "(APPEALS_CHANNEL_ID), where staff can mark it reviewed or open a ticket. If someone on the breaklist "
            "joins another guild, the bot pings the guild master."),
     ]},
+    {"title": "Custom guild tag", "blocks": [
+        _c("/tag suggest tag", "Active players. Suggest a guild tag (up to 6 letters or numbers, without the brackets) "
+           "and start a vote. Your Discord account must be linked and have the Active rank in the guild."),
+        _p("The staff presses Pick voters and chooses the active players who are online. They are pinged and have to "
+           "press Yes or No: votes are public. One No rejects the tag. If every picked player votes Yes, the guild "
+           "master is pinged to change the tag by hand."),
+        _c("/tag list", "Staff. The latest tag votes."),
+    ]},
     {"title": "Settings and tests", "blocks": [
         _c("/gexp setreq amount", "Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and "
            "used by every new calculation, card and notice."),

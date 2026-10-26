@@ -431,6 +431,7 @@ async def setup_hook():
     await bot.load_extension("community")
     await bot.load_extension("extras")
     await bot.load_extension("staff2")
+    await bot.load_extension("tags")
 
 bot.setup_hook = setup_hook
 

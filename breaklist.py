@@ -280,13 +280,33 @@ def _wrap_lines(text, font, width):
     return g._wrap(tmp, text, font, width)
 
 
-def _box(d, x, y, w, h, label, value, color=None, size=32, sub=None, sub_color=None):
+def _box(d, x, y, w, h, label, value, color=None, size=32, sub=None, sub_color=None, sub2=None):
     d.rounded_rectangle([x, y, x + w, y + h], radius=14, fill=g.ROW_BG)
-    d.text((x + w // 2, y + 28), label, font=g.get_font(14, True), fill=g.MUTED, anchor="mm")
+    d.text((x + w // 2, y + 24), label, font=g.get_font(14, True), fill=g.MUTED, anchor="mm")
+    if sub2:
+        d.text((x + w // 2, y + 52), value, font=g.get_font(size, True), fill=color or g.TEXT, anchor="mm")
+        d.text((x + w // 2, y + 80), sub, font=g.get_font(15, True), fill=sub_color or g.MUTED, anchor="mm")
+        d.text((x + w // 2, y + 97), sub2, font=g.get_font(14, True), fill=g.MUTED, anchor="mm")
+        return
     d.text((x + w // 2, y + (62 if sub else 70)), value, font=g.get_font(size, True),
            fill=color or g.TEXT, anchor="mm")
     if sub:
         d.text((x + w // 2, y + 92), sub, font=g.get_font(15, True), fill=sub_color or g.MUTED, anchor="mm")
+
+
+def clock_text(dt):
+    """'4:01 PM ET' in the time zone chosen with /timezone."""
+    local = dt.astimezone(gc.TZ)
+    return f"{(local.strftime('%I').lstrip('0') or '12')}:{local.strftime('%M %p')} {gc.TZ_NAME}"
+
+
+def into_week(e):
+    """How long into the GEXP week the player was breaklisted (since the week start, or since they joined)."""
+    left = from_iso(e["left_at"])
+    ws = gc.week_start(left)
+    joined = from_iso(e.get("joined_at"))
+    start = max(joined, ws) if joined else ws
+    return gc.fmt_duration((left - start).total_seconds())
 
 
 # ---------- country flags next to the player name ----------
@@ -445,7 +465,8 @@ def draw_breaklist_card(e, head, title, count):
     y = top + id_h + gap
     owed = e["owed"]
     _box(d, g.PAD, y, bw, box_h, "GEXP THIS WEEK", n(e["gexp"]))
-    _box(d, g.PAD + bw + gap, y, bw, box_h, "REQUIRED AT BREAKLIST", n(e["required"]))
+    _box(d, g.PAD + bw + gap, y, bw, box_h, "REQUIRED AT BREAKLIST", n(e["required"]),
+         sub=f"after {into_week(e)}", sub_color=g.TEXT, sub2="into the GEXP week")
     _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "EXTRA GEXP OWED", n(owed),
          g.RED if owed > 0 else g.GREEN)
 
@@ -454,12 +475,14 @@ def draw_breaklist_card(e, head, title, count):
         sub, sub_color = "VETERAN REACHED", g.GREEN
     else:
         sub, sub_color = f"{VETERAN_DAYS - int(days)} to veteran", g.MUTED
-    _box(d, g.PAD, y, bw, box_h, "DAYS IN GUILD", f"{int(days)} / {VETERAN_DAYS}", size=30,
-         sub=sub, sub_color=sub_color)
+    _box(d, g.PAD, y, bw, box_h, "DAYS IN GUILD", f"{int(days)} / {VETERAN_DAYS}", size=28,
+         sub=gc.fmt_duration(days * 86400), sub_color=g.TEXT, sub2=sub)
     joined = from_iso(e.get("joined_at"))
-    _box(d, g.PAD + bw + gap, y, bw, box_h, "JOINED THE GUILD", gc.fmt_date(joined) if joined else "-", size=28)
+    _box(d, g.PAD + bw + gap, y, bw, box_h, "JOINED THE GUILD", gc.fmt_date(joined) if joined else "-", size=26,
+         sub=clock_text(joined) if joined else "", sub2="" if joined else None)
     left = from_iso(e["left_at"])
-    _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "BREAKLISTED", gc.fmt_date(left), size=28)
+    _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "BREAKLISTED", gc.fmt_date(left), size=26,
+         sub=clock_text(left), sub_color=g.TEXT)
 
     y += box_h + gap
     y = _text_panel(d, y, "REASON", reason, max_lines=3)
@@ -2134,6 +2157,29 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         head = await self.core.head_for(uuid, name)
         card = await asyncio.to_thread(draw_history, name, head, chunk, len(rows), page, pages)
         await interaction.followup.send(file=send_file(card, "history.png"))
+
+    @app_commands.command(name="details", description="Exact times of a player's latest breaklist entry")
+    @app_commands.describe(ign="Minecraft username of the player")
+    async def details(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        e = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY id DESC LIMIT 1", (uuid,))
+        if not e:
+            await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
+            return
+        e = dict(e)
+        joined, left = from_iso(e.get("joined_at")), from_iso(e["left_at"])
+        in_guild = gc.fmt_duration(e["days_total"] * 86400)
+        lines = [f"**{esc(name)}** · latest breaklist entry ({e['status']})",
+                 f"Time in the guild: **{in_guild}**",
+                 f"Joined: **{gc.fmt_date(joined)} {clock_text(joined)}**" if joined else "Joined: unknown",
+                 f"Breaklisted: **{gc.fmt_date(left)} {clock_text(left)}**",
+                 f"Into the GEXP week when breaklisted: **{into_week(e)}**",
+                 f"GEXP that week: **{n(e['gexp'])}** / required **{n(e['required'])}** (owed {n(e['owed'])})"]
+        await interaction.followup.send("\n".join(lines))
 
     async def guild_card(self, sort, page):
         """(png, page, pages, total) of /breaklist guild in the chosen order, or None when the list is empty."""

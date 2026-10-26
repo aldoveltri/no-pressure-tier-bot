@@ -298,6 +298,9 @@ BREAKLIST_PAGES = [
             _c("/breaklist history ign [page]",
                "Every time the player was on the breaklist: the dates, the length of each break, the reason "
                "and the GEXP owed. 4 entries per page, newest first."),
+            _c("/breaklist details ign",
+               "Exact times of the latest entry: time in the guild (days, hours, minutes), exact join and "
+               "breaklist time (in the zone set with /timezone) and how far into the GEXP week the player was."),
             _c("/breaklist guild [page]",
                "The list of everyone who is on the breaklist now, with the date they were added, their days "
                "in the guild and the GEXP they owe."),

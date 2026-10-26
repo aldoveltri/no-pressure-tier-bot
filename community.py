@@ -45,10 +45,10 @@ VOTES = {"y": ("Showing Up", "✅"), "m": ("Maybe Showing Up", "❔"), "n": ("No
 # ======================================================================================
 
 def header_line(start: datetime) -> str:
-    t = start.astimezone(gc.ET)
+    t = start.astimezone(gc.TZ)
     hour = t.strftime("%I").lstrip("0") or "12"
     clock = f"{hour} {t.strftime('%p')}" if t.minute == 0 else f"{hour}:{t.strftime('%M %p')}"
-    return f"{t.strftime('%A, %B')} {t.day} @ {clock} ET"
+    return f"{t.strftime('%A, %B')} {t.day} @ {clock} {gc.TZ_NAME}"
 
 
 async def voter_identity(discord_id, fallback):
@@ -164,7 +164,7 @@ async def attendee_stats(core, party):
             last = await q_one("SELECT login_at FROM logins WHERE uuid = ? ORDER BY login_at DESC LIMIT 1", (v["uuid"],))
             tier = f"{tier_from_elo(p['elo'])} ({p['elo']})" if p else "no tier"
             lines.append(f"**{esc(v['name'])}** · {tier} · 1v1 {wins}W-{losses}L · GEXP 7d {n(gexp)} · "
-                         f"{int(days)} days in guild · last login {gc.fmt_date(from_iso(last['login_at'])) if last else '?'}")
+                         f"{int(days)} days in guild" + (f" · last login {gc.fmt_date(from_iso(last['login_at']))}" if last else ""))
         e = discord.Embed(title=f"{VOTES[key][1]} {VOTES[key][0]} ({len(lines)})", color=0x9B7BE8)
         e.description = ("\n".join(lines) or "-")[:4000]
         embeds.append(e)
@@ -205,7 +205,7 @@ class PartyCog(commands.GroupCog, name="party", description="Guild party announc
         self.loop.cancel()
 
     @app_commands.command(name="create", description="Announce a guild party with Showing up / Maybe / Not buttons (guild staff)")
-    @app_commands.describe(when="Start (Eastern Time): 2026/08/29 7:00 PM", description="What the party is about",
+    @app_commands.describe(when="Start (ET or MT, see /timezone): 2026/08/29 7:00 PM", description="What the party is about",
                            host="Minecraft username of the host (optional)", title="Default: Guild Party",
                            image="Picture shown under the text (optional)")
     @app_commands.check(staff_check)
@@ -215,7 +215,7 @@ class PartyCog(commands.GroupCog, name="party", description="Guild party announc
         start = gc.parse_et(when)
         if start is None or not re.search(r"\d:\d|am|pm", when, re.I):
             await interaction.followup.send("I couldn't read the start. Use the date and the time, for example "
-                                            "`2026/08/29 7:00 PM` (Eastern Time).", ephemeral=True)
+                                            "`2026/08/29 7:00 PM` (ET or MT, see /timezone).", ephemeral=True)
             return
         if start.astimezone(UTC) <= now_utc():
             await interaction.followup.send("That time is in the past.", ephemeral=True)

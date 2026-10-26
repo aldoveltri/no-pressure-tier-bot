@@ -493,7 +493,7 @@ ROAD_PAGES = [
             _h("How it works"),
             _b("The bot compares the total guild GEXP of our guild with the guilds listed by the staff in the "
                "host settings (ROAD_GUILDS)."),
-            _b("It posts every day at 11:00 PM Eastern Time (so the day is almost complete), in the Road to #6 guild "
+            _b("It posts every day at 11:59 PM Eastern Time (so the day is complete), in the Road to #6 guild "
                "forum. The GEXP per day and the ETA use the real time between two readings."),
             _b("From the second day it shows how much GEXP per day we and they earn, and how many days it would "
                "take to catch up. The chart needs two days of data."),
@@ -601,7 +601,7 @@ EXTRA_PAGES = [
         _c("/mute view ign", "Everyone. The full mute history of a player: every mute and verbal warning, newest "
            "first, with date, length and reason."),
         _c("/logins ign [days]", "Guild staff. Earliest and latest login, every login of each day, average "
-           "session and time on per day (Eastern Time). Useful before an early kick. The bot saves the logins of "
+           "session and time on per day (ET or MT, see /timezone). Useful before an early kick. The bot saves the logins of "
            "guild members every few minutes, so the data starts from the day it was installed; players who hide "
            "their online status on Hypixel may show nothing."),
         _c("/mute list", "Staff. The active mutes."),
@@ -620,6 +620,28 @@ EXTRA_PAGES = [
            "Also automatic: new replies in the guild thread on the Hypixel forums are copied to the review channel "
            "(/applications check tests it), and the guild "
            "bridge channel topic shows the guild members and how many are online."),
+    ]},
+    {"title": "Members and applications", "blocks": [
+        _c("/days player ign", "Total days a player has spent in the guild: saved days plus the current stay."),
+        _c("/days leaderboard", "Members ordered by total days in the guild. Edit with /breaklist setdays or adddays."),
+        _c("/waitlist add ign [note]", "Staff. Puts an applicant on the waiting list."),
+        _c("/waitlist note ign text", "Staff. Adds a note while they wait."),
+        _c("/waitlist remove ign [image] [note]", "Staff. Takes them off (accepted, declined...), with an optional image."),
+        _c("/waitlist list, /waitlist view ign", "Staff. Everyone waiting with the latest note, or all notes of one applicant."),
+        _c("/timezone et|mt", "Staff. Chooses the time zone shown and typed in the commands. The GEXP week and the "
+           "purge always follow Eastern Time."),
+        _c("/links", "Staff. Every linked Discord account and who linked it (the member or a staff member)."),
+    ]},
+    {"title": "Map stats and old matches", "blocks": [
+        _c("/match ... [map]", "The optional map is saved with the match. /setmap match_id map changes it later."),
+        _c("/mapstats [ign]", "Wins, losses and win rate of a player on each map."),
+        _c("/mapleaderboard map", "Best players on one map."),
+        _c("/importmatches file [dry_run]", "Staff. Logs many old 1v1s from a text/CSV file, one per line: "
+           "winner,loser,score,date[,map]. Use dry_run first to check the file. Players need a tier first."),
+        _c("/mute removemute, /mute removewarn, /mute warnexpiry", "Staff. Delete a mute or a warning from the "
+           "history, or change when a verbal warning expires."),
+        _c("/breaklist guildhistory ign", "Staff. Adds a screenshot or text of the guild history to the breaklist post "
+           "(there is also a button on the post)."),
     ]},
     {"title": "Settings and tests", "blocks": [
         _c("/gexp setreq amount", "Staff. Changes the weekly GEXP requirement (default 55,000). It is saved and "

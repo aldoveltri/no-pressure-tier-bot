@@ -187,7 +187,7 @@ async def setup_tables():
         for table, col, kind in (("bl_requests", "channel_id", "TEXT"), ("bl_requests", "message_id", "TEXT"),
                                  ("road_history", "at", "TEXT"), ("guild_seen", "in_guild", "INTEGER DEFAULT 1"),
                                  ("mutes", "discord_id", "TEXT"), ("bl_entries", "ord", "INTEGER"),
-                                 ("guild_seen", "login_polled_at", "TEXT"), ("guild_seen", "online", "INTEGER")):
+                                 ("guild_seen", "login_polled_at", "TEXT"), ("guild_seen", "online", "INTEGER"), ("warnings", "expires_at", "TEXT")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             except aiosqlite.OperationalError:
@@ -506,7 +506,7 @@ PURGE_STATUS = {"suspect": ("SUSPECT", g.RED), "breaklist": ("BREAKLISTED", (241
 
 
 def short_et(dt):
-    local = dt.astimezone(gc.ET)
+    local = dt.astimezone(gc.TZ)
     return f"{local.strftime('%m/%d')} {(local.strftime('%I').lstrip('0') or '12')}:{local.strftime('%M %p')}"
 
 
@@ -591,6 +591,97 @@ def draw_history(name, head, entries, total, page, pages):
                font=g.get_font(13), fill=g.MUTED, anchor="rm")
         y += row_h + 10
     g._footer(d, height, f"Page {page}/{pages}")
+    return g._png(img)
+
+
+# ---------- GEXP per day (breaklist) and pasted guild history ----------
+
+def draw_gexp_days(name, head, rows, total, required):
+    """rows: [(date, gexp, position, members)], oldest first."""
+    row_h = 62
+    top = g.HEADER_H + 20
+    id_h = 110
+    height = top + id_h + 16 + 52 + len(rows) * (row_h + 8) + 70 + g.FOOTER_H
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, "GEXP THIS WEEK", f"{GUILD_NAME_DISPLAY} · only the days that count")
+    d.rounded_rectangle([g.PAD, top, g.WIDTH - g.PAD, top + id_h], radius=16, fill=g.ROW_BG)
+    d.rounded_rectangle([g.PAD, top, g.PAD + 8, top + id_h], radius=4, fill=g.ACCENT)
+    g._paste_head(img, d, head, g.PAD + 34, top + 15, 80, radius=12)
+    _name_flag(img, d, g.PAD + 34 + 80 + 22, top + 55, name, g.get_font(36, True))
+    d.text((g.WIDTH - g.PAD - 30, top + 42), n(total), font=g.get_font(40, True),
+           fill=g.GREEN if total >= required else g.RED, anchor="rm")
+    d.text((g.WIDTH - g.PAD - 30, top + 84), f"OF {n(required)} REQUIRED", font=g.get_font(14, True), fill=g.MUTED, anchor="rm")
+    y = top + id_h + 16
+    cols = (g.PAD + 190, g.WIDTH // 2 + 20, g.WIDTH - g.PAD - 150)
+    for x, label in zip(cols, ("DATE", "GEXP", "POSITION")):
+        d.text((x, y + 24), label, font=g.get_font(16, True), fill=g.MUTED, anchor="mm")
+    y += 52
+    for date, gexp, pos, members in rows:
+        d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + row_h], radius=12, fill=g.ROW_BG)
+        d.text((cols[0], y + row_h // 2), date, font=g.get_font(24, True), fill=g.TEXT, anchor="mm")
+        d.text((cols[1], y + row_h // 2), n(gexp), font=g.get_font(26, True), fill=g.GREEN, anchor="mm")
+        d.text((cols[2], y + row_h // 2), f"#{pos}/{members}" if pos else "-", font=g.get_font(24, True),
+               fill=g.TEXT, anchor="mm")
+        y += row_h + 8
+    d.text((g.WIDTH // 2, y + 28), f"Total {n(total)} GEXP", font=g.get_font(22, True), fill=g.SOFT, anchor="mm")
+    g._footer(d, height, "Position = rank among guild members that day")
+    return g._png(img)
+
+
+def draw_guild_text(name, head, lines):
+    """A guild history pasted as text, drawn as a card."""
+    row_h = 50
+    top = g.HEADER_H + 20
+    id_h = 110
+    rows = []
+    for line in lines[:24]:
+        rows += _wrap_lines(line, g.get_font(22), g.WIDTH - 2 * g.PAD - 60)[:2]
+    height = top + id_h + 16 + len(rows) * row_h + 30 + g.FOOTER_H
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, "GUILD HISTORY", GUILD_NAME_DISPLAY)
+    d.rounded_rectangle([g.PAD, top, g.WIDTH - g.PAD, top + id_h], radius=16, fill=g.ROW_BG)
+    d.rounded_rectangle([g.PAD, top, g.PAD + 8, top + id_h], radius=4, fill=g.ACCENT)
+    g._paste_head(img, d, head, g.PAD + 34, top + 15, 80, radius=12)
+    _name_flag(img, d, g.PAD + 34 + 80 + 22, top + 55, name, g.get_font(36, True))
+    y = top + id_h + 16
+    d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + len(rows) * row_h + 30], radius=16, fill=g.ROW_BG)
+    for i, line in enumerate(rows):
+        d.text((g.PAD + 30, y + 30 + i * row_h), line, font=g.get_font(22), fill=g.TEXT, anchor="lm")
+    g._footer(d, height)
+    return g._png(img)
+
+
+# ---------- mute / warning card ----------
+
+def draw_punish_card(kind, name, head, reason, rows, by, number):
+    """kind: 'MUTE' or 'VERBAL WARNING'. rows: [(label, value)] shown as boxes (length, expires, totals...)."""
+    color = g.RED if kind == "MUTE" else (241, 196, 15)
+    lines = _wrap_lines(reason or "No reason given.", g.get_font(22), g.WIDTH - 2 * g.PAD - 70)[:5]
+    top = g.HEADER_H + 20
+    id_h = 130
+    box_h = 112
+    reason_h = 70 + 30 * len(lines)
+    height = top + id_h + 16 + box_h + 16 + reason_h + 16 + g.FOOTER_H
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, kind, f"{GUILD_NAME_DISPLAY} · #{number}")
+    d.rounded_rectangle([g.PAD, top, g.WIDTH - g.PAD, top + id_h], radius=16, fill=g.ROW_BG)
+    d.rounded_rectangle([g.PAD, top, g.PAD + 8, top + id_h], radius=4, fill=color)
+    g._paste_head(img, d, head, g.PAD + 34, top + 15, 100, radius=12)
+    _name_flag(img, d, g.PAD + 34 + 100 + 24, top + 65, name, g.get_font(40, True))
+    y = top + id_h + 16
+    gap = 14
+    w = (g.WIDTH - 2 * g.PAD - gap * (len(rows) - 1)) // max(1, len(rows))
+    for i, (label, value) in enumerate(rows):
+        _box(d, g.PAD + i * (w + gap), y, w, box_h, label, value, size=28 if len(value) < 13 else 22)
+    y += box_h + 16
+    d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + reason_h], radius=16, fill=g.ROW_BG)
+    d.text((g.PAD + 28, y + 30), "REASON", font=g.get_font(15, True), fill=g.MUTED, anchor="lm")
+    for i, line in enumerate(lines):
+        d.text((g.PAD + 28, y + 64 + i * 30), line, font=g.get_font(22), fill=g.TEXT, anchor="lm")
+    g._footer(d, height, f"By {by}")
     return g._png(img)
 
 
@@ -1116,6 +1207,49 @@ class Core:
         await q_run("UPDATE bl_entries SET days_total = ? WHERE uuid = ? AND status = 'active'", (new, uuid))
         return sid, new
 
+    async def gexp_days_card(self, entry):
+        """Card with the GEXP of each day of the guild week they were breaklisted (only days that count)."""
+        end = from_iso(entry["left_at"])
+        ws = gc.week_start(end)
+        joined = from_iso(entry.get("joined_at"))
+        first = max(joined, ws) if joined else ws
+        day = first.astimezone(gc.ET).date()
+        last = end.astimezone(gc.ET).date()
+        rows = []
+        while day <= last:
+            key = day.isoformat()
+            mine = await q_one("SELECT gexp FROM gexp_history WHERE uuid = ? AND day = ?", (entry["uuid"], key))
+            if mine is not None:
+                total = (await q_one("SELECT COUNT(*) AS c FROM gexp_history WHERE day = ?", (key,)))["c"]
+                better = (await q_one("SELECT COUNT(*) AS c FROM gexp_history WHERE day = ? AND gexp > ?",
+                                      (key, mine["gexp"])))["c"]
+                rows.append((day.strftime("%m/%d/%y"), mine["gexp"], better + 1, total))
+            day += timedelta(days=1)
+        if not rows:
+            return None
+        head = await self.head_for(entry["uuid"], entry["ign"])
+        await load_flag(entry["uuid"], entry["ign"])
+        return await asyncio.to_thread(draw_gexp_days, entry["ign"], head, rows, sum(r[1] for r in rows),
+                                       entry["required"])
+
+    async def post_breaklist(self, entry, name, text, card):
+        """Posts the breaklist card, the daily GEXP card under it (same thread) and the staff button for the guild
+        history. Returns the channel/thread mention, None when no channel is set, False when posting failed."""
+        key = f"bl_thread:{entry['id']}"
+        view = discord.ui.View(timeout=None)
+        view.add_item(GuildHistoryButton(entry["id"]))
+        posted = await self.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
+                                    thread_name=name, thread_key=key, view=view)
+        if posted:
+            try:
+                second = await self.gexp_days_card(entry)
+                if second:
+                    await self.post_to("BREAKLIST_CHANNEL_ID", data=second, filename="gexp_week.png",
+                                       thread_name=name, thread_key=key)
+            except Exception:
+                log.exception("The daily GEXP card failed")
+        return posted
+
     async def guild_history_text(self, uuid):
         """Short text with the guilds we know about for a player: our own stays and the guild they are in now.
         (Hypixel's API does not give the guilds a player was in before, only the current one.)"""
@@ -1331,8 +1465,7 @@ class Core:
     async def announce_breaklist(self, name, res, channel):
         card = await self.breaklist_card(res["entry"], "BREAKLISTED", res["count"])
         text = f"✅ **{esc(name)}** was added to the breaklist." + await self.guild_history_text(res["entry"]["uuid"])
-        posted = await self.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
-                                    thread_name=name)
+        posted = await self.post_breaklist(res["entry"], name, text, card)
         if not posted:
             await channel.send(content=text, file=discord.File(io.BytesIO(card), filename="breaklist.png"),
                                allowed_mentions=NO_MENTIONS)
@@ -1519,6 +1652,41 @@ class Core:
 # ======================================================================================
 # the Breaklist Me / Excuse Me buttons (they keep working after a restart)
 # ======================================================================================
+
+class GuildHistoryModal(discord.ui.Modal, title="Guild history"):
+    def __init__(self, eid):
+        super().__init__()
+        self.eid = eid
+        self.files = discord.ui.FileUpload(required=True, min_values=1, max_values=5)
+        self.note = discord.ui.TextInput(style=discord.TextStyle.paragraph, required=False, max_length=1000,
+                                         placeholder="Optional note")
+        self.add_item(discord.ui.Label(text="Screenshot of the guild history", component=self.files))
+        self.add_item(discord.ui.Label(text="Note", component=self.note))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        files = [discord.File(io.BytesIO(await a.read()), filename=a.filename) for a in self.files.values]
+        text = f"📜 **Guild history** (added by {interaction.user.display_name})" + (f"\n{self.note.value}" if self.note.value else "")
+        await interaction.channel.send(content=text, files=files, allowed_mentions=NO_MENTIONS)
+        await interaction.followup.send("Guild history posted.", ephemeral=True)
+
+
+class GuildHistoryButton(discord.ui.DynamicItem[discord.ui.Button], template=r"bl:gh:(?P<eid>\d+)"):
+    def __init__(self, eid):
+        super().__init__(discord.ui.Button(label="Add guild history (staff)", style=discord.ButtonStyle.secondary,
+                                           emoji="📜", custom_id=f"bl:gh:{eid}"))
+        self.eid = int(eid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["eid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_guild_staff(interaction.user):
+            await interaction.response.send_message("Only guild staff can use this.", ephemeral=True)
+            return
+        await interaction.response.send_modal(GuildHistoryModal(self.eid))
+
 
 class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<act>bl|ex|ig):(?P<uuid>[0-9a-f]{32})"):
     """Breaklist Me / Excuse Me / Ignore on a GEXP notice. The first two only send a request to the staff."""
@@ -1772,8 +1940,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.describe(
         ign="Minecraft username of the player",
         reason="Why the player is being breaklisted (everyone can read it)",
-        start="When they joined the guild (Eastern Time): 2026/10/03 or 2026/10/03 6:00 PM (the year is optional: 10/03 6:00 PM). Default: from Hypixel",
-        end="When they were breaklisted (Eastern Time). Default: now",
+        start="When they joined the guild (ET or MT, see /timezone): 2026/10/03 or 2026/10/03 6:00 PM (the year is optional: 10/03 6:00 PM). Default: from Hypixel",
+        end="When they were breaklisted (ET or MT, see /timezone). Default: now",
         gexp="GEXP earned this week before the breaklist. Default: taken from the saved Hypixel data",
         days="Total days the player has spent in the guild (use it for players breaklisted before the bot)",
         debt="Extra GEXP debt from previous weeks. Default: the saved debt")
@@ -1792,12 +1960,12 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if start:
             start_dt = gc.parse_et(start)
             if start_dt is None:
-                await interaction.followup.send("I couldn't read the start date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (Eastern Time).")
+                await interaction.followup.send("I couldn't read the start date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (ET or MT, see /timezone).")
                 return
         if end:
             end_dt = gc.parse_et(end)
             if end_dt is None:
-                await interaction.followup.send("I couldn't read the end date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (Eastern Time).")
+                await interaction.followup.send("I couldn't read the end date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (ET or MT, see /timezone).")
                 return
         if start_dt and end_dt and end_dt <= start_dt:
             await interaction.followup.send("The end date must be after the start date.")
@@ -1809,9 +1977,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             return
         card = await self.core.breaklist_card(res["entry"], "BREAKLISTED", res["count"])
         history = await self.core.guild_history_text(uuid)
-        posted = await self.core.post_to("BREAKLIST_CHANNEL_ID",
-                                         content=f"✅ **{esc(name)}** was added to the breaklist." + history,
-                                         data=card, filename="breaklist.png", thread_name=name)
+        posted = await self.core.post_breaklist(res["entry"], name,
+                                                f"✅ **{esc(name)}** was added to the breaklist." + history, card)
         if posted:
             await interaction.followup.send(f"✅ **{esc(name)}** was added to the breaklist. Notice posted in {posted}.")
         else:
@@ -1882,7 +2049,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
 
     @app_commands.command(name="remove", description="Take a player off the breaklist when they rejoin (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
-                           when="When they rejoined (Eastern Time): 2026/10/03 6:00 PM, year optional. Default: now")
+                           when="When they rejoined (ET or MT, see /timezone): 2026/10/03 6:00 PM, year optional. Default: now")
     @app_commands.check(staff_check)
     async def remove(self, interaction: discord.Interaction, ign: str, when: Optional[str] = None):
         await interaction.response.defer()
@@ -1896,7 +2063,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             return
         back = gc.parse_et(when) if when else now_utc()
         if back is None:
-            await interaction.followup.send("I couldn't read the date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (Eastern Time).")
+            await interaction.followup.send("I couldn't read the date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (ET or MT, see /timezone).")
             return
         await q_run("UPDATE bl_entries SET status = 'returned', returned_at = ? WHERE id = ?", (iso(back), entry["id"]))
         days, _ = await self.core.days_info(uuid)
@@ -2014,6 +2181,40 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             await q_run("UPDATE bl_entries SET ord = ? WHERE id = ?", (i, x["id"]))
         await interaction.followup.send(f"✅ **{esc(name)}** is now number **{position}** of {len(rows)} in "
                                         f"`/breaklist guild`.", allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="guildhistory", description="Add the guild history of a breaklisted player: screenshot and/or text (guild staff)")
+    @app_commands.describe(ign="Minecraft username", image="Screenshot of the guild history (for example from /member)",
+                           image2="Another screenshot (optional)",
+                           text="Or paste the history as text: one guild per line")
+    @app_commands.check(staff_check)
+    async def guildhistory(self, interaction: discord.Interaction, ign: str, image: Optional[discord.Attachment] = None,
+                           image2: Optional[discord.Attachment] = None, text: Optional[str] = None):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY id DESC LIMIT 1", (uuid,))
+        files = [discord.File(io.BytesIO(await a.read()), filename=a.filename) for a in (image, image2) if a]
+        if text:
+            lines = [x.strip() for x in re.split(r"\n|;", text) if x.strip()]
+            head = await self.core.head_for(uuid, name)
+            await load_flag(uuid, name)
+            files.append(discord.File(io.BytesIO(await asyncio.to_thread(draw_guild_text, name, head, lines)),
+                                      filename="guild_history.png"))
+        if not files:
+            await interaction.followup.send("Give an image or the text.")
+            return
+        content = f"📜 **Guild history** of **{esc(name)}** (added by {interaction.user.display_name})"
+        tid = await kv_get(f"bl_thread:{entry['id']}") if entry else None
+        target = None
+        if tid and tid.isdigit():
+            target = self.core.bot.get_channel(int(tid))
+        if target is not None:
+            await target.send(content=content, files=files, allowed_mentions=NO_MENTIONS)
+            await interaction.followup.send(f"Posted in {target.mention}.")
+        else:
+            await interaction.followup.send(content=content, files=files, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="debt", description="Set a player's extra GEXP debt by hand (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player", amount="Extra GEXP owed (0 clears the debt)")
@@ -2160,7 +2361,7 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")
     @app_commands.describe(
         ign="Minecraft username of the player",
-        joined="Join time, Eastern Time: 2026/10/21 6:00 PM (year optional). Empty = their join time in the guild",
+        joined="Join time (ET or MT, see /timezone): 2026/10/21 6:00 PM (year optional). Empty = their join time in the guild",
         start_gexp="The GEXP they had at that moment (default 0)",
         current_gexp="Their GEXP now (default: taken from Hypixel)",
         debt="Extra GEXP debt (default: the saved debt)",
@@ -2175,7 +2376,7 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         join_dt = gc.parse_et(joined) if joined else None
         if joined and join_dt is None:
             await interaction.followup.send(
-                "I couldn't read the join time. Use year/month/day and the time in Eastern Time, "
+                "I couldn't read the join time. Use year/month/day and the time in your timezone (see /timezone), "
                 "for example `2026/10/21 6:00 PM`, `2026/10/21 18:00` or without year `10/21 6:00 PM`.")
             return
         r = await lookup(interaction, ign)
@@ -2413,6 +2614,16 @@ def mute_ping():
 
 
 MUTE_MENTIONS = discord.AllowedMentions(users=True, roles=True)
+WARN_EXPIRY_DAYS = _int_env("WARN_EXPIRY_DAYS", 30)       # 0 = verbal warnings never expire
+
+
+def warn_state(w):
+    """Text with a live Discord timestamp: when a verbal warning expires (or expired)."""
+    if not w.get("expires_at"):
+        return "never expires"
+    end = from_iso(w["expires_at"])
+    ts = int(end.timestamp())
+    return f"expired <t:{ts}:R>" if end <= now_utc() else f"expires <t:{ts}:F> (<t:{ts}:R>)"
 
 
 class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
@@ -2476,13 +2687,14 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
                           (uuid, name, reason, iso(now), iso(end) if end else None, str(interaction.user.id),
                            str(did) if did else None))
         gave = await self.bridge_role(did, give=True)
-        embed = discord.Embed(title="Mute logged", color=0xE74C3C, timestamp=now)
-        embed.add_field(name="Player", value=f"**{esc(name)}**", inline=True)
-        embed.add_field(name="Length", value="Permanent" if end is None else gc.fmt_duration(td.total_seconds()), inline=True)
-        embed.add_field(name="Expires", value="Never" if end is None
-                        else f"{gc.fmt_et(end)}\n<t:{int(end.timestamp())}:R>", inline=True)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.set_footer(text=f"Mute #{mid} · by {interaction.user.display_name}")
+        total_mutes = (await q_one("SELECT COUNT(*) AS c FROM mutes WHERE uuid = ?", (uuid,)))["c"]
+        head = await self.core.head_for(uuid, name)
+        await load_flag(uuid, name)
+        card = await asyncio.to_thread(
+            draw_punish_card, "MUTE", name, head, reason,
+            [("LENGTH", "Permanent" if end is None else gc.fmt_duration(td.total_seconds())),
+             ("EXPIRES", "Never" if end is None else gc.fmt_et(end)), ("MUTES SO FAR", str(total_mutes))],
+            interaction.user.display_name, mid)
         if did:
             when = "This mute does not expire." if end is None else f"It expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)."
             text = (f"<@{did}> you have been muted in the guild bridge. {when} "
@@ -2494,9 +2706,10 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         if not gave:
             text += "\nThe **No Guild Bridge** role could not be added automatically: please add it manually."
         content = f"{mute_ping()} {text}".strip()
-        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, embed=embed, mentions=MUTE_MENTIONS)
+        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, data=card, filename="mute.png",
+                                         mentions=MUTE_MENTIONS)
         if not posted:
-            await interaction.followup.send(content=content, embed=embed, allowed_mentions=MUTE_MENTIONS)
+            await interaction.followup.send(content=content, file=send_file(card, "mute.png"), allowed_mentions=MUTE_MENTIONS)
         else:
             await interaction.followup.send(f"Mute logged in {posted}.")
 
@@ -2512,19 +2725,24 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         uuid, name = r
         did = await self.target_id(uuid, user)
         now = now_utc()
-        wid = await q_run("INSERT INTO warnings (uuid, ign, reason, at, added_by, discord_id) VALUES (?, ?, ?, ?, ?, ?)",
-                          (uuid, name, reason, iso(now), str(interaction.user.id), str(did) if did else None))
+        expires = now + timedelta(days=WARN_EXPIRY_DAYS) if WARN_EXPIRY_DAYS > 0 else None
+        wid = await q_run("INSERT INTO warnings (uuid, ign, reason, at, added_by, discord_id, expires_at) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (uuid, name, reason, iso(now), str(interaction.user.id), str(did) if did else None,
+                           iso(expires) if expires else None))
         count = (await q_one("SELECT COUNT(*) AS c FROM warnings WHERE uuid = ?", (uuid,)))["c"]
-        embed = discord.Embed(title="Verbal warning", color=0xF1C40F, timestamp=now)
-        embed.add_field(name="Player", value=f"**{esc(name)}**", inline=True)
-        embed.add_field(name="Warnings so far", value=str(count), inline=True)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.set_footer(text=f"Warning #{wid} · by {interaction.user.display_name}")
+        head = await self.core.head_for(uuid, name)
+        await load_flag(uuid, name)
+        card = await asyncio.to_thread(
+            draw_punish_card, "VERBAL WARNING", name, head, reason,
+            [("WARNINGS SO FAR", str(count)), ("EXPIRES", gc.fmt_date(expires) if expires else "Never")],
+            interaction.user.display_name, wid)
         who = f"<@{did}> " if did else ""
         content = f"{who}you received a verbal warning. Nothing else happens, it is only recorded.".strip()
-        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, embed=embed, mentions=MUTE_MENTIONS)
+        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, data=card, filename="warning.png",
+                                         mentions=MUTE_MENTIONS)
         if not posted:
-            await interaction.followup.send(content=content, embed=embed, allowed_mentions=MUTE_MENTIONS)
+            await interaction.followup.send(content=content, file=send_file(card, "warning.png"), allowed_mentions=MUTE_MENTIONS)
         else:
             await interaction.followup.send(f"Verbal warning logged in {posted}.")
 
@@ -2563,7 +2781,7 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             else:
                 await interaction.followup.send(text, allowed_mentions=MUTE_MENTIONS)
 
-    @app_commands.command(name="view", description="Full mute history of a player: every mute and verbal warning")
+    @app_commands.command(name="view", description="Punishment history of a player: every mute and verbal warning")
     @app_commands.describe(ign="Minecraft username")
     async def view(self, interaction: discord.Interaction, ign: str):
         await interaction.response.defer()
@@ -2586,20 +2804,77 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
                 state = "🔴 active" if x["status"] == "active" else "ended"
                 lines.append(f"**Mute #{x['id']}** · {day} · {mute_length_text(x)} · {state}\n> {reason}")
             else:
-                lines.append(f"**Verbal warning #{x['id']}** · {day}\n> {reason}")
+                lines.append(f"**Verbal warning #{x['id']}** · {day} · {warn_state(x)}\n> {reason}")
         text, shown = "", 0
         for line in lines:
             if len(text) + len(line) + 1 > 3900:
                 break
             text += line + "\n"
             shown += 1
-        embed = discord.Embed(title=f"Mute history of {name}", color=0x00C8E6)
+        active_w = sum(1 for w in warns if not w.get("expires_at") or from_iso(w["expires_at"]) > now_utc())
+        embed = discord.Embed(title=f"Punishment history of {name}", color=0x00C8E6)
         embed.description = text
+        embed.set_thumbnail(url=f"https://mc-heads.net/head/{uuid}")
         embed.add_field(name="Mutes", value=str(len(rows)), inline=True)
-        embed.add_field(name="Verbal warnings", value=str(len(warns)), inline=True)
+        embed.add_field(name="Verbal warnings", value=f"{len(warns)} ({active_w} not expired)", inline=True)
         if shown < len(lines):
             embed.set_footer(text=f"Showing the latest {shown} of {len(lines)} entries")
         await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="warnexpiry", description="Change when a verbal warning expires (guild staff)")
+    @app_commands.describe(warning="Warning number (shown in /mute view)",
+                           when="New expiry: 2026/11/30 (ET or MT, see /timezone), or 'never', or a length like 30d")
+    @app_commands.check(staff_check)
+    async def warnexpiry(self, interaction: discord.Interaction, warning: int, when: str):
+        await interaction.response.defer()
+        w = await q_one("SELECT * FROM warnings WHERE id = ?", (warning,))
+        if w is None:
+            await interaction.followup.send(f"Warning #{warning} does not exist.")
+            return
+        text = when.strip().lower()
+        if text in ("never", "none", "perm"):
+            end = None
+        else:
+            td = parse_mute_length(text)
+            end = (from_iso(w["at"]) + td) if isinstance(td, timedelta) else gc.parse_et(when)
+            if end is None:
+                await interaction.followup.send("I couldn't read it. Use `2026/11/30`, `30d` (days from the warning) or `never`.")
+                return
+        await q_run("UPDATE warnings SET expires_at = ? WHERE id = ?", (iso(end) if end else None, warning))
+        w["expires_at"] = iso(end) if end else None
+        await interaction.followup.send(f"✅ Warning #{warning} of **{esc(w['ign'])}**: {warn_state(w)}.",
+                                        allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="removewarn", description="Delete a verbal warning (guild staff)")
+    @app_commands.describe(warning="Warning number (shown in /mute view)")
+    @app_commands.check(staff_check)
+    async def removewarn(self, interaction: discord.Interaction, warning: int):
+        await interaction.response.defer()
+        w = await q_one("SELECT * FROM warnings WHERE id = ?", (warning,))
+        if w is None:
+            await interaction.followup.send(f"Warning #{warning} does not exist.")
+            return
+        await q_run("DELETE FROM warnings WHERE id = ?", (warning,))
+        await interaction.followup.send(f"🗑️ Warning #{warning} of **{esc(w['ign'])}** was deleted.",
+                                        allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="removemute", description="Delete a mute from the history, lifting it first if active (guild staff)")
+    @app_commands.describe(mute="Mute number (shown in /mute view)")
+    @app_commands.check(staff_check)
+    async def removemute(self, interaction: discord.Interaction, mute: int):
+        await interaction.response.defer()
+        m = await q_one("SELECT * FROM mutes WHERE id = ?", (mute,))
+        if m is None:
+            await interaction.followup.send(f"Mute #{mute} does not exist.")
+            return
+        note = ""
+        if m["status"] == "active":
+            did = m["discord_id"] or await self.core.linked_discord(m["uuid"])
+            ok = await self.bridge_role(did, give=False)
+            note = " The No Guild Bridge role was removed." if ok else " Remove the No Guild Bridge role by hand if they have it."
+        await q_run("DELETE FROM mutes WHERE id = ?", (mute,))
+        await interaction.followup.send(f"🗑️ Mute #{mute} of **{esc(m['ign'])}** was deleted.{note}",
+                                        allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="list", description="Players with an active mute (guild staff)")
     @app_commands.check(staff_check)
@@ -2656,7 +2931,7 @@ class LoginsCog(commands.Cog):
         by_day = {}
         sessions = []
         for x in rows:
-            t = from_iso(x["login_at"]).astimezone(gc.ET)
+            t = from_iso(x["login_at"]).astimezone(gc.TZ)
             by_day.setdefault(t.date(), []).append((t, x))
             if x["logout_at"]:
                 length = (from_iso(x["logout_at"]) - from_iso(x["login_at"])).total_seconds()
@@ -2671,7 +2946,7 @@ class LoginsCog(commands.Cog):
             per_day[d] = per_day.get(d, 0) + ln
         embed = discord.Embed(title=f"Logins of {name}", color=0x00C8E6)
         embed.description = (
-            f"Last {days} days · active on **{len(by_day)}** days · **{len(rows)}** logins (times are Eastern Time)")
+            f"Last {days} days · active on **{len(by_day)}** days · **{len(rows)}** logins (times are {gc.TZ_NAME})")
         embed.add_field(name="Earliest login", value=f"{_clock(earliest.hour * 60 + earliest.minute)}\n{earliest.strftime('%m/%d')}")
         embed.add_field(name="Latest login", value=f"{_clock(latest.hour * 60 + latest.minute)}\n{latest.strftime('%m/%d')}")
         embed.add_field(name="Usual first login", value=_clock(sum(firsts) / len(firsts)))
@@ -2806,7 +3081,7 @@ async def setup(bot: commands.Bot):
     core = Core(bot)
     bot.np_core = core
     g.FLAG_LOADER = _load_flags          # every card with heads (1v1 cards too) shows the flags
-    bot.add_dynamic_items(NoticeButton, RequestButton)
+    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton)
     await bot.add_cog(Breaklist(core))
     await bot.add_cog(Excuse(core))
     await bot.add_cog(GexpTools(core))

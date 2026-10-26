@@ -26,6 +26,8 @@ from database import (init_db, init_extras, init_seasons, init_modes, upsert_pla
                       end_season, end_year,
                       get_mode_by_name, get_mode, seed_modes, reset_all_data)
 from mojang import get_uuid
+import aiosqlite
+from database import DB_PATH
 import gexpcalc as gc
 from hypixel import get_hypixel_discord, normalize_handle, NoApiKey, KeyRejected, HypixelError
 from config import TIERS, STAFF_ROLE, TIER_MIN, MATCH_LOG_LIMIT, GUILD_NAME, RULES, MODES, tier_from_elo
@@ -239,13 +241,54 @@ async def resolve_target(interaction: discord.Interaction, ign):
     return link_row["uuid"], link_row["ign"], False
 
 
+async def set_match_map(match_number: int, map_name: Optional[str]):
+    """Saves (or clears) the map of a match. The table is created by extras.py."""
+    row = await get_match(match_number)
+    if row is None:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("CREATE TABLE IF NOT EXISTS match_maps (match_id INTEGER PRIMARY KEY, map TEXT NOT NULL)")
+        if map_name:
+            await db.execute("INSERT INTO match_maps (match_id, map) VALUES (?, ?) "
+                             "ON CONFLICT(match_id) DO UPDATE SET map = excluded.map", (row["id"], map_name.strip()[:40]))
+        else:
+            await db.execute("DELETE FROM match_maps WHERE match_id = ?", (row["id"],))
+        await db.commit()
+
+
+async def map_of(row_id: int) -> Optional[str]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute("SELECT map FROM match_maps WHERE match_id = ?", (row_id,))
+            row = await cur.fetchone()
+        return row[0] if row else None
+    except aiosqlite.OperationalError:
+        return None
+
+
+async def map_autocomplete(interaction: discord.Interaction, current: str):
+    names = [x.strip() for x in os.getenv("MAPS", "").split(",") if x.strip()]
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute("SELECT DISTINCT map FROM match_maps ORDER BY map COLLATE NOCASE")
+            names += [r[0] for r in await cur.fetchall()]
+    except aiosqlite.OperationalError:
+        pass
+    seen, out = set(), []
+    for x in names:
+        if x.lower() not in seen and current.lower() in x.lower():
+            seen.add(x.lower())
+            out.append(app_commands.Choice(name=x, value=x))
+    return out[:25]
+
+
 def parse_match_date(text):
-    """'2026/10/21', '2026/10/21 6:00 PM' or '10/21' (Eastern Time) -> (aware datetime, None) or (None, error).
+    """'2026/10/21', '2026/10/21 6:00 PM' or '10/21' (ET or MT, see /timezone) -> (aware datetime, None) or (None, error).
     No time given: midday, so the date never shifts. Future dates are refused."""
     new = gc.parse_et(text)
     if new is None:
         return None, ("I couldn't read the date. Use `2026/10/21`, `2026/10/21 6:00 PM` or without the year "
-                      "`10/21` (Eastern Time).")
+                      "`10/21` (ET or MT, see /timezone).")
     if not re.search(r"\d:\d|am|pm", text, re.I):
         new = new.replace(hour=12)
     if new.astimezone(timezone.utc) > datetime.now(timezone.utc):
@@ -254,7 +297,8 @@ def parse_match_date(text):
 
 
 async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, name_l,
-                    score_name: str, loser_games: int, forfeit: bool = False, md=None, played=None) -> bool:
+                    score_name: str, loser_games: int, forfeit: bool = False, md=None, played=None,
+                    map_name: Optional[str] = None) -> bool:
     """Registers a finished match, updates the elo and sends the result card.
     Returns False if the match could not be logged (a message has been sent)."""
     mode_id = md["id"] if md else None
@@ -279,13 +323,16 @@ async def log_match(interaction: discord.Interaction, uuid_w, name_w, uuid_l, na
     match_id = await save_match(uuid_w, uuid_l, p_w["elo"], new_w, p_l["elo"], new_l,
                                 score_name, played_at=now.isoformat(), forfeit=forfeit, mode_id=mode_id)
 
+    if map_name:
+        await set_match_map(match_id, map_name)
     w = {"uuid": uuid_w, "name": name_w, "before": p_w["elo"], "after": new_w, "delta": gain,
          "tier_before": tier_from_elo(p_w["elo"]), "tier_after": tier_from_elo(new_w)}
     l = {"uuid": uuid_l, "name": name_l, "before": p_l["elo"], "after": new_l,
          "delta": new_l - p_l["elo"],
          "tier_before": tier_from_elo(p_l["elo"]), "tier_after": tier_from_elo(new_l)}
 
-    date = (now.astimezone(gc.ET) if played else now).strftime("%m/%d/%Y") + (f" · {md['name']}" if md else "")
+    date = ((now.astimezone(gc.TZ) if played else now).strftime("%m/%d/%Y") + (f" · {md['name']}" if md else "")
+            + (f" · {map_name}" if map_name else ""))
     data = await build_match_image(w, l, score_name, match_id, date, forfeit=forfeit,
                                    first_to=FIRST_TO[system])
     await send_card(interaction, data, "match.png", md)
@@ -380,6 +427,7 @@ async def setup_hook():
     await bot.load_extension("breaklist")
     await bot.load_extension("evidence")
     await bot.load_extension("community")
+    await bot.load_extension("extras")
 
 bot.setup_hook = setup_hook
 
@@ -604,7 +652,7 @@ async def link(interaction: discord.Interaction, ign: str, user: Optional[discor
         if not await check_hypixel_ownership(interaction, uuid, name):
             return
 
-    await link_account(target.id, uuid, name)
+    await link_account(target.id, uuid, name, by=interaction.user.id, forced=by_staff)
     if by_staff:
         msg = f"✅ **{target.display_name}** is now linked to **{name}** (linked by staff)."
     else:
@@ -676,10 +724,12 @@ async def setelo(interaction: discord.Interaction, ign: str, elo: app_commands.R
 @app_commands.describe(winner="Username of the winner", loser="Username of the loser",
                        score="Final score, for example 3-1 (in Classic 1v1 a match is first to 5: 5-3)",
                        mode="Game mode (leave empty for the normal mode)",
-                       date="Optional: when it was played, 2026/10/21 or 2026/10/21 6:00 PM (Eastern Time). Default: now")
+                       date="Optional: when it was played, 2026/10/21 or 2026/10/21 6:00 PM (ET or MT, see /timezone). Default: now",
+                       map="Optional: the map it was played on (for /mapstats)")
+@app_commands.autocomplete(map=map_autocomplete)
 @staff_only()
 async def match(interaction: discord.Interaction, winner: str, loser: str, score: str,
-                mode: Optional[str] = None, date: Optional[str] = None):
+                mode: Optional[str] = None, date: Optional[str] = None, map: Optional[str] = None):
     await interaction.response.defer()
     played = None
     if date:
@@ -712,7 +762,7 @@ async def match(interaction: discord.Interaction, winner: str, loser: str, score
         return
 
     await log_match(interaction, uuid_w, name_w, uuid_l, name_l,
-                    f"{first_to}-{loser_games}", loser_games, md=md, played=played)
+                    f"{first_to}-{loser_games}", loser_games, md=md, played=played, map_name=map)
 
 
 @bot.tree.command(name="forfeit", description="Log a forfeit: the player who left loses (staff only)")
@@ -853,7 +903,8 @@ async def match_card(m, md, date_iso):
     l = {"uuid": m["loser_uuid"], "name": m["loser_ign"], "before": m["loser_elo_before"],
          "after": m["loser_elo_after"], "delta": m["loser_elo_after"] - m["loser_elo_before"],
          "tier_before": tier_from_elo(m["loser_elo_before"]), "tier_after": tier_from_elo(m["loser_elo_after"])}
-    date = fmt_date(date_iso) + (f" · {md['name']}" if md else "")
+    map_name = await map_of(m["id"])
+    date = fmt_date(date_iso) + (f" · {md['name']}" if md else "") + (f" · {map_name}" if map_name else "")
     return await build_match_image(w, l, m["score"] or "-", m["num"], date,
                                    title="MATCH CANCELLED" if m["cancelled"] else "MATCH RESULT",
                                    forfeit=bool(m["forfeit"]), first_to=FIRST_TO[mode_system(md)])
@@ -861,7 +912,7 @@ async def match_card(m, md, date_iso):
 
 @bot.tree.command(name="setdate", description="Change the date of a logged match: a new card is made (staff only)")
 @app_commands.describe(match_id="Match number (the # shown on the match card)",
-                       date="New date: 2026/10/21, or 2026/10/21 6:00 PM, or without the year: 10/21 (Eastern Time)")
+                       date="New date: 2026/10/21, or 2026/10/21 6:00 PM, or without the year: 10/21 (ET or MT, see /timezone)")
 @staff_only()
 async def setdate(interaction: discord.Interaction, match_id: int, date: str):
     await interaction.response.defer()
@@ -882,6 +933,113 @@ async def setdate(interaction: discord.Interaction, match_id: int, date: str):
     await interaction.followup.send(content=text, file=png_file(data, "match.png"), allowed_mentions=NO_MENTIONS)
     if await alerts.enabled("match_dates"):
         await post_1v1_log(interaction, data, filename="match.png", text=text, kind="match_dates")
+
+
+@bot.tree.command(name="setmap", description="Set or change the map of a logged match (staff only)")
+@app_commands.describe(match_id="Match number (the # on the card)", map="The map (leave empty to clear it)")
+@app_commands.autocomplete(map=map_autocomplete)
+@staff_only()
+async def setmap(interaction: discord.Interaction, match_id: int, map: Optional[str] = None):
+    await interaction.response.defer()
+    row = await get_match(match_id)
+    if row is None:
+        await interaction.followup.send(f"Match #{match_id} does not exist.")
+        return
+    await set_match_map(match_id, map)
+    md = await get_mode(row["mode_id"]) if row["mode_id"] is not None else None
+    data = await match_card(row, md, row["played_at"])
+    await interaction.followup.send(
+        content=f"🗺️ Match **#{match_id}**: " + (f"map set to **{esc(map)}**." if map else "map cleared."),
+        file=png_file(data, "match.png"), allowed_mentions=NO_MENTIONS)
+
+
+@bot.tree.command(name="importmatches", description="Log many old 1v1s at once from a text/CSV file (staff only)")
+@app_commands.describe(file="One match per line: winner,loser,score,date[,map]  (example: Steve,Alex,3-1,2024/05/12,Dia Red)",
+                       dry_run="Only check the file: nothing is saved",
+                       mode="Game mode (leave empty for the normal mode)")
+@staff_only()
+async def importmatches(interaction: discord.Interaction, file: discord.Attachment, dry_run: bool = False,
+                        mode: Optional[str] = None):
+    await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    if file.size > 2 * 1024 * 1024:
+        await interaction.followup.send("The file is too big (2 MB max).")
+        return
+    mode_id = md["id"] if md else None
+    system = mode_system(md)
+    first_to = FIRST_TO[system]
+    text = (await file.read()).decode("utf-8-sig", errors="replace")
+    errors, items, cache = [], [], {}
+
+    async def resolve(name):
+        key = name.lower()
+        if key not in cache:
+            try:
+                cache[key] = await get_uuid(name)
+            except Exception:
+                cache[key] = None
+            await asyncio.sleep(0.05)
+        return cache[key]
+
+    for no, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        cells = [c.strip() for c in re.split(r"[,;\t]", line)]
+        if no == 1 and cells[0].lower() in ("winner", "w"):
+            continue
+        if len(cells) < 4:
+            errors.append(f"line {no}: needs winner,loser,score,date")
+            continue
+        loser_games = parse_score(cells[2], first_to)
+        if loser_games is None:
+            errors.append(f"line {no}: score `{cells[2]}` is not valid (first to {first_to})")
+            continue
+        played, err = parse_match_date(cells[3])
+        if err:
+            errors.append(f"line {no}: date `{cells[3]}`: {err}")
+            continue
+        rw, rl = await resolve(cells[0]), await resolve(cells[1])
+        if rw is None or rl is None:
+            errors.append(f"line {no}: unknown username `{cells[0] if rw is None else cells[1]}`")
+            continue
+        if rw[0] == rl[0]:
+            errors.append(f"line {no}: winner and loser are the same player")
+            continue
+        items.append((played, no, rw, rl, f"{first_to}-{loser_games}", loser_games, cells[4] if len(cells) > 4 and cells[4] else None))
+    items.sort(key=lambda x: (x[0], x[1]))
+
+    done = 0
+    for played, no, rw, rl, score_name, loser_games, map_name in items:
+        p_w = await get_player(rw[0], mode_id=mode_id)
+        p_l = await get_player(rl[0], mode_id=mode_id)
+        if p_w is None or p_l is None:
+            errors.append(f"line {no}: {(rw if p_w is None else rl)[1]} has no tier yet (use /settier first)")
+            continue
+        if dry_run:
+            done += 1
+            continue
+        gain, loss = calcola(p_w["elo"], p_l["elo"], loser_games, system)
+        num = await save_match(rw[0], rl[0], p_w["elo"], p_w["elo"] + gain, p_l["elo"], p_l["elo"] + loss,
+                               score_name, played_at=played.isoformat(), mode_id=mode_id)
+        if map_name:
+            await set_match_map(num, map_name)
+        done += 1
+    head = (f"{'Check finished' if dry_run else 'Import finished'}: **{done}** matches "
+            f"{'are valid' if dry_run else 'logged'}, **{len(errors)}** lines skipped.")
+    if not dry_run and done:
+        head += ("\nThe elo of the players changed match after match, oldest first. Set their starting elo with "
+                 "`/setelo` BEFORE importing if they should not start from today's elo.")
+    files = []
+    body = head
+    if errors:
+        shown = "\n".join(errors[:15])
+        body += f"\n```{shown[:1500]}```"
+        if len(errors) > 15:
+            files.append(discord.File(io.BytesIO("\n".join(errors).encode()), filename="skipped.txt"))
+    await interaction.followup.send(content=body, files=files)
 
 
 @bot.tree.command(name="elocalc", description="What if: the elo each player would gain or lose in a match (nothing is saved)")

@@ -16,6 +16,22 @@ ET = ZoneInfo("America/New_York")
 MT = ZoneInfo("America/Denver")
 UTC = timezone.utc
 
+# Time zone SHOWN and TYPED in commands (/timezone). The GEXP week and the purge always follow Eastern Time.
+TZ = ET
+TZ_NAME = "ET"
+
+
+def set_tz(code: str) -> bool:
+    global TZ, TZ_NAME
+    code = (code or "").upper()
+    if code == "ET":
+        TZ, TZ_NAME = ET, "ET"
+    elif code == "MT":
+        TZ, TZ_NAME = MT, "MT"
+    else:
+        return False
+    return True
+
 WEEKLY_REQ = 55000
 PURGE_WEEKDAY = 1        # Monday = 0, Tuesday = 1
 
@@ -104,20 +120,20 @@ def fmt_days(days: float) -> str:
 
 
 def fmt_date(dt: datetime) -> str:
-    return dt.astimezone(ET).strftime("%m/%d/%Y")
+    return dt.astimezone(TZ).strftime("%m/%d/%Y")
 
 
 def fmt_et(dt: datetime) -> str:
-    local = dt.astimezone(ET)
+    local = dt.astimezone(TZ)
     hour = local.strftime("%I").lstrip("0") or "12"
-    return f"{local.strftime('%m/%d/%Y')} {hour}:{local.strftime('%M %p')} ET"
+    return f"{local.strftime('%m/%d/%Y')} {hour}:{local.strftime('%M %p')} {TZ_NAME}"
 
 
 _TIME_FORMATS = ("%H:%M", "%I:%M %p", "%I %p")
 
 
 def parse_et(text) -> "datetime | None":
-    """Eastern Time. Date first, optional time after it:
+    """Time zone set with /timezone (ET by default). Date first, optional time after it:
        '2026/10/21 6:00 PM', '2026/10/21 18:00', '2026/10/21' (= midnight),
        '10/21 6:00 PM' (no year: the current year), also the old '10/21/2026 6:00 PM' and '2026-10-21'.
        Returns None if unreadable."""
@@ -139,7 +155,7 @@ def parse_et(text) -> "datetime | None":
             if not m:
                 return None
             mo, d = map(int, m.groups())
-            y = datetime.now(ET).year
+            y = datetime.now(TZ).year
     hh = mm = 0
     if time_txt:
         t = None
@@ -153,6 +169,6 @@ def parse_et(text) -> "datetime | None":
             return None
         hh, mm = t.hour, t.minute
     try:
-        return datetime(y, mo, d, hh, mm, tzinfo=ET)
+        return datetime(y, mo, d, hh, mm, tzinfo=TZ)
     except ValueError:
         return None

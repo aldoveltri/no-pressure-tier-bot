@@ -52,6 +52,9 @@ async def init_extras():
     """Adds columns/tables introduced after the first version (safe to run every start)."""
     async with aiosqlite.connect(DB_PATH) as db:
         for sql in ("ALTER TABLE links ADD COLUMN verified INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE links ADD COLUMN linked_by TEXT",
+                    "ALTER TABLE links ADD COLUMN forced INTEGER DEFAULT 0",
+                    "ALTER TABLE links ADD COLUMN linked_at TEXT",
                     "ALTER TABLE players ADD COLUMN removed INTEGER NOT NULL DEFAULT 0",
                     "ALTER TABLE matches ADD COLUMN forfeit INTEGER NOT NULL DEFAULT 0"):
             try:
@@ -331,15 +334,23 @@ async def remove_player(uuid: str, mode_id: int | None = None) -> int:
 
 # ---------- Discord <-> Minecraft links ----------
 
-async def link_account(discord_id: int, uuid: str, ign: str):
-    """Creates or changes a (verified) link. A UUID can belong to only one Discord account."""
+async def link_account(discord_id: int, uuid: str, ign: str, by: int | None = None, forced: bool = False):
+    """Creates or changes a (verified) link. A UUID can belong to only one Discord account.
+    by / forced: who made the link (the member themselves, or a staff member who forced it)."""
     async with aiosqlite.connect(DB_PATH) as db:
+        for col in ("linked_by TEXT", "forced INTEGER DEFAULT 0", "linked_at TEXT"):
+            try:
+                await db.execute(f"ALTER TABLE links ADD COLUMN {col}")
+            except aiosqlite.OperationalError:
+                pass
         await db.execute("DELETE FROM links WHERE uuid = ? AND discord_id != ?",
                          (uuid, str(discord_id)))
         await db.execute(
-            "INSERT INTO links (discord_id, uuid, ign, verified) VALUES (?, ?, ?, 1) "
-            "ON CONFLICT(discord_id) DO UPDATE SET uuid = excluded.uuid, ign = excluded.ign, verified = 1",
-            (str(discord_id), uuid, ign),
+            "INSERT INTO links (discord_id, uuid, ign, verified, linked_by, forced, linked_at) "
+            "VALUES (?, ?, ?, 1, ?, ?, ?) "
+            "ON CONFLICT(discord_id) DO UPDATE SET uuid = excluded.uuid, ign = excluded.ign, verified = 1, "
+            "linked_by = excluded.linked_by, forced = excluded.forced, linked_at = excluded.linked_at",
+            (str(discord_id), uuid, ign, str(by) if by else str(discord_id), 1 if forced else 0, _now()),
         )
         await db.commit()
 

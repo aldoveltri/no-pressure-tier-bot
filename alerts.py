@@ -8,6 +8,9 @@ ALERTS = {
     "match_dates": ("Match date changes", "The note posted in the 1v1 logs channel when /setdate changes a date"),
     "blacklist": ("Blacklist posts", "The posts in the blacklist channel when someone is added, edited or removed"),
     "match_numbers": ("Match numbers on the result cards", "The 'Match #12' text at the bottom of the match / undo cards (off = only the date)"),
+    "pro_day15": ("Pro reminder: day 15", "Pings a Pro who has not beaten a C+ player in 15 days"),
+    "pro_day23": ("Pro reminder: day 23", "Second reminder to the Pro at day 23"),
+    "pro_day30": ("Pro reminder: day 30 (demote)", "Pings the guild master to demote a Pro after 30 days without a C+ win"),
     "urchin": ("Urchin alerts", "The automatic post in the evidence channel when a guild member gets an Urchin tag"),
 }
 _cache = {}

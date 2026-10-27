@@ -3021,7 +3021,7 @@ def mute_ping():
 
 
 MUTE_MENTIONS = discord.AllowedMentions(users=True, roles=True)
-WARN_EXPIRY_DAYS = _int_env("WARN_EXPIRY_DAYS", 30)       # 0 = verbal warnings never expire
+WARN_EXPIRY_DAYS = _int_env("WARN_EXPIRY_DAYS", 60)       # 0 = verbal warnings never expire
 
 
 def warn_state(w):

@@ -301,6 +301,10 @@ BREAKLIST_PAGES = [
             _c("/breaklist details ign",
                "Exact times of the latest entry: time in the guild (days, hours, minutes), exact join and "
                "breaklist time (in the zone set with /timezone) and how far into the GEXP week the player was."),
+            _c("/pro add|remove|list|reminders",
+               "Pro upkeep: a Pro must beat a C+ (or higher) player in a normal 1v1 every 30 days. Reminders go to "
+               "the player at day 15 and day 23 and to the guild master at day 30 (demote). /pro reminders turns each "
+               "one on or off (or all). Channel: PRO_CHANNEL_ID, guild master ping: PRO_PING_USER_ID."),
             _c("/breaklist guild [page]",
                "The list of everyone who is on the breaklist now, with the date they were added, their days "
                "in the guild and the GEXP they owe."),

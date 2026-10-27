@@ -1,6 +1,7 @@
 """More staff tools: wipe a cheater's matches, upcoming purge timestamp, breaklist betrayal alerts."""
 import asyncio
 import logging
+import re
 from datetime import timedelta
 from typing import Optional
 
@@ -171,6 +172,9 @@ class Betrayal(commands.Cog):
                 await asyncio.sleep(0.5)
                 if not guild or guild.get("name", "").lower() == ours:
                     continue
+                approved = [x.strip().lower() for x in re.split(r"[,;]", e.get("visiting_guild") or "") if x.strip()]
+                if guild.get("name", "").lower() in approved:
+                    continue                                   # a guild the staff approved: not a betrayal
                 await kv_set(key, iso(now_utc()))
                 m = next((x for x in guild.get("members", []) if x.get("uuid") == e["uuid"]), None)
                 since = f" since <t:{int(m['joined'] / 1000)}:D>" if m and m.get("joined") else ""

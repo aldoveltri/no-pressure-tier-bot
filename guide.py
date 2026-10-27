@@ -235,6 +235,8 @@ TIER_PAGES += [
             _c("/removeplayer ign",
                "Removes a player from the leaderboard and /profile. Their matches stay in the history. "
                "/settier or /setelo brings them back."),
+            _c("/linkall [dry_run]", "Staff. Links every guild member whose Discord name on Hypixel matches a member of "
+               "this server (shown as forced). Use dry_run first."),
             _c("/link ign user:@member", "Links a member without the Hypixel verification."),
             _c("/refreshnames",
                "Checks Mojang for changed usernames right now. It also runs automatically every 6 hours."),
@@ -305,6 +307,13 @@ BREAKLIST_PAGES = [
                "Pro upkeep: a Pro must beat a C+ (or higher) player in a normal 1v1 every 30 days. Reminders go to "
                "the player at day 15 and day 23 and to the guild master at day 30 (demote). /pro reminders turns each "
                "one on or off (or all). Channel: PRO_CHANNEL_ID, guild master ping: PRO_PING_USER_ID."),
+            _c("/breaklist approve ign guild [purpose]",
+               "Staff. Approves a guild for a breaklisted player (they don't have to stay guildless). Purpose: temporary "
+               "or trying guilds. Write none to make them guildless again. /breaklist add has the same guild and purpose options."),
+            _c("/breaklist prefer ign guild",
+               "Staff. Sets the guild a visiting player prefers: the card shows VISITING GUILD and PREFERS GUILD."),
+            _c("/breaklist resetguildhistory confirm",
+               "Administrators. Forgets the guild history shown for everyone. Write RESET GUILD HISTORY."),
             _c("/breaklist guild [page]",
                "The list of everyone who is on the breaklist now, with the date they were added, their days "
                "in the guild and the GEXP they owe."),
@@ -552,6 +561,7 @@ BLACKLIST_PAGES = [
         _c("/blacklist edit ign [reason] [duration] [image]", "Changes the reason and/or the duration, and can add "
            "screenshots or videos."),
         _c("/blacklist remove ign", "Takes the player off the blacklist and posts it."),
+        _c("/blacklist view ign", "One entry: the videos and links written in the reason are shown outside the embed so they play."),
         _c("/blacklist list", "Everyone on the blacklist, with reason and duration."),
     ]},
     {"title": "Cheating reports", "blocks": [
@@ -603,8 +613,10 @@ EXTRA_PAGES = [
            "player gets the No Guild Bridge role, so they can't write in the guild bridge, and is pinged in the mute "
            "logs channel with the date when the mute expires. Use user if their account is not linked."),
         _c("/mute end ign", "Staff. Lifts the mute now: the role is removed and the player is pinged."),
-        _c("/mute warn ign reason [user]", "Staff. A verbal warning: it changes nothing, it is only recorded in the "
-           "mute logs (with a ping to the player) and counted."),
+        _c("/mute warn ign reason [user] [image] [link]", "Staff. A verbal warning: it changes nothing, it is only "
+           "recorded in the mute logs and counted. The post starts with 'name, verbal warning' (easy to search) and can "
+           "carry a screenshot and a message link. Buttons: Remove warn, Edit reason, Appeal, Feedback."),
+        _c("/mute editwarn warning reason", "Staff. Changes the reason of a warning and redraws its card."),
         _c("/mute view ign", "Everyone. The full mute history of a player: every mute and verbal warning, newest "
            "first, with date, length and reason."),
         _c("/logins ign [days]", "Guild staff. Earliest and latest login, every login of each day, average "

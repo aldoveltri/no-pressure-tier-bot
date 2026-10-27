@@ -665,6 +665,90 @@ async def link(interaction: discord.Interaction, ign: str, user: Optional[discor
     await interaction.followup.send(msg, allowed_mentions=NO_MENTIONS)
 
 
+async def find_discord_member(guild, handle):
+    """The member of this server whose Discord username is the one written on Hypixel (None when not found)."""
+    want = normalize_handle(handle)
+    if not want:
+        return None
+    found = []
+    try:
+        if hasattr(guild, "search_members"):
+            found = await guild.search_members(want.split("#")[0], limit=10)
+        else:
+            found = await guild.query_members(want.split("#")[0], limit=10)
+    except Exception as e:
+        log.warning("Member search failed for %s: %s", handle, e)
+    found = list(found) + [m for m in guild.members if m not in found]
+    for m in found:
+        if normalize_handle(m.name) == want:
+            return m
+    return None
+
+
+@bot.tree.command(name="linkall", description="Link every guild member whose Hypixel Discord name matches a member of this server (staff)")
+@app_commands.describe(dry_run="Only show who would be linked: nothing is saved")
+async def linkall(interaction: discord.Interaction, dry_run: bool = False):
+    import breaklist as bl
+    if not (is_staff(interaction.user) or bl.is_guild_staff(interaction.user)):
+        await interaction.response.send_message("Only staff can use this.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    core = getattr(bot, "np_core", None)
+    members = await core.guild_members() if core else {}
+    if not members:
+        await interaction.followup.send("I couldn't read the guild member list from Hypixel.", ephemeral=True)
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT uuid, discord_id FROM links")
+        rows = await cur.fetchall()
+    linked_uuids = {r[0] for r in rows}
+    used_discord = {r[1] for r in rows}
+    done, not_in_discord, no_handle, conflicts, errors = [], [], 0, [], 0
+    todo = [u for u in members if u not in linked_uuids]
+    for uuid in todo:
+        try:
+            found, handle = await get_hypixel_discord(uuid)
+        except (NoApiKey, KeyRejected):
+            await interaction.followup.send("The Hypixel API key is missing or expired.", ephemeral=True)
+            return
+        except (HypixelError, aiohttp.ClientError, asyncio.TimeoutError):
+            errors += 1
+            await asyncio.sleep(1)
+            continue
+        await asyncio.sleep(0.4)
+        if not found or not handle:
+            no_handle += 1
+            continue
+        name = await bl_get_name(uuid) or uuid[:8]
+        member = await find_discord_member(interaction.guild, handle)
+        if member is None:
+            not_in_discord.append(f"{name} (`{handle}`)")
+            continue
+        if str(member.id) in used_discord:
+            conflicts.append(f"{name} → {member.display_name}")
+            continue
+        used_discord.add(str(member.id))
+        if not dry_run:
+            await link_account(member.id, uuid, name, by=interaction.user.id, forced=True)
+        done.append(f"{name} ← {member.display_name}")
+    text = (f"{'Would link' if dry_run else 'Linked'} **{len(done)}** of {len(todo)} unlinked guild members.\n"
+            f"No Discord name on Hypixel: {no_handle} · Not in this server: {len(not_in_discord)} · "
+            f"Member already linked to another account: {len(conflicts)}" + (f" · Hypixel errors: {errors}" if errors else ""))
+    if done:
+        text += "\n" + ", ".join(done)
+    if dry_run:
+        text += "\nNothing was saved. Run it again without dry_run to link them."
+    await interaction.followup.send(text[:1900], ephemeral=True, allowed_mentions=NO_MENTIONS)
+
+
+async def bl_get_name(uuid):
+    try:
+        from mojang import get_name
+        return await get_name(uuid)
+    except Exception:
+        return None
+
+
 @bot.tree.command(name="unlink", description="Remove the link between your Discord account and your username")
 async def unlink(interaction: discord.Interaction):
     removed = await remove_link(interaction.user.id)

@@ -124,6 +124,24 @@ async def send_embed(core, interaction, env_name, *, embed=None, embeds=None, co
 # blacklist
 # ======================================================================================
 
+URL_RE = re.compile(r"https?://[^\s<>()\"']+")
+
+
+def urls_in(*texts):
+    """The links written in the texts (links inside an embed are never previewed: they go in the message text)."""
+    seen = []
+    for t in texts:
+        for u in URL_RE.findall(t or ""):
+            if u not in seen:
+                seen.append(u)
+    return seen
+
+
+def video_text(row):
+    links = urls_in(row["reason"], row["duration"])
+    return ("**Videos / links**\n" + "\n".join(links))[:1800] if links else None
+
+
 def blacklist_embed(row, title="Guild blacklist"):
     e = discord.Embed(title=title, color=RED, timestamp=now_utc(), url=f"https://namemc.com/profile/{row['uuid']}")
     e.set_thumbnail(url=head_url(row["uuid"]))
@@ -170,7 +188,7 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
                 extra.set_image(url=pic)
                 embeds.append(extra)
         return await send_embed(self.core, interaction, "BLACKLIST_CHANNEL_ID", embeds=embeds, media=media or None,
-                                thread_name=row["ign"])
+                                content=video_text(row), thread_name=row["ign"])
 
     async def read_media(self, interaction, attachments):
         """The files given to the command -> ([(name, bytes)], [skipped texts])."""
@@ -255,6 +273,20 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
         await interaction.followup.send(f"**{esc(name)}** was removed from the blacklist" + (f" ({posted})." if posted else "."),
                                         allowed_mentions=NO_MENTIONS)
 
+    @app_commands.command(name="view", description="Show one player's blacklist entry, with the videos and links playable")
+    @app_commands.describe(ign="Minecraft username")
+    async def view(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        row = await q_one("SELECT * FROM blacklist WHERE uuid = ? AND status = 'active'", (uuid,))
+        if not row:
+            await interaction.followup.send(f"**{esc(name)}** is not on the blacklist.", allowed_mentions=NO_MENTIONS)
+            return
+        await interaction.followup.send(content=video_text(row), embed=blacklist_embed(row), allowed_mentions=NO_MENTIONS)
+
     @app_commands.command(name="list", description="Everyone on the guild blacklist, with reason and duration")
     @app_commands.check(perm_check)
     async def list(self, interaction: discord.Interaction):
@@ -268,6 +300,8 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
             embed.add_field(name=f"{r['ign']} · {r['duration'] or 'no duration'}", value=r["reason"] or "-", inline=False)
         if len(rows) > 24:
             embed.set_footer(text=f"Showing 24 of {len(rows)}")
+        else:
+            embed.set_footer(text="Videos and links: /blacklist view <player>")
         await interaction.followup.send(embed=embed)
 
 
@@ -700,6 +734,9 @@ class VerdictBlacklistModal(discord.ui.Modal, title="Add to the blacklist"):
             except Exception:
                 log.warning("Could not copy %s into the blacklist post", att.filename)
         ev_embeds, ev_content = await build_report_text(row, "blacklisted", title=f"Evidence · report #{row['id']}")
+        extra_links = [u for u in urls_in(entry["reason"]) if u not in (ev_content or "")]
+        if extra_links:
+            ev_content = ((ev_content or "**Videos / links**") + "\n" + "\n".join(extra_links))[:1900]
         await send_embed(core, interaction, "BLACKLIST_CHANNEL_ID",
                          embeds=[blacklist_embed(entry, "Added to the guild blacklist")] + ev_embeds,
                          content=ev_content, media=media, thread_name=entry["ign"])

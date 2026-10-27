@@ -2286,7 +2286,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.check(staff_check)
     async def import_forum(self, interaction: discord.Interaction, dry_run: bool = False):
         await interaction.response.defer()
-        cid = chan_id("BREAKLIST_CHANNEL_ID")
+        cid = chan_id("BREAKLIST_IMPORT_CHANNEL_ID") or chan_id("BREAKLIST_CHANNEL_ID")
         if cid is None:
             await interaction.followup.send("BREAKLIST_CHANNEL_ID is not set.")
             return
@@ -2329,6 +2329,11 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                     "owed, reason, status) VALUES (?, ?, ?, 'import', NULL, ?, ?, 0, 0, 0, ?, 'active')",
                     (uuid, name, when, when, prev["banked"] if prev else 0, "Imported from the breaklist forum"))
             await asyncio.sleep(0.05)
+        if not threads:
+            await interaction.followup.send(
+                f"I read **{esc(getattr(ch, 'name', '?'))}** and found no other posts in it. If the posts with the players' names "
+                "are in a different forum, set its id in the host variable BREAKLIST_IMPORT_CHANNEL_ID.")
+            return
         head = (f"{'Would add' if dry_run else 'Added'} **{len(added)}** players to the breaklist."
                 f" Already there: {len(skipped)}. Names I couldn't read: {len(failed)}.")
         body = head + ("\n" + ", ".join(added)[:1500] if added else "")

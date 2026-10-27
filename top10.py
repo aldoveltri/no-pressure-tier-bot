@@ -70,7 +70,8 @@ def top_text(rows, start=1):
     lines = []
     for i, r in enumerate(rows, start):
         flag = flag_emoji(r["code"])
-        lines.append(f"`#{i}` {esc(r['ign'])} {n(r['gexp'])} ▶️ {promotion_text(r['rank'])}" + (f" {flag}" if flag else ""))
+        what = f" ▶️ {promotion_text(r['rank'])}" if i <= 10 else ""          # only the top 10 are promoted
+        lines.append(f"`#{i}` {esc(r['ign'])} {n(r['gexp'])}{what}" + (f" {flag}" if flag else ""))
     return "\n".join(lines)
 
 
@@ -91,7 +92,8 @@ def draw_top10(rows, heads, subtitle, start=1):
         hx = g.PAD + 100
         g._paste_head(img, d, heads.get(r["uuid"]), hx, cy - g.HEAD // 2, g.HEAD)
         _name_flag(img, d, hx + g.HEAD + 14, cy - 11, r["ign"], g.get_font(26, True))
-        d.text((hx + g.HEAD + 14, cy + 19), promotion_text(r["rank"]), font=g.get_font(15), fill=g.MUTED, anchor="lm")
+        d.text((hx + g.HEAD + 14, cy + 19), promotion_text(r["rank"]) if start + i <= 10 else (r["rank"] or ""),
+               font=g.get_font(15), fill=g.MUTED, anchor="lm")
         d.text((g.WIDTH - g.PAD - 24, cy), n(r["gexp"]), font=g.get_font(28, True), fill=g.TEXT, anchor="rm")
     counts = {}
     for r in rows:

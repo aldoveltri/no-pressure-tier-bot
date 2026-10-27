@@ -190,7 +190,7 @@ async def setup_tables():
                                  ("mutes", "discord_id", "TEXT"), ("bl_entries", "ord", "INTEGER"),
                                  ("guild_seen", "login_polled_at", "TEXT"), ("guild_seen", "online", "INTEGER"), ("warnings", "expires_at", "TEXT"),
                                  ("bl_entries", "visiting_guild", "TEXT"), ("bl_entries", "visit_kind", "TEXT"),
-                                 ("bl_entries", "preferred", "TEXT"), ("warnings", "by_name", "TEXT"), ("warnings", "link", "TEXT"),
+                                 ("bl_entries", "preferred", "TEXT"), ("bl_entries", "expected_return", "TEXT"), ("warnings", "by_name", "TEXT"), ("warnings", "link", "TEXT"),
                                  ("warnings", "post_ch", "TEXT"), ("warnings", "post_msg", "TEXT")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
@@ -454,12 +454,13 @@ def draw_breaklist_card(e, head, title, count):
     reason = e.get("reason") or "No reason given."
     notice = REMINDER if active else "This player is no longer on the breaklist."
     visit = (e.get("visiting_guild") or "").strip()
+    ret = e.get("expected_return")
     if active and visit:
         notice = (f"You are approved to visit {visit}: you don't have to stay guildless. Joining any other guild "
                   "will permanently remove your ability to use the breaklist.")
     id_h, box_h, gap = 130, 110, 14
     top = g.HEADER_H + 16
-    height = (top + id_h + gap + box_h + gap + box_h + gap + ((box_h + gap) if visit else 0)
+    height = (top + id_h + gap + box_h + gap + box_h + gap + ((box_h + gap) if (visit or ret) else 0)
               + _panel_height(reason, max_lines=3) + gap
               + _panel_height(notice, max_lines=3) + 16 + g.FOOTER_H)
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
@@ -485,24 +486,31 @@ def draw_breaklist_card(e, head, title, count):
     else:
         sub, sub_color = f"{VETERAN_DAYS - int(days)} to veteran", g.MUTED
     _box(d, g.PAD, y, bw, box_h, "DAYS IN GUILD", f"{int(days)} / {VETERAN_DAYS}", size=28,
-         sub=gc.fmt_duration(days * 86400), sub_color=g.TEXT, sub2=sub)
+         sub=f"{int(days * 24) % 24}h {int(days * 1440) % 60}m", sub_color=g.TEXT, sub2=sub)
     joined = from_iso(e.get("joined_at"))
     _box(d, g.PAD + bw + gap, y, bw, box_h, "JOINED THE GUILD", gc.fmt_date(joined) if joined else "-", size=26,
          sub=clock_text(joined) if joined else "", sub2="" if joined else None)
     left = from_iso(e["left_at"])
     _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "BREAKLISTED", gc.fmt_date(left), size=26,
-         sub=clock_text(left), sub_color=g.TEXT)
+         sub=clock_text(left), sub_color=g.MUTED)
 
     y += box_h + gap
-    if visit:
-        half = (g.WIDTH - 2 * g.PAD - gap) // 2
-        kind = VISIT_KINDS.get(e.get("visit_kind") or "", "")
-        _box(d, g.PAD, y, half, box_h, "VISITING GUILD", visit, size=26 if len(visit) < 20 else 20,
-             sub=kind, sub_color=g.TEXT)
-        pref = (e.get("preferred") or "").strip()
-        _box(d, g.PAD + half + gap, y, half, box_h, "PREFERS GUILD", pref or "Undecided",
-             g.GREEN if pref else g.MUTED, size=26 if len(pref) < 20 else 20,
-             sub=f"{GUILD_NAME_DISPLAY} or {visit}"[:34], sub_color=g.MUTED)
+    if visit or ret:
+        items = []
+        if visit:
+            kind = VISIT_KINDS.get(e.get("visit_kind") or "", "")
+            pref = (e.get("preferred") or "").strip()
+            items.append(("VISITING GUILD", visit, None, kind, g.TEXT, 26 if len(visit) < 20 else 20))
+            items.append(("PREFERS GUILD", pref or "Undecided", g.GREEN if pref else g.MUTED,
+                          f"{GUILD_NAME_DISPLAY} or {visit}"[:34], g.MUTED, 26 if len(pref) < 20 else 20))
+        if ret:
+            rd = datetime.fromisoformat(ret).replace(tzinfo=gc.ET)
+            left_days = (rd.date() - now_utc().astimezone(gc.ET).date()).days
+            when = "today" if left_days == 0 else (f"in {left_days} days" if left_days > 0 else f"{-left_days} days ago")
+            items.append(("EXPECTED RETURN", gc.fmt_date(rd), None, when, g.MUTED, 26))
+        wk = (g.WIDTH - 2 * g.PAD - gap * (len(items) - 1)) // len(items)
+        for i, (lab, val, col, sub_t, sub_c, sz) in enumerate(items):
+            _box(d, g.PAD + i * (wk + gap), y, wk, box_h, lab, val, col, size=sz, sub=sub_t, sub_color=sub_c)
         y += box_h + gap
     y = _text_panel(d, y, "REASON", reason, max_lines=3)
     y += gap
@@ -1320,6 +1328,7 @@ class Core:
         key = f"bl_thread:{entry['id']}"
         view = discord.ui.View(timeout=None)
         view.add_item(GuildHistoryButton(entry["id"]))
+        view.add_item(BreaklistEditButton(entry["id"]))
         posted = await self.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
                                     thread_name=name, thread_key=key, view=view)
         if posted:
@@ -1403,7 +1412,7 @@ class Core:
     # ----- breaklist -----
 
     async def do_breaklist(self, uuid, name, *, reason, added_by, start=None, end=None, gexp=None,
-                           days=None, debt=None, visiting=None, visit_kind=None):
+                           days=None, debt=None, visiting=None, visit_kind=None, expected_return=None):
         """Adds a player to the breaklist. Returns {'error': text} or {'entry': row, 'count': n}."""
         if await q_one("SELECT id FROM bl_entries WHERE uuid = ? AND status = 'active'", (uuid,)):
             return {"error": f"**{esc(name)}** is already on the breaklist. Use `/breaklist remove` first."}
@@ -1445,6 +1454,8 @@ class Core:
         if visiting:
             await q_run("UPDATE bl_entries SET visiting_guild = ?, visit_kind = ? WHERE id = ?",
                         (visiting.strip(), visit_kind or "temporary", entry_id))
+        if expected_return:
+            await q_run("UPDATE bl_entries SET expected_return = ? WHERE id = ?", (expected_return, entry_id))
         entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry_id,))
         count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (uuid,)))["c"]
         return {"entry": entry, "count": count}
@@ -1777,6 +1788,145 @@ class GuildHistoryModal(discord.ui.Modal, title="Guild history"):
         await interaction.followup.send("Guild history posted.", ephemeral=True)
 
 
+def parse_return_date(text):
+    """'2026/11/15' or '11/15' -> '2026-11-15' (a date, no time). None when unreadable."""
+    d = gc.parse_et((text or "").strip().split(" ")[0])
+    return d.date().isoformat() if d else None
+
+
+def edit_stamp(dt):
+    """A date and time in the chosen time zone, in the format the commands read back."""
+    local = dt.astimezone(gc.TZ)
+    return f"{local:%Y/%m/%d} {(local.strftime('%I').lstrip('0') or '12')}:{local.strftime('%M %p')}"
+
+
+async def edit_entry(core, entry, *, reason=None, start=None, end=None, gexp=None, expected_return=None, days=None, by=None):
+    """Changes a breaklist entry. Returns (new entry, None) or (None, error text). Strings are the typed values."""
+    fields = {}
+    joined, left = from_iso(entry.get("joined_at")), from_iso(entry["left_at"])
+    new_joined, new_left = joined, left
+    if start:
+        new_joined = gc.parse_et(start)
+        if new_joined is None:
+            return None, "I couldn't read the start date. Use `2026/07/28 5:28 PM` (one AM/PM, after the time)."
+    if end:
+        new_left = gc.parse_et(end)
+        if new_left is None:
+            return None, "I couldn't read the breaklist date. Use `2026/07/28 5:28 PM` (one AM/PM, after the time)."
+    if new_joined and new_left <= new_joined:
+        return None, "The breaklist date must be after the start date."
+    if expected_return is not None:
+        if expected_return.strip().lower() in ("", "none", "-"):
+            fields["expected_return"] = None
+        else:
+            r = parse_return_date(expected_return)
+            if r is None:
+                return None, "I couldn't read the expected return. Use `2026/11/15` or `11/15` (a date, no time)."
+            fields["expected_return"] = r
+    if reason is not None:
+        fields["reason"] = reason.strip() or None
+    new_gexp = entry["gexp"] if gexp is None else gexp
+    if start or end or gexp is not None:
+        ws = gc.week_start(new_left)
+        required = gc.required_elapsed(max(new_joined, ws) if new_joined else ws, new_left)
+        old_week_owed = max(0, entry["required"] - entry["gexp"])
+        carried = max(0, entry["owed"] - old_week_owed)               # the debt from earlier weeks stays
+        owed = carried + max(0, required - new_gexp)
+        fields.update(joined_at=iso(new_joined) if new_joined else None, left_at=iso(new_left), gexp=new_gexp,
+                      required=required, owed=owed)
+        if entry["status"] == "active":
+            await q_run("INSERT INTO debts (uuid, ign, amount, updated_at) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(uuid) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at",
+                        (entry["uuid"], entry["ign"], owed, iso(now_utc())))
+    if fields:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        await q_run(f"UPDATE bl_entries SET {sets} WHERE id = ?", (*fields.values(), entry["id"]))
+    if days is not None:
+        old = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (entry["uuid"],))
+        await core.add_day_set(entry["uuid"], entry["ign"], days - (old["banked"] if old else 0.0),
+                               "set when editing the breaklist", by)
+    return await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry["id"],)), None
+
+
+async def repost_card(core, entry_id, text):
+    """Posts the updated card in the thread of the entry. Returns (channel mention / None / False, card bytes)."""
+    entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry_id,))
+    if entry["status"] == "active":
+        days, _ = await core.days_info(entry["uuid"])
+        entry = dict(entry, days_total=days)
+    card = await core.breaklist_card(entry, "BREAKLIST UPDATE")
+    posted = await core.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
+                                thread_name=entry["ign"], thread_key=f"bl_thread:{entry['id']}")
+    return posted, card
+
+
+class EditBreaklistModal(discord.ui.Modal):
+    def __init__(self, entry):
+        super().__init__(title=f"Edit breaklist: {entry['ign']}"[:45])
+        self.eid = entry["id"]
+        joined, left = from_iso(entry.get("joined_at")), from_iso(entry["left_at"])
+        self.old = {"reason": entry.get("reason") or "", "ret": entry.get("expected_return") or "",
+                    "gexp": str(entry["gexp"]), "start": edit_stamp(joined) if joined else "", "end": edit_stamp(left)}
+        self.reason = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=400, required=False,
+                                           default=self.old["reason"])
+        self.ret = discord.ui.TextInput(max_length=12, required=False, default=self.old["ret"],
+                                        placeholder="2026/11/15 (empty or none = no date)")
+        self.gexp = discord.ui.TextInput(max_length=12, required=False, default=self.old["gexp"])
+        self.start = discord.ui.TextInput(max_length=24, required=False, default=self.old["start"])
+        self.end = discord.ui.TextInput(max_length=24, required=False, default=self.old["end"])
+        for label, comp in (("Reason", self.reason), ("Expected return (date)", self.ret),
+                            ("GEXP earned that week", self.gexp), (f"Joined the guild ({gc.TZ_NAME})", self.start),
+                            (f"Breaklisted at ({gc.TZ_NAME})", self.end)):
+            self.add_item(discord.ui.Label(text=label, component=comp))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (self.eid,))
+        if entry is None:
+            await interaction.response.send_message("This entry doesn't exist any more.", ephemeral=True)
+            return
+        gexp_txt = self.gexp.value.replace(",", "").strip()
+        if gexp_txt and not gexp_txt.isdigit():
+            await interaction.response.send_message("GEXP has to be a number.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        core = interaction.client.np_core
+        new, err = await edit_entry(
+            core, entry,
+            reason=self.reason.value if self.reason.value != self.old["reason"] else None,
+            expected_return=self.ret.value if self.ret.value != self.old["ret"] else None,
+            gexp=int(gexp_txt) if gexp_txt and gexp_txt != self.old["gexp"] else None,
+            start=self.start.value.strip() if self.start.value != self.old["start"] and self.start.value.strip() else None,
+            end=self.end.value.strip() if self.end.value != self.old["end"] and self.end.value.strip() else None)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+        posted, _ = await repost_card(core, self.eid, f"✏️ The entry of **{esc(new['ign'])}** was edited by "
+                                                      f"{interaction.user.display_name}.")
+        await interaction.followup.send("✅ Entry updated." + (f" New card posted in {posted}." if posted else ""),
+                                        ephemeral=True)
+
+
+class BreaklistEditButton(discord.ui.DynamicItem[discord.ui.Button], template=r"bl:ed:(?P<eid>\d+)"):
+    def __init__(self, eid):
+        super().__init__(discord.ui.Button(label="Edit (staff)", style=discord.ButtonStyle.secondary,
+                                           emoji="✏️", custom_id=f"bl:ed:{eid}"))
+        self.eid = int(eid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["eid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_guild_staff(interaction.user):
+            await interaction.response.send_message("Only guild staff can use this.", ephemeral=True)
+            return
+        entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (self.eid,))
+        if entry is None:
+            await interaction.response.send_message("This entry doesn't exist any more.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EditBreaklistModal(entry))
+
+
 class GuildHistoryButton(discord.ui.DynamicItem[discord.ui.Button], template=r"bl:gh:(?P<eid>\d+)"):
     def __init__(self, eid):
         super().__init__(discord.ui.Button(label="Add guild history (staff)", style=discord.ButtonStyle.secondary,
@@ -2104,7 +2254,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         days="Total days the player has spent in the guild (use it for players breaklisted before the bot)",
         debt="Extra GEXP debt from previous weeks. Default: the saved debt",
         guild="Approved guild they may join or visit (empty = they must stay guildless). Several: XL, Other",
-        purpose="Why they visit that guild")
+        purpose="Why they visit that guild",
+        expected_return="Date they are expected back (no time): 2026/11/15 or 11/15")
     @app_commands.choices(purpose=[app_commands.Choice(name="Temporary: can't meet our GEXP", value="temporary"),
                                    app_commands.Choice(name="Trying guilds to pick one", value="trying")])
     @app_commands.check(staff_check)
@@ -2113,12 +2264,19 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                   gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                   days: Optional[app_commands.Range[float, 0, 5000]] = None,
                   debt: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
-                  guild: Optional[str] = None, purpose: Optional[str] = None):
+                  guild: Optional[str] = None, purpose: Optional[str] = None,
+                  expected_return: Optional[str] = None):
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
             return
         uuid, name = r
+        ret_date = None
+        if expected_return:
+            ret_date = parse_return_date(expected_return)
+            if ret_date is None:
+                await interaction.followup.send("I couldn't read the expected return. Use `2026/11/15` or `11/15` (a date, no time).")
+                return
         start_dt = end_dt = None
         if start:
             start_dt = gc.parse_et(start)
@@ -2135,7 +2293,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             return
         res = await self.core.do_breaklist(uuid, name, reason=reason, added_by=str(interaction.user.id),
                                            start=start_dt, end=end_dt, gexp=gexp, days=days, debt=debt,
-                                           visiting=guild, visit_kind=purpose)
+                                           visiting=guild, visit_kind=purpose, expected_return=ret_date)
         if "error" in res:
             await interaction.followup.send(res["error"])
             return
@@ -2443,7 +2601,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         start="When they joined the guild that time (ET or MT, see /timezone): 2026/07/28 5:28 PM, year optional",
         end="When they were breaklisted (same format)", gexp="GEXP earned that week before the breaklist",
         returned="When they came back (default: the end date)",
-        days="Days in the guild at that time (default: from start to end)")
+        days="Days of that stay, added to their total (default: from start to end; 0 = add nothing)")
     @app_commands.check(staff_check)
     async def add_old(self, interaction: discord.Interaction, ign: str, end: str, reason: Optional[str] = None,
                       start: Optional[str] = None, gexp: app_commands.Range[int, 0, 100_000_000] = 0,
@@ -2476,9 +2634,15 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             (uuid, name, iso(left), str(interaction.user.id), iso(joined) if joined else None, iso(left), days, gexp,
              required, max(0, required - gexp), reason or None, iso(back)))
         count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (uuid,)))["c"]
+        total_txt = ""
+        if days > 0.01:
+            await self.core.add_day_set(uuid, name, days, f"old breaklist {gc.fmt_date(left)}", interaction.user.id)
+            total, _ = await self.core.days_info(uuid)
+            total_txt = (f" Their **{days:g} days** of that stay were added: total days in the guild now **{int(total)}** "
+                         f"(remove the set with `/breaklist removedays`).")
         await interaction.followup.send(
             f"✅ Old breaklist of **{esc(name)}** saved ({gc.fmt_date(left)} → {gc.fmt_date(back)}). "
-            f"They have now been breaklisted **{count}** times. Days and debt were not changed. "
+            f"They have now been breaklisted **{count}** times.{total_txt} Debt was not changed. "
             "See it with `/breaklist history`.", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="remove", description="Take a player off the breaklist when they rejoin (guild staff)")
@@ -2662,11 +2826,39 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         return entry
 
     async def _repost_card(self, entry, text):
-        entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry["id"],))
-        days, _ = await self.core.days_info(entry["uuid"])
-        card = await self.core.breaklist_card(dict(entry, days_total=days), "BREAKLIST UPDATE")
-        return await self.core.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
-                                       thread_name=entry["ign"], thread_key=f"bl_thread:{entry['id']}"), card
+        return await repost_card(self.core, entry["id"], text)
+
+    @app_commands.command(name="edit", description="Change a breaklist entry: reason, dates, GEXP, days, expected return (guild staff)")
+    @app_commands.describe(ign="Minecraft username", reason="New reason",
+                           start="When they joined the guild (ET or MT): 2026/07/28 5:28 PM",
+                           end="When they were breaklisted (same format)", gexp="GEXP earned that week",
+                           days="Total days in the guild (sets the saved days)",
+                           expected_return="Expected return date, no time (2026/11/15). Write none to remove it")
+    @app_commands.check(staff_check)
+    async def edit(self, interaction: discord.Interaction, ign: str, reason: Optional[str] = None,
+                   start: Optional[str] = None, end: Optional[str] = None,
+                   gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
+                   days: Optional[app_commands.Range[float, 0, 5000]] = None, expected_return: Optional[str] = None):
+        await interaction.response.defer()
+        if all(v is None for v in (reason, start, end, gexp, days, expected_return)):
+            await interaction.followup.send("Give at least one thing to change.")
+            return
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC", (uuid,))
+        if entry is None:
+            await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
+            return
+        new, err = await edit_entry(self.core, entry, reason=reason, start=start, end=end, gexp=gexp,
+                                    expected_return=expected_return, days=days, by=interaction.user.id)
+        if err:
+            await interaction.followup.send(err)
+            return
+        posted, card = await self._repost_card(new, f"✏️ The entry of **{esc(name)}** was edited by {interaction.user.display_name}.")
+        await interaction.followup.send(content=f"✅ Entry of **{esc(name)}** updated." + (f" Card posted in {posted}." if posted else ""),
+                                        file=send_file(card, "breaklist.png"), allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="approve", description="Approve a guild for a breaklisted player, or go back to guildless (guild staff)")
     @app_commands.describe(ign="Minecraft username", guild="The approved guild (several: XL, Other). Write none to make them guildless again",
@@ -3839,7 +4031,7 @@ async def setup(bot: commands.Bot):
     core = Core(bot)
     bot.np_core = core
     g.FLAG_LOADER = _load_flags          # every card with heads (1v1 cards too) shows the flags
-    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, AppealButton, AppealReviewButton, WarnButton)
+    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, BreaklistEditButton, AppealButton, AppealReviewButton, WarnButton)
     await bot.add_cog(Breaklist(core))
     await bot.add_cog(Excuse(core))
     await bot.add_cog(GexpTools(core))

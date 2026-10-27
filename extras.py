@@ -80,9 +80,14 @@ class DaysCog(commands.GroupCog, name="days", description="Days spent in the gui
         chunk = rows[(page - 1) * per: page * per]
         names = await asyncio.gather(*(self.core.name_for(u) for u, _ in chunk))
         lines = []
+        flags = {}
+        for r in await q_all("SELECT uuid, code FROM countries"):
+            code = (r["code"] or "").strip().upper()
+            if len(code) == 2 and code.isalpha():
+                flags[r["uuid"]] = " " + "".join(chr(0x1F1E6 + ord(c) - 65) for c in code)
         for i, ((uuid, days), name) in enumerate(zip(chunk, names), (page - 1) * per + 1):
             vet = " ⭐" if days >= bl.VETERAN_DAYS else ""
-            lines.append(f"`{i:>3}.` **{esc(name)}** · {int(days)} days{vet}")
+            lines.append(f"`{i:>3}.` **{esc(name)}**{flags.get(uuid, '')} · {int(days)} days{vet}")
         embed = discord.Embed(title="Days in guild", description="\n".join(lines), color=0x00C8E6)
         embed.set_footer(text=f"Page {page}/{pages} · saved days from the breaklist are included · ⭐ = veteran")
         await interaction.followup.send(embed=embed)

@@ -2292,9 +2292,13 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             return
         try:
             ch = self.core.bot.get_channel(cid) or await self.core.bot.fetch_channel(cid)
+            if not hasattr(ch, "archived_threads") and getattr(ch, "parent_id", None):
+                # the variable points to the breaklist post itself: the forum is its parent
+                ch = self.core.bot.get_channel(ch.parent_id) or await self.core.bot.fetch_channel(ch.parent_id)
             threads = list(getattr(ch, "threads", []))
             async for t in ch.archived_threads(limit=None):
                 threads.append(t)
+            threads = [t for t in threads if t.id != cid]
         except (discord.HTTPException, AttributeError) as e:
             await interaction.followup.send(f"I couldn't read the breaklist channel: {e}")
             return

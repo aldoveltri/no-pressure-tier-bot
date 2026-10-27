@@ -2344,6 +2344,64 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                      "(the date they were added is the date of their post).")
         await interaction.followup.send(body[:1900], allowed_mentions=NO_MENTIONS)
 
+    @app_commands.command(name="importfile", description="Add players to the breaklist from a .txt file, one per line (guild staff)")
+    @app_commands.describe(file="Text file: one player per line, optionally with the days, like 'Notch 120 days'",
+                           dry_run="Only show who would be added: nothing is saved")
+    @app_commands.check(staff_check)
+    async def import_file(self, interaction: discord.Interaction, file: discord.Attachment, dry_run: bool = False):
+        await interaction.response.defer()
+        try:
+            text = (await file.read()).decode("utf-8", errors="ignore")
+        except Exception as e:
+            await interaction.followup.send(f"I couldn't read the file: {e}")
+            return
+        parsed, seen_names = [], set()
+        for line in text.splitlines():
+            clean = re.sub(r"[*~`>|\u2022\u00b7#:]", " ", line)
+            clean = re.sub(r"^\W*\d{1,3}[.)]\s+", "", clean)
+            m = re.match(r"\W*([A-Za-z0-9_]{3,16})\b", clean)
+            if not m or m.group(1).lower() in seen_names:
+                continue
+            d = re.search(r"(\d{1,4}(?:\.\d+)?)\s*(?:d\b|days?\b)", clean[m.end():], re.I)
+            seen_names.add(m.group(1).lower())
+            parsed.append((m.group(1), float(d.group(1)) if d else None))
+        if not parsed:
+            await interaction.followup.send("I found no names in the file.")
+            return
+        added, skipped, failed = [], [], []
+        for ign, days in parsed[:400]:
+            try:
+                res = await get_uuid(ign)
+            except Exception:
+                res = None
+            if res is None:
+                failed.append(ign)
+                continue
+            uuid, name = res
+            if await q_one("SELECT id FROM bl_entries WHERE uuid = ? AND status = 'active'", (uuid,)):
+                skipped.append(name)
+                continue
+            added.append(f"{name}" + (f" ({days:g}d)" if days is not None else ""))
+            if not dry_run:
+                when = iso(now_utc())
+                prev = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+                await q_run(
+                    "INSERT INTO bl_entries (uuid, ign, added_at, added_by, joined_at, left_at, days_total, gexp, required, "
+                    "owed, reason, status) VALUES (?, ?, ?, ?, NULL, ?, ?, 0, 0, 0, ?, 'active')",
+                    (uuid, name, when, str(interaction.user.id), when, prev["banked"] if prev else 0,
+                     "Imported from the old breaklist"))
+                if days is not None:
+                    await self.core.add_day_set(uuid, name, days - (prev["banked"] if prev else 0.0),
+                                                "imported from the old breaklist", interaction.user.id)
+            await asyncio.sleep(0.05)
+        body = (f"{'Would add' if dry_run else 'Added'} **{len(added)}** players. Already on the list: {len(skipped)}. "
+                f"Names not found: {len(failed)}.\n" + ", ".join(added))[:1500]
+        if failed:
+            body += "\nNot found: " + ", ".join(f"`{x}`" for x in failed[:25])
+        if dry_run:
+            body += "\nNothing was saved. Run it again without dry_run to add them."
+        await interaction.followup.send(body[:1900], allowed_mentions=NO_MENTIONS)
+
     @app_commands.command(name="remove", description="Take a player off the breaklist when they rejoin (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
                            when="When they rejoined (ET or MT, see /timezone): 2026/10/03 6:00 PM, year optional. Default: now")

@@ -655,6 +655,8 @@ EXTRA_PAGES = [
            "name, or the manual order."),
         _c("/breaklist all [only]", "Staff. Everyone who has ever been on the breaklist, also who is back, with pages."),
         _c("/breaklist import [dry_run]", "Staff. Adds everyone who has a post in the breaklist forum (days start at 0)."),
+        _c("/breaklist importfile file [dry_run]", "Staff. Adds players from a .txt file, one per line, optionally with the days "
+           "(for example 'Notch 120 days')."),
         _c("/breaklist resetplayer ign [include_days]", "Staff. Deletes one player's whole breaklist history."),
         _c("/breaklist reset confirm", "Administrators. Deletes the whole breaklist after a backup. "
            "Write RESET BREAKLIST to confirm."),

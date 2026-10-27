@@ -44,6 +44,50 @@ def list_backups():
     return out
 
 
+_COUNT_CACHE = {}
+_KEYS = ("matches", "players", "bl_entries", "mutes", "warnings", "blacklist", "links")
+
+
+def counts_of(rel):
+    """How many matches, players, breaklist entries... a backup holds (cached): this is how you tell backups apart."""
+    path = os.path.join(ROOT, rel)
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return {}
+    if key in _COUNT_CACHE:
+        return _COUNT_CACHE[key]
+    out = {}
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        have = tables_of(conn)
+        for t in _KEYS:
+            if t in have:
+                out[t] = conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+        conn.close()
+    except sqlite3.DatabaseError:
+        pass
+    _COUNT_CACHE[key] = out
+    return out
+
+
+def summary(rel, group="all"):
+    c = counts_of(rel)
+    if not c:
+        return "unreadable"
+    parts = {"1v1": [("matches", "1v1s"), ("players", "players")], "breaklist": [("bl_entries", "breaklist entries")],
+             "mutes": [("mutes", "mutes"), ("warnings", "warns")], "blacklist": [("blacklist", "blacklisted")],
+             "links": [("links", "links")],
+             "all": [("matches", "1v1s"), ("bl_entries", "breaklist"), ("mutes", "mutes")]}[group]
+    return " · ".join(f"{c.get(k, 0)} {label}" for k, label in parts)
+
+
+def reason_of(rel):
+    """'auto', 'manual', 'before_restore'... from the file name."""
+    name = os.path.basename(rel)[:-3]
+    return name.split("_", 2)[2] if name.count("_") >= 2 else name
+
+
 def resolve(rel):
     """The absolute path of a backup, only inside the backups folder (None otherwise)."""
     path = os.path.realpath(os.path.join(ROOT, rel))
@@ -133,16 +177,22 @@ class BackupCog(commands.GroupCog, name="backup", description="Database backups 
         per = 15
         pages = max(1, -(-len(rows) // per))
         page = min(page, pages)
-        lines = [f"`{when:%Y-%m-%d %H:%M}` · {size / 1024:,.0f} KB · `{rel}`"
-                 for rel, when, size in rows[(page - 1) * per: page * per]]
-        await interaction.followup.send(f"**Backups** ({len(rows)}) · page {page}/{pages}\n" + "\n".join(lines)[:1800],
-                                        ephemeral=True)
+        chunk = rows[(page - 1) * per: page * per]
+        sums = await asyncio.to_thread(lambda: [summary(rel) for rel, _, _ in chunk])
+        lines = [f"`{when:%m/%d %H:%M}` **{reason_of(rel)}** · {sm}"
+                 for (rel, when, size), sm in zip(chunk, sums)]
+        await interaction.followup.send(f"**Backups** ({len(rows)}) · page {page}/{pages} · newest first\n"
+                                        + "\n".join(lines)[:1850], ephemeral=True)
 
     async def source_choices(self, interaction: discord.Interaction, current: str):
         rows = await asyncio.to_thread(list_backups)
         cur = current.lower()
-        return [app_commands.Choice(name=f"{when:%Y-%m-%d %H:%M} · {rel.split(os.sep)[-1].split('_', 2)[-1][:-3]}"[:100], value=rel[:100])
-                for rel, when, _ in rows if cur in rel.lower()][:25]
+        group = getattr(interaction.namespace, "what", None)
+        group = group if group in GROUPS else "all"
+        rows = [r for r in rows if cur in r[0].lower() or cur in f"{r[1]:%m/%d %H:%M}"][:25]
+        names = await asyncio.to_thread(
+            lambda: [f"{when:%m/%d %H:%M} · {reason_of(rel)} · {summary(rel, group)}"[:100] for rel, when, _ in rows])
+        return [app_commands.Choice(name=nm, value=rel[:100]) for (rel, _, _), nm in zip(rows, names)]
 
     @app_commands.command(name="restore", description="Restore the breaklist, the 1v1s... from a backup (administrators)")
     @app_commands.describe(what="What to restore", backup="Pick a saved backup", file="Or upload a .db backup file",

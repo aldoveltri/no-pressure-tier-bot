@@ -52,14 +52,18 @@ async def top_rows(core, week, page=1, per=10):
     for r in rows:
         if members and r["uuid"] not in members:
             continue
+        out.append(r)
+    total = len(out)
+    pages = max(1, -(-total // per))
+    page = max(1, min(page, pages))
+    chunk = []
+    for r in out[(page - 1) * per: page * per]:
         seen = await q_one("SELECT rank FROM guild_seen WHERE uuid = ?", (r["uuid"],))
         country = await q_one("SELECT code FROM countries WHERE uuid = ?", (r["uuid"],))
-        out.append({"uuid": r["uuid"], "ign": await core.name_for(r["uuid"]), "gexp": r["total"],
-                    "rank": (seen or {}).get("rank") or (members.get(r["uuid"], {}).get("rank") if members else ""),
-                    "code": (country or {}).get("code")})
-        if len(out) >= page * per:
-            break
-    return out[(page - 1) * per:], a, b
+        live = (members.get(r["uuid"]) or {}).get("rank") if members else None      # the rank on Hypixel right now
+        chunk.append({"uuid": r["uuid"], "ign": await core.name_for(r["uuid"]), "gexp": r["total"],
+                      "rank": live or (seen or {}).get("rank") or "", "code": (country or {}).get("code")})
+    return chunk, a, b, page, pages
 
 
 def top_text(rows, start=1):
@@ -89,8 +93,58 @@ def draw_top10(rows, heads, subtitle, start=1):
         _name_flag(img, d, hx + g.HEAD + 14, cy - 11, r["ign"], g.get_font(26, True))
         d.text((hx + g.HEAD + 14, cy + 19), promotion_text(r["rank"]), font=g.get_font(15), fill=g.MUTED, anchor="lm")
         d.text((g.WIDTH - g.PAD - 24, cy), n(r["gexp"]), font=g.get_font(28, True), fill=g.TEXT, anchor="rm")
-    g._footer(d, height, "GEXP of the week")
+    counts = {}
+    for r in rows:
+        counts[r["rank"] or "?"] = counts.get(r["rank"] or "?", 0) + 1
+    g._footer(d, height, "Ranks on Hypixel: " + " · ".join(f"{k} {v}" for k, v in counts.items()))
     return g._png(img)
+
+
+async def build_page(core, week, page):
+    """(text, png, page, pages) of one page of the top, or None when there is no data."""
+    rows, a, b, page, pages = await top_rows(core, week, page)
+    if not rows:
+        return None
+    for r in rows:
+        await load_flag(r["uuid"], r["ign"])
+    heads = await g._fetch_heads([(r["uuid"], r["ign"]) for r in rows])
+    start = (page - 1) * 10 + 1
+    sub = (f"{bl.GUILD_NAME_DISPLAY} · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
+           + (f" · page {page}/{pages}" if pages > 1 else ""))
+    card = await asyncio.to_thread(draw_top10, rows, heads, sub, start)
+    return top_text(rows, start), card, page, pages
+
+
+class TopView(discord.ui.View):
+    """Previous / Next buttons under /topgexp."""
+
+    def __init__(self, core, week, page, pages):
+        super().__init__(timeout=900)
+        self.core, self.week, self.page, self.pages = core, week, page, pages
+        self.prev = discord.ui.Button(label="Previous", style=discord.ButtonStyle.secondary, disabled=page <= 1)
+        self.nxt = discord.ui.Button(label="Next", style=discord.ButtonStyle.secondary, disabled=page >= pages)
+        self.prev.callback, self.nxt.callback = self.on_prev, self.on_next
+        self.add_item(self.prev)
+        self.add_item(self.nxt)
+
+    async def show(self, interaction):
+        await interaction.response.defer()
+        res = await build_page(self.core, self.week, self.page)
+        if res is None:
+            await interaction.edit_original_response(content="Nothing to show.", attachments=[], view=None)
+            return
+        text, card, page, pages = res
+        await interaction.edit_original_response(content=text, attachments=[send_file(card, "top10.png")],
+                                                 view=TopView(self.core, self.week, page, pages),
+                                                 allowed_mentions=discord.AllowedMentions.none())
+
+    async def on_prev(self, interaction):
+        self.page -= 1
+        await self.show(interaction)
+
+    async def on_next(self, interaction):
+        self.page += 1
+        await self.show(interaction)
 
 
 class TopGexp(commands.Cog):
@@ -99,7 +153,7 @@ class TopGexp(commands.Cog):
 
     @app_commands.command(name="topgexp", description="Top 10 GEXP of the week: text to copy and an image (guild staff)")
     @app_commands.describe(week="Which week (default: the last one, already purged)",
-                           page="Page: 1 = top 10, 2 = #11-#20, and so on")
+                           page="Start from this page (the buttons move between pages)")
     @app_commands.choices(week=[app_commands.Choice(name="Last week", value="last"),
                                 app_commands.Choice(name="This week so far", value="this")])
     @app_commands.check(staff_check)
@@ -107,18 +161,13 @@ class TopGexp(commands.Cog):
                       page: app_commands.Range[int, 1, 20] = 1):
         await interaction.response.defer()
         core = self.bot.np_core
-        rows, a, b = await top_rows(core, week or "last", page)
-        if not rows:
-            await interaction.followup.send("I have no saved GEXP for that week." if page == 1
-                                            else "There is nobody on that page.")
+        res = await build_page(core, week or "last", page)
+        if res is None:
+            await interaction.followup.send("I have no saved GEXP for that week.")
             return
-        for r in rows:
-            await load_flag(r["uuid"], r["ign"])
-        heads = await g._fetch_heads([(r["uuid"], r["ign"]) for r in rows])
-        start = (page - 1) * 10 + 1
-        sub = f"{bl.GUILD_NAME_DISPLAY} · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}" + (f" · page {page}" if page > 1 else "")
-        card = await asyncio.to_thread(draw_top10, rows, heads, sub, start)
-        await interaction.followup.send(content=top_text(rows, start), file=send_file(card, "top10.png"),
+        text, card, page, pages = res
+        await interaction.followup.send(content=text, file=send_file(card, "top10.png"),
+                                        view=TopView(core, week or "last", page, pages) if pages > 1 else discord.utils.MISSING,
                                         allowed_mentions=discord.AllowedMentions.none())
 
 

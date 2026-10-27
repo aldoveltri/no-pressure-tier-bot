@@ -36,7 +36,7 @@ def promotion_text(rank):
     return f"remains as {rank or active}"
 
 
-async def top_rows(core, week, limit=10):
+async def top_rows(core, week, page=1, per=10):
     """[{uuid, ign, gexp, rank, code}] of the best members, and the (first, last) days of the week."""
     members = await core.guild_members(force=True)
     now = now_utc()
@@ -57,20 +57,20 @@ async def top_rows(core, week, limit=10):
         out.append({"uuid": r["uuid"], "ign": await core.name_for(r["uuid"]), "gexp": r["total"],
                     "rank": (seen or {}).get("rank") or (members.get(r["uuid"], {}).get("rank") if members else ""),
                     "code": (country or {}).get("code")})
-        if len(out) >= limit:
+        if len(out) >= page * per:
             break
-    return out, a, b
+    return out[(page - 1) * per:], a, b
 
 
-def top_text(rows):
+def top_text(rows, start=1):
     lines = []
-    for i, r in enumerate(rows, 1):
+    for i, r in enumerate(rows, start):
         flag = flag_emoji(r["code"])
         lines.append(f"`#{i}` {esc(r['ign'])} {n(r['gexp'])} ▶️ {promotion_text(r['rank'])}" + (f" {flag}" if flag else ""))
     return "\n".join(lines)
 
 
-def draw_top10(rows, heads, subtitle):
+def draw_top10(rows, heads, subtitle, start=1):
     row_h = 84
     top = g.HEADER_H + 20
     height = top + len(rows) * row_h + g.FOOTER_H
@@ -80,10 +80,10 @@ def draw_top10(rows, heads, subtitle):
     for i, r in enumerate(rows):
         y0 = top + i * row_h
         cy = y0 + (row_h - 8) // 2
-        color = MEDALS[i] if i < 3 else g.ACCENT
+        color = MEDALS[start + i - 1] if start + i <= 3 else g.ACCENT
         d.rounded_rectangle([g.PAD, y0, g.WIDTH - g.PAD, y0 + row_h - 8], radius=14, fill=g.ROW_BG)
         d.rounded_rectangle([g.PAD, y0, g.PAD + 8, y0 + row_h - 8], radius=4, fill=color)
-        d.text((g.PAD + 54, cy), f"#{i + 1}", font=g.get_font(26, True), fill=color, anchor="mm")
+        d.text((g.PAD + 54, cy), f"#{start + i}", font=g.get_font(26 if start + i < 100 else 20, True), fill=color, anchor="mm")
         hx = g.PAD + 100
         g._paste_head(img, d, heads.get(r["uuid"]), hx, cy - g.HEAD // 2, g.HEAD)
         _name_flag(img, d, hx + g.HEAD + 14, cy - 11, r["ign"], g.get_font(26, True))
@@ -98,23 +98,27 @@ class TopGexp(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="topgexp", description="Top 10 GEXP of the week: text to copy and an image (guild staff)")
-    @app_commands.describe(week="Which week (default: the last one, already purged)")
+    @app_commands.describe(week="Which week (default: the last one, already purged)",
+                           page="Page: 1 = top 10, 2 = #11-#20, and so on")
     @app_commands.choices(week=[app_commands.Choice(name="Last week", value="last"),
                                 app_commands.Choice(name="This week so far", value="this")])
     @app_commands.check(staff_check)
-    async def topgexp(self, interaction: discord.Interaction, week: Optional[str] = "last"):
+    async def topgexp(self, interaction: discord.Interaction, week: Optional[str] = "last",
+                      page: app_commands.Range[int, 1, 20] = 1):
         await interaction.response.defer()
         core = self.bot.np_core
-        rows, a, b = await top_rows(core, week or "last")
+        rows, a, b = await top_rows(core, week or "last", page)
         if not rows:
-            await interaction.followup.send("I have no saved GEXP for that week.")
+            await interaction.followup.send("I have no saved GEXP for that week." if page == 1
+                                            else "There is nobody on that page.")
             return
         for r in rows:
             await load_flag(r["uuid"], r["ign"])
         heads = await g._fetch_heads([(r["uuid"], r["ign"]) for r in rows])
-        sub = f"{bl.GUILD_NAME_DISPLAY} · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
-        card = await asyncio.to_thread(draw_top10, rows, heads, sub)
-        await interaction.followup.send(content=top_text(rows), file=send_file(card, "top10.png"),
+        start = (page - 1) * 10 + 1
+        sub = f"{bl.GUILD_NAME_DISPLAY} · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}" + (f" · page {page}" if page > 1 else "")
+        card = await asyncio.to_thread(draw_top10, rows, heads, sub, start)
+        await interaction.followup.send(content=top_text(rows, start), file=send_file(card, "top10.png"),
                                         allowed_mentions=discord.AllowedMentions.none())
 
 

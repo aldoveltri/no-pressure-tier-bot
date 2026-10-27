@@ -33,6 +33,38 @@ CREATE TABLE IF NOT EXISTS match_maps (match_id INTEGER PRIMARY KEY, map TEXT NO
 # days in guild
 # ======================================================================================
 
+async def days_board(core, page=1):
+    """(embed, page, pages) with the members ordered by total days in the guild, or None without the member list."""
+    members = await core.guild_members()
+    if not members:
+        return None
+    banked = {r["uuid"]: r["banked"] for r in await q_all("SELECT uuid, banked FROM player_days")}
+    now = now_utc()
+    rows = []
+    for uuid, m in members.items():
+        joined = m.get("joined")
+        stay = (now.timestamp() - joined / 1000) / 86400 if joined else 0
+        rows.append((uuid, banked.get(uuid, 0.0) + max(0.0, stay)))
+    rows.sort(key=lambda x: -x[1])
+    per = 15
+    pages = max(1, -(-len(rows) // per))
+    page = min(page, pages)
+    chunk = rows[(page - 1) * per: page * per]
+    names = await asyncio.gather(*(core.name_for(u) for u, _ in chunk))
+    lines = []
+    flags = {}
+    for r in await q_all("SELECT uuid, code FROM countries"):
+        code = (r["code"] or "").strip().upper()
+        if len(code) == 2 and code.isalpha():
+            flags[r["uuid"]] = " " + "".join(chr(0x1F1E6 + ord(c) - 65) for c in code)
+    for i, ((uuid, days), name) in enumerate(zip(chunk, names), (page - 1) * per + 1):
+        vet = " ⭐" if days >= bl.VETERAN_DAYS else ""
+        lines.append(f"`{i:>3}.` **{esc(name)}**{flags.get(uuid, '')} · {int(days)} days{vet}")
+    embed = discord.Embed(title="Days in guild", description="\n".join(lines), color=0x00C8E6)
+    embed.set_footer(text=f"Page {page}/{pages} · saved days from the breaklist are included · ⭐ = veteran")
+    return embed, page, pages
+
+
 class DaysCog(commands.GroupCog, name="days", description="Days spent in the guild"):
     def __init__(self, core):
         self.core = core
@@ -62,35 +94,11 @@ class DaysCog(commands.GroupCog, name="days", description="Days spent in the gui
     @app_commands.describe(page="Page number")
     async def leaderboard(self, interaction: discord.Interaction, page: app_commands.Range[int, 1, 50] = 1):
         await interaction.response.defer()
-        members = await self.core.guild_members()
-        if not members:
+        res = await days_board(self.core, page)
+        if res is None:
             await interaction.followup.send("I can't read the guild member list right now.")
             return
-        banked = {r["uuid"]: r["banked"] for r in await q_all("SELECT uuid, banked FROM player_days")}
-        now = now_utc()
-        rows = []
-        for uuid, m in members.items():
-            joined = m.get("joined")
-            stay = (now.timestamp() - joined / 1000) / 86400 if joined else 0
-            rows.append((uuid, banked.get(uuid, 0.0) + max(0.0, stay)))
-        rows.sort(key=lambda x: -x[1])
-        per = 15
-        pages = max(1, -(-len(rows) // per))
-        page = min(page, pages)
-        chunk = rows[(page - 1) * per: page * per]
-        names = await asyncio.gather(*(self.core.name_for(u) for u, _ in chunk))
-        lines = []
-        flags = {}
-        for r in await q_all("SELECT uuid, code FROM countries"):
-            code = (r["code"] or "").strip().upper()
-            if len(code) == 2 and code.isalpha():
-                flags[r["uuid"]] = " " + "".join(chr(0x1F1E6 + ord(c) - 65) for c in code)
-        for i, ((uuid, days), name) in enumerate(zip(chunk, names), (page - 1) * per + 1):
-            vet = " ⭐" if days >= bl.VETERAN_DAYS else ""
-            lines.append(f"`{i:>3}.` **{esc(name)}**{flags.get(uuid, '')} · {int(days)} days{vet}")
-        embed = discord.Embed(title="Days in guild", description="\n".join(lines), color=0x00C8E6)
-        embed.set_footer(text=f"Page {page}/{pages} · saved days from the breaklist are included · ⭐ = veteran")
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=res[0])
 
 
 # ======================================================================================

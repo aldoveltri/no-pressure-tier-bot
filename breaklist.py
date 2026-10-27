@@ -1178,6 +1178,20 @@ class Core:
                           "WHERE uuid = ? AND day >= ? AND day <= ?", (uuid, a, b))
         return row["total"], row["count"]
 
+    async def eligibility_card(self, uuid, name):
+        """(png, None) with the last 7 days of GEXP of a player, or (None, why not)."""
+        await self.guild_members()
+        history, source = await self.history_days(uuid)
+        if not history:
+            return None, ("I have no GEXP data for this player. The bot needs the Hypixel key and the guild name "
+                          "(`HYPIXEL_GUILD_NAME`), and the player must have been in the guild while the bot was saving data.")
+        days = sorted(history.items())[-7:]
+        total = sum(v for _, v in days)
+        debt = await q_one("SELECT amount FROM debts WHERE uuid = ?", (uuid,))
+        owed = debt["amount"] if debt and debt["amount"] > 0 else None
+        head = await self.head_for(uuid, name)
+        return await asyncio.to_thread(draw_eligibility, name, head, days, total, owed, source), None
+
     async def name_for(self, uuid):
         try:
             name = await get_name(uuid)
@@ -2941,19 +2955,10 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if r is None:
             return
         uuid, name = r
-        await self.core.guild_members()
-        history, source = await self.core.history_days(uuid)
-        if not history:
-            await interaction.followup.send(
-                "I have no GEXP data for this player. The bot needs the Hypixel key and the guild name "
-                "(`HYPIXEL_GUILD_NAME`), and the player must have been in the guild while the bot was saving data.")
+        card, err = await self.core.eligibility_card(uuid, name)
+        if err:
+            await interaction.followup.send(err)
             return
-        days = sorted(history.items())[-7:]
-        total = sum(v for _, v in days)
-        debt = await q_one("SELECT amount FROM debts WHERE uuid = ?", (uuid,))
-        owed = debt["amount"] if debt and debt["amount"] > 0 else None
-        head = await self.core.head_for(uuid, name)
-        card = await asyncio.to_thread(draw_eligibility, name, head, days, total, owed, source)
         await interaction.followup.send(file=send_file(card, "gexp.png"))
 
     @app_commands.command(name="notice", description="Post the GEXP notice of one player now, with its buttons (guild staff)")
@@ -3533,6 +3538,40 @@ def warn_state(w):
     return f"expired <t:{ts}:R>" if end <= now_utc() else f"expires <t:{ts}:F> (<t:{ts}:R>)"
 
 
+async def punishment_embed(uuid, name):
+    """Every mute and verbal warning of a player as one embed (None when there are none)."""
+    rows = await q_all("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", (uuid,))
+    warns = await q_all("SELECT * FROM warnings WHERE uuid = ? ORDER BY id DESC", (uuid,))
+    if not rows and not warns:
+        return None
+    events = [(from_iso(x["start_at"]), "mute", x) for x in rows] + [(from_iso(x["at"]), "warn", x) for x in warns]
+    events.sort(key=lambda e: e[0], reverse=True)
+    lines = []
+    for when, kind, x in events:
+        day = gc.fmt_date(when)
+        reason = (x["reason"] or "-").replace("\n", " ")[:160]
+        if kind == "mute":
+            state = "🔴 active" if x["status"] == "active" else "ended"
+            lines.append(f"**Mute #{x['id']}** · {day} · {mute_length_text(x)} · {state}\n> {reason}")
+        else:
+            lines.append(f"**Verbal warning #{x['id']}** · {day} · {warn_state(x)}\n> {reason}")
+    text, shown = "", 0
+    for line in lines:
+        if len(text) + len(line) + 1 > 3900:
+            break
+        text += line + "\n"
+        shown += 1
+    active_w = sum(1 for w in warns if not w.get("expires_at") or from_iso(w["expires_at"]) > now_utc())
+    embed = discord.Embed(title=f"Punishment history of {name}", color=0x00C8E6)
+    embed.description = text
+    embed.set_thumbnail(url=f"https://mc-heads.net/head/{uuid}")
+    embed.add_field(name="Mutes", value=str(len(rows)), inline=True)
+    embed.add_field(name="Verbal warnings", value=f"{len(warns)} ({active_w} not expired)", inline=True)
+    if shown < len(lines):
+        embed.set_footer(text=f"Showing the latest {shown} of {len(lines)} entries")
+    return embed
+
+
 class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
     def __init__(self, core: Core):
         self.core = core
@@ -3725,36 +3764,10 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         if r is None:
             return
         uuid, name = r
-        rows = await q_all("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", (uuid,))
-        warns = await q_all("SELECT * FROM warnings WHERE uuid = ? ORDER BY id DESC", (uuid,))
-        if not rows and not warns:
+        embed = await punishment_embed(uuid, name)
+        if embed is None:
             await interaction.followup.send(f"**{esc(name)}** has no mutes or warnings.", allowed_mentions=NO_MENTIONS)
             return
-        events = [(from_iso(x["start_at"]), "mute", x) for x in rows] + [(from_iso(x["at"]), "warn", x) for x in warns]
-        events.sort(key=lambda e: e[0], reverse=True)
-        lines = []
-        for when, kind, x in events:
-            day = gc.fmt_date(when)
-            reason = (x["reason"] or "-").replace("\n", " ")[:160]
-            if kind == "mute":
-                state = "🔴 active" if x["status"] == "active" else "ended"
-                lines.append(f"**Mute #{x['id']}** · {day} · {mute_length_text(x)} · {state}\n> {reason}")
-            else:
-                lines.append(f"**Verbal warning #{x['id']}** · {day} · {warn_state(x)}\n> {reason}")
-        text, shown = "", 0
-        for line in lines:
-            if len(text) + len(line) + 1 > 3900:
-                break
-            text += line + "\n"
-            shown += 1
-        active_w = sum(1 for w in warns if not w.get("expires_at") or from_iso(w["expires_at"]) > now_utc())
-        embed = discord.Embed(title=f"Punishment history of {name}", color=0x00C8E6)
-        embed.description = text
-        embed.set_thumbnail(url=f"https://mc-heads.net/head/{uuid}")
-        embed.add_field(name="Mutes", value=str(len(rows)), inline=True)
-        embed.add_field(name="Verbal warnings", value=f"{len(warns)} ({active_w} not expired)", inline=True)
-        if shown < len(lines):
-            embed.set_footer(text=f"Showing the latest {shown} of {len(lines)} entries")
         await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="warnexpiry", description="Change when a verbal warning expires (guild staff)")
@@ -3841,6 +3854,56 @@ def _span(seconds):
     return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
 
 
+async def logins_embed(uuid, name, days=14):
+    """(embed, None) with the login habits of a player, or (None, why there is nothing)."""
+    since_all = await kv_get("logins_since")
+    cutoff = now_utc() - timedelta(days=days)
+    rows = await q_all("SELECT * FROM logins WHERE uuid = ? AND login_at >= ? ORDER BY login_at", (uuid, iso(cutoff)))
+    if not rows:
+        tracked = f" (tracking started {gc.fmt_date(from_iso(since_all))})" if since_all else ""
+        return None, (f"No logins saved for **{esc(name)}** in the last {days} days{tracked}. The bot saves the "
+                      "logins of guild members every few minutes; players who hide their online status in Hypixel "
+                      "may give no data.")
+    by_day = {}
+    sessions = []
+    for x in rows:
+        t = from_iso(x["login_at"]).astimezone(gc.TZ)
+        by_day.setdefault(t.date(), []).append((t, x))
+        if x["logout_at"]:
+            length = (from_iso(x["logout_at"]) - from_iso(x["login_at"])).total_seconds()
+            if 0 < length < 86400:
+                sessions.append((t.date(), length))
+    mins = [t.hour * 60 + t.minute for lst in by_day.values() for t, _ in lst]
+    firsts = [min(t.hour * 60 + t.minute for t, _ in lst) for lst in by_day.values()]
+    earliest = min(((t, x) for lst in by_day.values() for t, x in lst), key=lambda p: p[0].hour * 60 + p[0].minute)[0]
+    latest = max(((t, x) for lst in by_day.values() for t, x in lst), key=lambda p: p[0].hour * 60 + p[0].minute)[0]
+    per_day = {}
+    for d, ln in sessions:
+        per_day[d] = per_day.get(d, 0) + ln
+    embed = discord.Embed(title=f"Logins of {name}", color=0x00C8E6)
+    embed.description = (
+        f"Last {days} days · active on **{len(by_day)}** days · **{len(rows)}** logins (times are {gc.TZ_NAME})")
+    embed.add_field(name="Earliest login", value=f"{_clock(earliest.hour * 60 + earliest.minute)}\n{earliest.strftime('%m/%d')}")
+    embed.add_field(name="Latest login", value=f"{_clock(latest.hour * 60 + latest.minute)}\n{latest.strftime('%m/%d')}")
+    embed.add_field(name="Usual first login", value=_clock(sum(firsts) / len(firsts)))
+    if sessions:
+        embed.add_field(name="Average session", value=_span(sum(l for _, l in sessions) / len(sessions)))
+        embed.add_field(name="Average time on per active day", value=_span(sum(per_day.values()) / len(per_day)))
+    embed.add_field(name="Logins per active day", value=f"{len(rows) / len(by_day):.1f}")
+    lines = []
+    for d in sorted(by_day, reverse=True)[:20]:
+        times = ", ".join(_clock(t.hour * 60 + t.minute) for t, _ in by_day[d])
+        on = f" · on {_span(per_day[d])}" if d in per_day else ""
+        lines.append(f"**{d.strftime('%a %m/%d')}**: {times}{on}")
+    embed.add_field(name="Every day", value="\n".join(lines)[:1000], inline=False)
+    notes = []
+    if since_all and from_iso(since_all) > cutoff:
+        notes.append(f"the bot has only been saving logins since {gc.fmt_date(from_iso(since_all))}")
+    notes.append("logins are saved when the bot checks the player (about every 15 minutes): two logins in between can be merged")
+    embed.set_footer(text="Note: " + "; ".join(notes))
+    return embed, None
+
+
 class LoginsCog(commands.Cog):
     def __init__(self, core):
         self.core = core
@@ -3854,53 +3917,10 @@ class LoginsCog(commands.Cog):
         if r is None:
             return
         uuid, name = r
-        since_all = await kv_get("logins_since")
-        cutoff = now_utc() - timedelta(days=days)
-        rows = await q_all("SELECT * FROM logins WHERE uuid = ? AND login_at >= ? ORDER BY login_at", (uuid, iso(cutoff)))
-        if not rows:
-            tracked = f" (tracking started {gc.fmt_date(from_iso(since_all))})" if since_all else ""
-            await interaction.followup.send(
-                f"No logins saved for **{esc(name)}** in the last {days} days{tracked}. The bot saves the logins of "
-                "guild members every few minutes; players who hide their online status in Hypixel may give no data.",
-                allowed_mentions=NO_MENTIONS)
+        embed, text = await logins_embed(uuid, name, days)
+        if embed is None:
+            await interaction.followup.send(text, allowed_mentions=NO_MENTIONS)
             return
-        by_day = {}
-        sessions = []
-        for x in rows:
-            t = from_iso(x["login_at"]).astimezone(gc.TZ)
-            by_day.setdefault(t.date(), []).append((t, x))
-            if x["logout_at"]:
-                length = (from_iso(x["logout_at"]) - from_iso(x["login_at"])).total_seconds()
-                if 0 < length < 86400:
-                    sessions.append((t.date(), length))
-        mins = [t.hour * 60 + t.minute for lst in by_day.values() for t, _ in lst]
-        firsts = [min(t.hour * 60 + t.minute for t, _ in lst) for lst in by_day.values()]
-        earliest = min(((t, x) for lst in by_day.values() for t, x in lst), key=lambda p: p[0].hour * 60 + p[0].minute)[0]
-        latest = max(((t, x) for lst in by_day.values() for t, x in lst), key=lambda p: p[0].hour * 60 + p[0].minute)[0]
-        per_day = {}
-        for d, ln in sessions:
-            per_day[d] = per_day.get(d, 0) + ln
-        embed = discord.Embed(title=f"Logins of {name}", color=0x00C8E6)
-        embed.description = (
-            f"Last {days} days · active on **{len(by_day)}** days · **{len(rows)}** logins (times are {gc.TZ_NAME})")
-        embed.add_field(name="Earliest login", value=f"{_clock(earliest.hour * 60 + earliest.minute)}\n{earliest.strftime('%m/%d')}")
-        embed.add_field(name="Latest login", value=f"{_clock(latest.hour * 60 + latest.minute)}\n{latest.strftime('%m/%d')}")
-        embed.add_field(name="Usual first login", value=_clock(sum(firsts) / len(firsts)))
-        if sessions:
-            embed.add_field(name="Average session", value=_span(sum(l for _, l in sessions) / len(sessions)))
-            embed.add_field(name="Average time on per active day", value=_span(sum(per_day.values()) / len(per_day)))
-        embed.add_field(name="Logins per active day", value=f"{len(rows) / len(by_day):.1f}")
-        lines = []
-        for d in sorted(by_day, reverse=True)[:20]:
-            times = ", ".join(_clock(t.hour * 60 + t.minute) for t, _ in by_day[d])
-            on = f" · on {_span(per_day[d])}" if d in per_day else ""
-            lines.append(f"**{d.strftime('%a %m/%d')}**: {times}{on}")
-        embed.add_field(name="Every day", value="\n".join(lines)[:1000], inline=False)
-        notes = []
-        if since_all and from_iso(since_all) > cutoff:
-            notes.append(f"the bot has only been saving logins since {gc.fmt_date(from_iso(since_all))}")
-        notes.append("logins are saved when the bot checks the player (about every 15 minutes): two logins in between can be merged")
-        embed.set_footer(text="Note: " + "; ".join(notes))
         await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
 
 

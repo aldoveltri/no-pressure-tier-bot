@@ -435,6 +435,9 @@ async def setup_hook():
     await bot.load_extension("pro")
     await bot.load_extension("top10")
     await bot.load_extension("backup")
+    bot.np_hooks = {"profile_card": profile_card, "profile_options": profile_options, "history_page": history_page,
+                    "info_image": info_image, "info_data": get_info}
+    await bot.load_extension("hub")
 
 bot.setup_hook = setup_hook
 
@@ -571,7 +574,7 @@ async def modes(interaction: discord.Interaction):
     for m in MODES:
         blocks.append({"type": "bullet", "text": f"{m['name']}: first to {FIRST_TO[m['system']]}"})
     blocks.append({"type": "paragraph", "text":
-                   "To use a mode, choose it in the mode option of /profile, /history, /leaderboard and the "
+                   "To use a mode, choose it in the mode option of /history, /leaderboard and the "
                    "other commands. Each mode has its own elo, tiers and leaderboard, only lifetime "
                    "(no seasons), and resets at the end of the year like the normal one."})
     data = await build_text_image("GAME MODES", GUILD_NAME, blocks)
@@ -1269,7 +1272,7 @@ async def endyear(interaction: discord.Interaction):
         await i.edit_original_response(content="Done.")
         await i.followup.send(
             f"🎆 **Year {old_year} ended.** The final leaderboard and the profiles of {count} players "
-            f"were saved: see them with `/leaderboard year:{old_year}` and `/profile year:{old_year}`. "
+            f"were saved: see them with `/leaderboard year:{old_year}` and `/profile` (1v1 stats menu). "
             f"The game modes were saved too (use the `mode` option.)\n"
             f"Year {new_year} (season {new_season}) has started: everyone is back to 0 elo (tier D), "
             f"in every mode. Discord links were kept.\nBackup saved as `{backup}`.")
@@ -1402,110 +1405,88 @@ async def droppause(interaction: discord.Interaction, pause_id: int):
         f"{pm['p1_games']}-{pm['p2_games']} {esc(pm['p2_ign'])}) was discarded.")
 
 
-# ---------- profile ----------
+# ---------- profile pieces (the /profile and /info hubs live in hub.py and call these) ----------
 
-@bot.tree.command(name="profile", description="Show a player's profile (general, or of a season / past year / mode)")
-@app_commands.describe(ign="Minecraft username (leave empty for your linked account)",
-                       season="Show the profile of a season",
-                       year="Show the profile of a past year",
-                       mode="Game mode (leave empty for the normal mode)")
-async def profile(interaction: discord.Interaction, ign: Optional[str] = None,
-                  season: Optional[int] = None, year: Optional[int] = None,
-                  mode: Optional[str] = None):
-    await interaction.response.defer()
-    if season is not None and year is not None:
-        await interaction.followup.send("Choose either a season or a year, not both.")
-        return
-    ok, md = await resolve_mode(interaction, mode)
-    if not ok:
-        return
-    if md and season is not None:
-        await interaction.followup.send("Game modes don't have seasons.")
-        return
+async def profile_card(uuid, name, spec=None):
+    """The 1v1 profile image of a player. spec: None (normal mode, lifetime), ("mode", name),
+    ("season", id) or ("year", id). Returns (png, None) or (None, why not)."""
+    kind, value = spec if spec else (None, None)
+    md = None
+    if kind == "mode":
+        cfg = find_config_mode(value)
+        md = await get_mode_by_name(cfg["name"]) if cfg else None
+        if md is None:
+            return None, f"The mode `{value}` does not exist."
     mode_id = md["id"] if md else None
     mode_up = md["name"].upper() if md else None
 
-    target = await resolve_target(interaction, ign)
-    if target is None:
-        return
-    uuid, name, fresh = target
-
-    # ----- season profile (normal mode) -----
-    if season is not None:
-        res = await get_season_leaderboard(season)
+    if kind == "season":
+        res = await get_season_leaderboard(value)
         if res is None:
-            await interaction.followup.send(f"Season {season} does not exist.")
-            return
+            return None, f"Season {value} does not exist."
         by_elo = sort_rows(res[0], "elo")
         idx = next((i for i, r in enumerate(by_elo) if r["uuid"] == uuid), None)
         if idx is None:
-            await interaction.followup.send(
-                f"**{esc(name)}** didn't play any match in season {season}.")
-            return
+            return None, f"**{esc(name)}** didn't play any match in season {value}."
         r = by_elo[idx]
-        forfeits = await count_forfeits(uuid, season_id=season)
+        forfeits = await count_forfeits(uuid, season_id=value)
         winrate = f"{r['wins'] / r['matches'] * 100:.0f}%" if r["matches"] else "-"
-        data = await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1,
-                                         r["wins"], r["losses"], winrate, forfeits,
-                                         title=f"SEASON {season} PROFILE", scope=f"Season {season}")
-        await interaction.followup.send(file=png_file(data, "profile.png"))
-        return
+        return await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1, r["wins"], r["losses"],
+                                         winrate, forfeits, title=f"SEASON {value} PROFILE", scope=f"Season {value}"), None
 
-    # ----- archived year profile -----
-    if year is not None:
-        rows = await get_year_leaderboard(year, mode_id=mode_id)
+    if kind == "year":
+        rows = await get_year_leaderboard(value, mode_id=mode_id)
         if rows is None:
-            await interaction.followup.send(f"Year {year} does not exist or hasn't ended yet.")
-            return
+            return None, f"Year {value} does not exist or hasn't ended yet."
         by_elo = sort_rows(rows, "elo")
         idx = next((i for i, r in enumerate(by_elo) if r["uuid"] == uuid), None)
         if idx is None:
-            await interaction.followup.send(
-                f"**{esc(name)}** is not in the final leaderboard of year {year}.")
-            return
+            return None, f"**{esc(name)}** is not in the final leaderboard of year {value}."
         r = by_elo[idx]
         winrate = f"{r['wins'] / r['matches'] * 100:.0f}%" if r["matches"] else "-"
-        title = f"{mode_up} YEAR {year} PROFILE" if md else f"YEAR {year} PROFILE"
-        scope = f"{md['name']} · Year {year} (final)" if md else f"Year {year} (final)"
-        data = await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1,
-                                         r["wins"], r["losses"], winrate, r["forfeits"],
-                                         title=title, scope=scope)
-        await interaction.followup.send(file=png_file(data, "profile.png"))
-        return
+        return await build_profile_image(uuid, r["ign"], r["tier"], r["elo"], idx + 1, r["wins"], r["losses"],
+                                         winrate, r["forfeits"], title=f"YEAR {value} PROFILE",
+                                         scope=f"Year {value} (final)"), None
 
-    # ----- current profile (normal mode or a game mode) -----
     p = await get_player(uuid, mode_id=mode_id)
     if p is None:
         where = f" in **{esc(md['name'])}**" if md else ""
-        await interaction.followup.send(f"**{esc(name)}** doesn't have a tier{where} yet.")
-        return
-
-    if fresh:
-        await upsert_player(uuid, name, mode_id=mode_id)   # keeps the stored name up to date
-    else:
-        name = p["ign"]
-
+        return None, f"**{esc(name)}** doesn't have a tier{where} yet."
     wins, losses = await get_stats(uuid, mode_id=mode_id)
     forfeits = await count_forfeits(uuid, mode_id=mode_id)
     total = wins + losses
     winrate = f"{wins / total * 100:.0f}%" if total else "-"
     rank = await get_rank(p["elo"], mode_id=mode_id)
-
-    data = await build_profile_image(uuid, name, p["tier"], p["elo"], rank, wins, losses,
-                                     winrate, forfeits,
+    return await build_profile_image(uuid, p["ign"], p["tier"], p["elo"], rank, wins, losses, winrate, forfeits,
                                      title=f"{mode_up} PROFILE" if md else "PLAYER PROFILE",
-                                     scope=md["name"] if md else "")
-    await interaction.followup.send(file=png_file(data, "profile.png"))
+                                     scope=md["name"] if md else ""), None
 
 
-@profile.autocomplete("season")
-async def profile_season_ac(interaction: discord.Interaction, current: str):
-    return await season_choices(current)
+async def profile_options():
+    """[(label, value)] for the menu of the 1v1 section: lifetime, every mode, seasons, years."""
+    out = [("Lifetime (normal mode)", "-")]
+    out += [(m["name"], f"m:{m['name']}") for m in MODES]
+    out += [(f"Season {r['id']}" + (" (current)" if r["ended_at"] is None else ""), f"s:{r['id']}")
+            for r in (await list_seasons())[:6]]
+    out += [(f"Year {r['id']} (final)", f"y:{r['id']}") for r in (await list_years())[:4]]
+    return out[:25]
 
 
-@profile.autocomplete("year")
-async def profile_year_ac(interaction: discord.Interaction, current: str):
-    return await year_choices(current)
+async def history_page(uuid, name, page=1):
+    """(png, pages, total) of one page of the match history of a player, or None when there is none."""
+    total = await count_history(uuid)
+    if total == 0:
+        return None
+    per = HistoryView.PER_PAGE
+    pages = max(1, (total + per - 1) // per)
+    page = max(1, min(page, pages))
+    rows = await get_history(uuid, per, (page - 1) * per)
+    data = await build_history_image(name, history_entries(rows, uuid), page - 1, pages, total)
+    return data, pages, total
+
+
+async def info_image():
+    return await build_info_image(await get_info())
 
 
 # ---------- player match history ----------
@@ -1769,12 +1750,6 @@ async def leaderboard_year_ac(interaction: discord.Interaction, current: str):
     return await year_choices(current)
 
 
-@bot.tree.command(name="info", description="Show general stats about players, matches and tiers")
-async def info(interaction: discord.Interaction):
-    await interaction.response.defer()
-    data = await build_info_image(await get_info())
-    await interaction.followup.send(file=png_file(data, "info.png"))
-
 @bot.tree.command(name="resetall", description="TEST ONLY: delete ALL data and start from scratch (administrators)")
 @app_commands.describe(confirm="Type RESET EVERYTHING to confirm")
 async def resetall(interaction: discord.Interaction, confirm: str):
@@ -1791,7 +1766,7 @@ async def resetall(interaction: discord.Interaction, confirm: str):
     await interaction.followup.send(f"🗑️ Everything was deleted. A backup was saved as `{backup}`.")
 
 # the "mode" option suggests the game modes; the score of /match suggests the valid scores
-for _cmd in (settier, setelo, match, forfeit_cmd, removeplayer, profile, history,
+for _cmd in (settier, setelo, match, forfeit_cmd, removeplayer, history,
              matches, cancelled_cmd, leaderboard):
     _cmd.autocomplete("mode")(mode_autocomplete)
 match.autocomplete("score")(score_autocomplete)

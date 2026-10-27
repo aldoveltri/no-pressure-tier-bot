@@ -317,6 +317,10 @@ BREAKLIST_PAGES = [
             _c("/breaklist addold ign end [reason] [start] [gexp] [returned] [days]",
                "Staff. Records an old, already finished breaklist of a player (even if they are on the breaklist now). "
                "It only goes into /breaklist history: current days and debt don't change."),
+            _c("/topgexp [week]",
+               "Staff. The top 10 GEXP of the last week (or this week so far): the text ready to copy, with "
+               "'promoted from Recruit to Active' or 'remains as <rank>' and the country flag, plus an image with the "
+               "player heads. Rank names: RECRUIT_RANK_NAME and ACTIVE_RANK_NAME."),
             _c("/breaklist guild [page]",
                "The list of everyone who is on the breaklist now, with the date they were added, their days "
                "in the guild and the GEXP they owe."),

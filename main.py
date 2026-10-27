@@ -433,6 +433,7 @@ async def setup_hook():
     await bot.load_extension("staff2")
     await bot.load_extension("tags")
     await bot.load_extension("pro")
+    await bot.load_extension("top10")
 
 bot.setup_hook = setup_hook
 

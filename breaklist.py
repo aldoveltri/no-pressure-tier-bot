@@ -2158,7 +2158,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if r is None:
             return
         uuid, name = r
-        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY id DESC LIMIT 1", (uuid,))
+        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC LIMIT 1", (uuid,))
         if entry is None:
             days, state = await self.core.days_info(uuid)
             extra = f" They have {int(days)} days in the guild." if state != "unknown" and days else ""
@@ -2181,7 +2181,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if r is None:
             return
         uuid, name = r
-        rows = await q_all("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY id DESC", (uuid,))
+        rows = await q_all("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC", (uuid,))
         if not rows:
             await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
             return
@@ -2201,7 +2201,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if r is None:
             return
         uuid, name = r
-        e = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY id DESC LIMIT 1", (uuid,))
+        e = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC LIMIT 1", (uuid,))
         if not e:
             await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
             return
@@ -2437,6 +2437,50 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             body += "\nNothing was saved. Run it again without dry_run to add them."
         await interaction.followup.send(body[:1900], allowed_mentions=NO_MENTIONS)
 
+    @app_commands.command(name="addold", description="Record an OLD breaklist of a player, already finished (guild staff)")
+    @app_commands.describe(
+        ign="Minecraft username of the player", reason="Why they were breaklisted",
+        start="When they joined the guild that time (ET or MT, see /timezone): 2026/07/28 5:28 PM, year optional",
+        end="When they were breaklisted (same format)", gexp="GEXP earned that week before the breaklist",
+        returned="When they came back (default: the end date)",
+        days="Days in the guild at that time (default: from start to end)")
+    @app_commands.check(staff_check)
+    async def add_old(self, interaction: discord.Interaction, ign: str, end: str, reason: Optional[str] = None,
+                      start: Optional[str] = None, gexp: app_commands.Range[int, 0, 100_000_000] = 0,
+                      returned: Optional[str] = None, days: Optional[app_commands.Range[float, 0, 5000]] = None):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        parsed = {}
+        for key, text in (("start", start), ("end", end), ("returned", returned)):
+            if text:
+                parsed[key] = gc.parse_et(text)
+                if parsed[key] is None:
+                    await interaction.followup.send(f"I couldn't read the {key} date. Use `2026/07/28 5:28 PM` or "
+                                                    "`07/28 5:28 PM` (only one AM/PM, after the time).")
+                    return
+        joined, left = parsed.get("start"), parsed["end"]
+        back = parsed.get("returned") or left
+        if joined and left <= joined:
+            await interaction.followup.send("The end date must be after the start date.")
+            return
+        ws = gc.week_start(left)
+        required = gc.required_elapsed(max(joined, ws) if joined else ws, left)
+        if days is None:
+            days = max(0.0, (left - joined).total_seconds() / 86400) if joined else 0.0
+        await q_run(
+            "INSERT INTO bl_entries (uuid, ign, added_at, added_by, joined_at, left_at, days_total, gexp, required, owed, "
+            "reason, status, returned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'returned', ?)",
+            (uuid, name, iso(left), str(interaction.user.id), iso(joined) if joined else None, iso(left), days, gexp,
+             required, max(0, required - gexp), reason or None, iso(back)))
+        count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (uuid,)))["c"]
+        await interaction.followup.send(
+            f"✅ Old breaklist of **{esc(name)}** saved ({gc.fmt_date(left)} → {gc.fmt_date(back)}). "
+            f"They have now been breaklisted **{count}** times. Days and debt were not changed. "
+            "See it with `/breaklist history`.", allowed_mentions=NO_MENTIONS)
+
     @app_commands.command(name="remove", description="Take a player off the breaklist when they rejoin (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
                            when="When they rejoined (ET or MT, see /timezone): 2026/10/03 6:00 PM, year optional. Default: now")
@@ -2584,7 +2628,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if r is None:
             return
         uuid, name = r
-        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY id DESC LIMIT 1", (uuid,))
+        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC LIMIT 1", (uuid,))
         files = [discord.File(io.BytesIO(await a.read()), filename=a.filename) for a in (image, image2) if a]
         if text:
             lines = [x.strip() for x in re.split(r"\n|;", text) if x.strip()]

@@ -314,6 +314,9 @@ BREAKLIST_PAGES = [
                "Staff. Sets the guild a visiting player prefers: the card shows VISITING GUILD and PREFERS GUILD."),
             _c("/breaklist resetguildhistory confirm",
                "Administrators. Forgets the guild history shown for everyone. Write RESET GUILD HISTORY."),
+            _c("/breaklist addold ign end [reason] [start] [gexp] [returned] [days]",
+               "Staff. Records an old, already finished breaklist of a player (even if they are on the breaklist now). "
+               "It only goes into /breaklist history: current days and debt don't change."),
             _c("/breaklist guild [page]",
                "The list of everyone who is on the breaklist now, with the date they were added, their days "
                "in the guild and the GEXP they owe."),

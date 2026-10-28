@@ -564,23 +564,38 @@ class Ctx:
 class SearchModal(discord.ui.Modal, title="Find a player in the top"):
     ign = discord.ui.TextInput(label="Minecraft username", max_length=16, required=True)
 
-    def __init__(self, view):
+    def __init__(self, hub_view):
         super().__init__()
-        self.view = view
+        self.hub_view = hub_view
 
     async def on_submit(self, interaction):
         import top10
-        ctx = self.view.ctx
-        found = await top10.locate(ctx.bot.np_core, ctx.week or "last", str(self.ign))
-        if found is None:
-            await interaction.response.send_message(f"I can't find **{esc(str(self.ign))}** in this top.", ephemeral=True)
-            return
-        pos, uuid, name, gexp = found
-        ctx.mark = uuid
-        ctx.found = f"🔍 **{esc(name)}** is **#{pos}** with **{n(gexp)}** GEXP."
-        await interaction.response.defer()
-        out = await render(ctx, "top", (pos - 1) // 10 + 1)
-        await interaction.edit_original_response(**await message_kwargs(ctx, "top", out))
+        ctx = self.hub_view.ctx
+        await interaction.response.defer()               # looking up the names can take more than 3 seconds
+        try:
+            found = await top10.locate(ctx.bot.np_core, ctx.week or "last", str(self.ign))
+            if found is None:
+                await interaction.followup.send(f"I can't find **{esc(str(self.ign))}** in this top.",
+                                                ephemeral=True, allowed_mentions=NO_MENTIONS)
+                return
+            pos, uuid, name, gexp = found
+            ctx.mark = uuid
+            ctx.found = f"🔍 **{esc(name)}** is **#{pos}** with **{n(gexp)}** GEXP."
+            out = await render(ctx, "top", (pos - 1) // 10 + 1)
+            await interaction.edit_original_response(**await message_kwargs(ctx, "top", out))
+        except Exception as e:
+            log.exception("Search in the top failed")
+            await interaction.followup.send(f"⚠️ The search failed: `{type(e).__name__}: {e}`"[:1800], ephemeral=True)
+
+    async def on_error(self, interaction, error):
+        log.exception("Search modal error", exc_info=error)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"⚠️ {type(error).__name__}: {error}"[:1800], ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ {type(error).__name__}: {error}"[:1800], ephemeral=True)
+        except Exception:
+            pass
 
 
 class HubView(discord.ui.View):

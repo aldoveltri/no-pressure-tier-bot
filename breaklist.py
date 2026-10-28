@@ -678,6 +678,94 @@ def draw_history(name, head, entries, total, page, pages):
     return g._png(img)
 
 
+def draw_gexp_history(name, head, status, weeks, daily, required):
+    """weeks: [(label, total, days saved)] newest first. daily: [(mm/dd, gexp)] oldest first (last days saved)."""
+    row_h, top, id_h = 50, g.HEADER_H + 16, 110
+    daily_h = 150 if daily else 0
+    height = top + id_h + 14 + 40 + len(weeks) * (row_h + 8) + (daily_h + 14 if daily else 0) + g.FOOTER_H
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, "GEXP HISTORY", f"{GUILD_NAME_DISPLAY} · week by week")
+    d.rounded_rectangle([g.PAD, top, g.WIDTH - g.PAD, top + id_h], radius=16, fill=g.ROW_BG)
+    d.rounded_rectangle([g.PAD, top, g.PAD + 8, top + id_h], radius=4, fill=g.ACCENT)
+    g._paste_head(img, d, head, g.PAD + 34, top + 15, 80, radius=12)
+    _name_flag(img, d, g.PAD + 34 + 80 + 22, top + 42, name, g.get_font(36, True))
+    d.text((g.PAD + 34 + 80 + 22, top + 82), status, font=g.get_font(17, True), fill=g.SOFT, anchor="lm")
+    d.text((g.WIDTH - g.PAD - 30, top + 42), n(required), font=g.get_font(34, True), fill=g.ACCENT, anchor="rm")
+    d.text((g.WIDTH - g.PAD - 30, top + 80), "REQUIREMENT PER WEEK", font=g.get_font(13, True), fill=g.MUTED, anchor="rm")
+    y = top + id_h + 14
+    d.text((g.PAD + 4, y + 14), "WEEKS (TUESDAY TO MONDAY, ET)", font=g.get_font(14, True), fill=g.MUTED, anchor="lm")
+    y += 40
+    top_val = max([required] + [w[1] for w in weeks]) or 1
+    bx0, bx1 = g.PAD + 190, g.WIDTH - g.PAD - 170
+    for label, total, saved in weeks:
+        ok = total >= required
+        d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + row_h], radius=12, fill=g.ROW_BG)
+        d.text((g.PAD + 20, y + row_h // 2), label, font=g.get_font(18, True), fill=g.TEXT, anchor="lm")
+        d.rounded_rectangle([bx0, y + 16, bx1, y + row_h - 16], radius=9, fill=g.TRACK)
+        w = int((bx1 - bx0) * total / top_val)
+        if w > 0:
+            d.rounded_rectangle([bx0, y + 16, bx0 + max(10, w), y + row_h - 16], radius=9, fill=g.GREEN if ok else g.RED)
+        rx = bx0 + int((bx1 - bx0) * required / top_val)
+        d.line([rx, y + 10, rx, y + row_h - 10], fill=g.TEXT, width=2)
+        d.text((g.WIDTH - g.PAD - 20, y + row_h // 2 - (7 if saved < 7 else 0)), n(total), font=g.get_font(20, True),
+               fill=g.GREEN if ok else g.RED, anchor="rm")
+        if saved < 7:
+            d.text((g.WIDTH - g.PAD - 20, y + row_h // 2 + 14), f"{saved}/7 days saved", font=g.get_font(12),
+                   fill=g.MUTED, anchor="rm")
+        y += row_h + 8
+    if daily:
+        y += 6
+        d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + daily_h], radius=14, fill=g.ROW_BG)
+        d.text((g.PAD + 20, y + 22), "LAST DAYS SAVED", font=g.get_font(14, True), fill=g.MUTED, anchor="lm")
+        mx = max(v for _, v in daily) or 1
+        cw = (g.WIDTH - 2 * g.PAD - 40) / len(daily)
+        base = y + daily_h - 34
+        for i, (lab, v) in enumerate(daily):
+            cx = g.PAD + 20 + i * cw
+            h = int(60 * v / mx)
+            d.rounded_rectangle([cx + 3, base - h, cx + cw - 3, base], radius=4, fill=g.ACCENT)
+            d.text((cx + cw / 2, base - h - 9), (f"{v / 1000:.0f}k" if v >= 10000 else str(v)), font=g.get_font(11, True),
+                   fill=g.SOFT, anchor="mm")
+            d.text((cx + cw / 2, base + 14), lab, font=g.get_font(11), fill=g.MUTED, anchor="mm")
+    g._footer(d, height, "Line = requirement")
+    return g._png(img)
+
+
+def draw_pro_list(rows, heads, page, pages, total, limit):
+    """rows: [{ign, uuid, days, left, how, win}] already sorted (most urgent first)."""
+    row_h, top = 92, g.HEADER_H + 16
+    height = top + len(rows) * (row_h + 10) + g.FOOTER_H + 4
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, "PRO LIST", f"{GUILD_NAME_DISPLAY} · {total} pro{'s' if total != 1 else ''} · a C+ win every {limit} days")
+    y = top
+    for r in rows:
+        demote = r["days"] >= limit
+        color = g.RED if demote else (g.ACCENT if r["days"] < limit - 8 else (255, 200, 61))
+        d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + row_h], radius=14, fill=g.ROW_BG)
+        d.rounded_rectangle([g.PAD, y, g.PAD + 8, y + row_h], radius=4, fill=color)
+        g._paste_head(img, d, heads.get(r["uuid"]), g.PAD + 26, y + 16, 60, radius=10)
+        x = g.PAD + 26 + 60 + 18
+        _name_flag(img, d, x, y + 22, r["ign"], g.get_font(24, True))
+        how = "Got Pro: " + (r["how"] or "not specified")
+        for i, line in enumerate(_wrap_lines(how, g.get_font(14), 330)[:2]):
+            d.text((x, y + 50 + i * 19), line, font=g.get_font(14), fill=g.SOFT, anchor="lm")
+        bx0, bx1 = x + 350, g.WIDTH - g.PAD - 150
+        d.rounded_rectangle([bx0, y + 34, bx1, y + 50], radius=8, fill=g.TRACK)
+        frac = min(1.0, r["days"] / limit)
+        d.rounded_rectangle([bx0, y + 34, bx0 + max(10, int((bx1 - bx0) * frac)), y + 50], radius=8, fill=color)
+        d.text((bx0, y + 68), f"{int(r['days'])}d since " + ("last C+ win" if r["win"] else "being added"),
+               font=g.get_font(13), fill=g.MUTED, anchor="lm")
+        d.text((g.WIDTH - g.PAD - 22, y + 38), "DEMOTE" if demote else f"{limit - int(r['days'])}d left",
+               font=g.get_font(24, True), fill=color, anchor="rm")
+        d.text((g.WIDTH - g.PAD - 22, y + 66), "30-DAY RULE" if not demote else "30 DAYS PASSED", font=g.get_font(12, True),
+               fill=g.MUTED, anchor="rm")
+        y += row_h + 10
+    g._footer(d, height, f"Page {page}/{pages}")
+    return g._png(img)
+
+
 # ---------- GEXP per day (breaklist) and pasted guild history ----------
 
 def draw_gexp_days(name, head, rows, total, required):
@@ -3045,15 +3133,16 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
             mark = "✅" if total >= gc.WEEKLY_REQ else "❌"
             lines.append(f"{mark} `{st.strftime('%m/%d')} - {end.strftime('%m/%d')}` **{n(total)}** GEXP"
                          + (f" · {len(wk_of[st])}/7 days saved" if len(wk_of[st]) < 7 else ""))
-        newest = sorted(by_day, reverse=True)[:14]
-        daily = " · ".join(f"{d[5:].replace('-', '/')} {n(by_day[d])}" for d in newest)
+        newest = sorted(by_day)[-14:]
         status = ("In the guild now" if in_guild else
                   (f"Left the guild on {gc.fmt_date(from_iso(left['left_at']))}" if left else "Not in the guild now"))
-        embed = discord.Embed(title=f"GEXP history of {name}", color=0x00C8E6,
-                              description=f"**{status}** · requirement {n(gc.WEEKLY_REQ)} per week\n\n" + "\n".join(lines))
-        embed.add_field(name="Last days saved (day GEXP)", value=daily[:1000], inline=False)
-        embed.set_footer(text=f"Last day saved: {last_day[5:].replace('-', '/')} · weeks start on Tuesday (Eastern Time)")
-        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
+        wk = [(f"{st.strftime('%m/%d')} - {(st + timedelta(days=6)).strftime('%m/%d')}",
+               sum(v for _, v in wk_of[st]), len(wk_of[st])) for st in starts]
+        daily = [(d_[5:].replace("-", "/"), by_day[d_]) for d_ in newest]
+        await load_flag(uuid, name)
+        head = (await g._fetch_heads([(uuid, name)])).get(uuid)
+        card = await asyncio.to_thread(draw_gexp_history, name, head, status, wk, daily, gc.WEEKLY_REQ)
+        await interaction.followup.send(file=send_file(card, "gexp_history.png"), allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="remind", description="Remind one player about the GEXP requirement now, with the buttons (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",

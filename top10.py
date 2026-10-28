@@ -37,20 +37,23 @@ def promotion_text(rank):
 
 
 async def locate(core, week, query):
-    """(position, uuid, name, gexp) of the player that matches the typed name in the week's ranking, or None."""
-    rows, _, _ = await ranking(core, week)
-    q = (query or "").strip().lower()
+    """(position, uuid, name, gexp) of the typed Minecraft username in the week's ranking, or None.
+    The name is turned into a uuid once (no lookup for every member), then found in the ranking."""
+    q = (query or "").strip()
     if not q:
         return None
-    names = await asyncio.gather(*(core.name_for(r["uuid"]) for r in rows))
-    best = None
-    for i, (r, nm) in enumerate(zip(rows, names), 1):
-        low = (nm or "").lower()
-        if low == q:
-            return i, r["uuid"], nm, r["total"]
-        if best is None and q in low:
-            best = (i, r["uuid"], nm, r["total"])
-    return best
+    try:
+        res = await bl.get_uuid(q)
+    except Exception:
+        res = None
+    if not res:
+        return None
+    uuid, name = res
+    rows, _, _ = await ranking(core, week)
+    for i, r in enumerate(rows, 1):
+        if r["uuid"] == uuid:
+            return i, uuid, name, r["total"]
+    return None
 
 
 async def ranking(core, week):
@@ -147,7 +150,7 @@ class SearchModal(discord.ui.Modal, title="Find a player in the top"):
     async def on_submit(self, interaction):
         found = await locate(self.view.core, self.view.week, str(self.ign))
         if found is None:
-            await interaction.response.send_message(f"I can't find **{esc(str(self.ign))}** in this top.", ephemeral=True)
+            await interaction.response.send_message(f"**{esc(str(self.ign))}** is not in this top (not a guild member, no GEXP that week, or not a valid username).", ephemeral=True)
             return
         pos, uuid, name, gexp = found
         self.view.page, self.view.mark = (pos - 1) // 10 + 1, uuid

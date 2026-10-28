@@ -575,7 +575,7 @@ class SearchModal(discord.ui.Modal, title="Find a player in the top"):
         try:
             found = await top10.locate(ctx.bot.np_core, ctx.week or "last", str(self.ign))
             if found is None:
-                await interaction.followup.send(f"I can't find **{esc(str(self.ign))}** in this top.",
+                await interaction.followup.send(f"**{esc(str(self.ign))}** is not in this top (not a guild member, no GEXP that week, or not a valid username).",
                                                 ephemeral=True, allowed_mentions=NO_MENTIONS)
                 return
             pos, uuid, name, gexp = found

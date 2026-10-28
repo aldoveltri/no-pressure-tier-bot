@@ -64,6 +64,25 @@ def fit(d, text, font, width):
     return text + "…"
 
 
+def fit_font(d, text, width, size, bold=True, least=11):
+    """The biggest font (from `size` down to `least`) in which the text fits the width."""
+    while size > least and d.textlength(str(text), font=g.get_font(size, bold)) > width:
+        size -= 1
+    return g.get_font(size, bold)
+
+
+def wrap2(d, text, font, width):
+    """Splits the text in two lines that fit the width (the second one is cut with ... when needed)."""
+    words, l1 = text.split(" "), ""
+    i = 0
+    while i < len(words) and d.textlength((l1 + " " + words[i]).strip(), font=font) <= width:
+        l1 = (l1 + " " + words[i]).strip()
+        i += 1
+    if not l1:                              # a single huge word
+        return fit(d, text, font, width), ""
+    return l1, fit(d, " ".join(words[i:]), font, width)
+
+
 def draw_hub(title, subtitle, head, name, chips, panels, footer, tag=None, flag=True):
     """panels: [(label, big text, small text, color)] in two columns. chips: [(text, color)]."""
     gap, ph = 14, 112
@@ -78,11 +97,10 @@ def draw_hub(title, subtitle, head, name, chips, panels, footer, tag=None, flag=
     d.rounded_rectangle([g.PAD, top, g.PAD + 8, top + id_h], radius=4, fill=g.ACCENT)
     if tag is None:
         g._paste_head(img, d, head, g.PAD + 34, top + 15, 100, radius=12)
-    else:
-        d.rounded_rectangle([g.PAD + 34, top + 15, g.PAD + 134, top + 115], radius=12, fill=(58, 62, 72))
-        d.text((g.PAD + 84, top + 65), fit(d, tag, g.get_font(30, True), 90), font=g.get_font(30, True),
-               fill=g.ACCENT, anchor="mm")
-    nx = g.PAD + 34 + 100 + 24
+        nx = g.PAD + 34 + 100 + 24
+    else:                                   # the guild: no picture, the tag becomes the first pill
+        nx = g.PAD + 34
+        chips = [(tag, g.ACCENT)] + list(chips)
     if tag is None and flag:
         _name_flag(img, d, nx, top + 42, name, g.get_font(38, True))
     else:
@@ -104,9 +122,17 @@ def draw_hub(title, subtitle, head, name, chips, panels, footer, tag=None, flag=
         y = y0 + (i // 2) * (ph + gap)
         d.rounded_rectangle([x, y, x + pw, y + ph], radius=14, fill=g.ROW_BG)
         d.text((x + 22, y + 24), label, font=g.get_font(14, True), fill=g.MUTED, anchor="lm")
-        d.text((x + 22, y + 56), fit(d, big, g.get_font(26, True), pw - 44), font=g.get_font(26, True),
-               fill=color or g.TEXT, anchor="lm")
-        d.text((x + 22, y + 91), fit(d, small, g.get_font(16), pw - 44), font=g.get_font(16), fill=g.MUTED, anchor="lm")
+        w = pw - 44
+        bf = fit_font(d, big, w, 26, True, 16)
+        if d.textlength(str(big), font=bf) > w:                     # still too long: two small lines
+            bf = g.get_font(15, True)
+            l1, l2 = wrap2(d, str(big), bf, w)
+            d.text((x + 22, y + 46), l1, font=bf, fill=color or g.TEXT, anchor="lm")
+            d.text((x + 22, y + 66), l2, font=bf, fill=color or g.TEXT, anchor="lm")
+        else:
+            d.text((x + 22, y + 56), fit(d, big, bf, w), font=bf, fill=color or g.TEXT, anchor="lm")
+        sf = fit_font(d, small, w, 16, False, 11)
+        d.text((x + 22, y + 91), fit(d, small, sf, w), font=sf, fill=g.MUTED, anchor="lm")
     g._footer(d, height, footer)
     return g._png(img)
 
@@ -248,9 +274,9 @@ def player_panels(d):
         extra.append("Pro")
         chips.append(("PRO", GOLD))
     if d["wait"] and d["wait"]["status"] == "waiting":
-        extra.append("On the waiting list")
+        extra.append("Waiting list")
     if d["country"]:
-        extra.append(f"Country {d['country']['code'].upper()}")
+        extra.append(d['country']['code'].upper())
     panels.append(("EXTRAS", " · ".join(extra) if extra else "Nothing special", "Pro list · waiting list · country",
                    g.TEXT if extra else g.MUTED))
     return panels, chips
@@ -431,10 +457,12 @@ async def guild_section(ctx, key, page):
         return Out(png=png, name="info.png")
     if key == "top":
         import top10
-        res = await top10.build_page(core, ctx.week or "last", page)
+        res = await top10.build_page(core, ctx.week or "last", page, ctx.mark)
         if res is None:
             return Out(content="I have no saved GEXP for that week.")
         text, card, page, pages = res
+        if ctx.found:
+            text = ctx.found + "\n" + text
         return Out(content=text, png=card, name="top10.png", pages=pages, page=page)
     if key == "ranks":
         d = await gather_guild(bot)
@@ -529,6 +557,30 @@ class Ctx:
         self.bot, self.owner_id, self.kind, self.uuid, self.name = bot, owner_id, kind, uuid, name
         self.spec = "-"        # 1v1 section: lifetime / mode / season / year
         self.week = "last"     # top GEXP section
+        self.mark = None       # uuid highlighted after a search in the top
+        self.found = None      # "🔍 name is #N" line shown above the top
+
+
+class SearchModal(discord.ui.Modal, title="Find a player in the top"):
+    ign = discord.ui.TextInput(label="Minecraft username", max_length=16, required=True)
+
+    def __init__(self, view):
+        super().__init__()
+        self.view = view
+
+    async def on_submit(self, interaction):
+        import top10
+        ctx = self.view.ctx
+        found = await top10.locate(ctx.bot.np_core, ctx.week or "last", str(self.ign))
+        if found is None:
+            await interaction.response.send_message(f"I can't find **{esc(str(self.ign))}** in this top.", ephemeral=True)
+            return
+        pos, uuid, name, gexp = found
+        ctx.mark = uuid
+        ctx.found = f"🔍 **{esc(name)}** is **#{pos}** with **{n(gexp)}** GEXP."
+        await interaction.response.defer()
+        out = await render(ctx, "top", (pos - 1) // 10 + 1)
+        await interaction.edit_original_response(**await message_kwargs(ctx, "top", out))
 
 
 class HubView(discord.ui.View):
@@ -546,6 +598,10 @@ class HubView(discord.ui.View):
             prev.callback, nxt.callback = self._page_cb(-1), self._page_cb(1)
             self.add_item(prev)
             self.add_item(nxt)
+        if ctx.kind == "guild" and key == "top":
+            find = discord.ui.Button(label="🔍 Search", style=discord.ButtonStyle.primary, row=4)
+            find.callback = self._find_cb
+            self.add_item(find)
         if options:
             sel = discord.ui.Select(placeholder=options["placeholder"], row=3,
                                     options=[discord.SelectOption(label=l[:100], value=v, default=(v == options["current"]))
@@ -553,8 +609,15 @@ class HubView(discord.ui.View):
             sel.callback = self._select_cb(sel, options["kind"])
             self.add_item(sel)
 
+    async def _find_cb(self, interaction):
+        if interaction.user.id != self.ctx.owner_id:
+            await interaction.response.send_message("Use /info yourself to get your own buttons.", ephemeral=True)
+            return
+        await interaction.response.send_modal(SearchModal(self))
+
     def _section_cb(self, key):
         async def cb(interaction):
+            self.ctx.mark = self.ctx.found = None
             await self.show(interaction, key, 1)
         return cb
 
@@ -569,6 +632,7 @@ class HubView(discord.ui.View):
                 self.ctx.spec = sel.values[0]
             else:
                 self.ctx.week = sel.values[0]
+                self.ctx.mark = self.ctx.found = None
             await self.show(interaction, self.key, 1)
         return cb
 

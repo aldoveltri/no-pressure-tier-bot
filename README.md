@@ -56,7 +56,7 @@ Daily post (`ROAD_POST_TIME_ET`, default 23:59 ET) in the road forum: GEXP gap t
 - `/test` (administrators): sends a test message to every channel set in the variables and tells you which ones work.
 
 ### 1v1 (unchanged)
-`/link /unlink /profile /history /matches /cancelled /paused /leaderboard /info /modes /rules /guide /ping` and staff `/settier /setelo /match /forfeit /undo /pause /resume /droppause /removeplayer /refreshnames`. Admin only: `/endseason /endyear /resetall` (resetall is for tests: remove before launch). Every 1v1 result is also posted in the 1v1 logs channel.
+`/link /unlink /profile /history /matches /cancelled /paused /leaderboard /info /rules /guide` and staff `/settier /setelo /match /forfeit /undo /pause /resume /droppause /removeplayer /refreshnames`. Admin only: `/endseason /endyear /cleanup` (cleanup deletes test data by type). Every 1v1 result is also posted in the 1v1 logs channel.
 
 ## 4. Project files
 main.py, database.py, graphics.py, guide.py, guide_cards.py, evidence.py, evidence_cards.py, elo.py, config.py, mojang.py, hypixel.py, namesync.py, **gexpcalc.py** (requirement maths), **breaklist.py** (breaklist, excuses, gexp, notices, road), requirements.txt.
@@ -125,7 +125,6 @@ Channels are read at every use: change the ID in the panel and restart, no code 
 
 ## New
 - `/match ... date:` optional date; `/setdate` makes a new card.
-- `/elocalc p1_elo p2_elo` hypothetical elo change.
 - `/alerts [alert] [on|off]`: toggles 1v1 logs, match dates, blacklist posts, Urchin alerts (state in the `kv` table).
 - `/logins ign [days]`: login times (data saved by polling Hypixel `lastLogin`, ~15 min cycle, needs `HYPIXEL_API_KEY`).
 - Country flags show only when a country is set; 1v1 result/pause/settier/setelo cards have no flags.

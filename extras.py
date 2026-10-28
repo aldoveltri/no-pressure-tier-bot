@@ -65,30 +65,35 @@ async def days_board(core, page=1):
     return embed, page, pages
 
 
+class DaysView(discord.ui.View):
+    """Previous / Next buttons under /days leaderboard."""
+
+    def __init__(self, core, page, pages):
+        super().__init__(timeout=900)
+        self.core, self.page = core, page
+        self.prev = discord.ui.Button(label="◀ Previous", style=discord.ButtonStyle.primary, disabled=page <= 1)
+        self.nxt = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.primary, disabled=page >= pages)
+        self.prev.callback, self.nxt.callback = self.go(-1), self.go(1)
+        self.add_item(self.prev)
+        self.add_item(self.nxt)
+
+    def go(self, delta):
+        async def cb(interaction):
+            await interaction.response.defer()
+            res = await days_board(self.core, self.page + delta)
+            if res is None:
+                await interaction.edit_original_response(content="I can't read the guild member list right now.", embed=None, view=None)
+                return
+            embed, page, pages = res
+            await interaction.edit_original_response(embed=embed, view=DaysView(self.core, page, pages))
+        return cb
+
+
 class DaysCog(commands.GroupCog, name="days", description="Days spent in the guild"):
     def __init__(self, core):
         self.core = core
         super().__init__()
 
-    @app_commands.command(name="player", description="Total days a player has spent in the guild (saved days included)")
-    @app_commands.describe(ign="Minecraft username")
-    async def player(self, interaction: discord.Interaction, ign: str):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        total, state = await self.core.days_info(uuid)
-        banked = (await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,)) or {"banked": 0})["banked"]
-        where = {"guild": "in the guild now", "breaklist": "on the breaklist (days are frozen)",
-                 "unknown": "not in the guild"}[state]
-        embed = discord.Embed(title=f"Days in guild: {name}", color=0x00C8E6)
-        embed.set_thumbnail(url=f"https://mc-heads.net/head/{uuid}")
-        embed.add_field(name="Total", value=f"**{int(total)}** days", inline=True)
-        embed.add_field(name="Saved from before", value=f"{banked:g} days", inline=True)
-        embed.add_field(name="Now", value=where, inline=False)
-        embed.set_footer(text=f"Veteran at {bl.VETERAN_DAYS} days · staff can fix the saved days with /breaklist setdays or adddays")
-        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="leaderboard", description="Members of the guild ordered by total days in the guild")
     @app_commands.describe(page="Page number")
@@ -98,7 +103,7 @@ class DaysCog(commands.GroupCog, name="days", description="Days spent in the gui
         if res is None:
             await interaction.followup.send("I can't read the guild member list right now.")
             return
-        await interaction.followup.send(embed=res[0])
+        await interaction.followup.send(embed=res[0], view=DaysView(self.core, res[1], res[2]))
 
 
 # ======================================================================================

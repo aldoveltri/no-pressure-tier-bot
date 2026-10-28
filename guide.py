@@ -93,7 +93,6 @@ TIER_PAGES = [
             _c("/info", "The same as /profile but for the guild: members, GEXP, breaklist, excused, purge, punishments, "
                "blacklist, 1v1s. Buttons: Top GEXP, Ranks, Breaklist, Excused, Purge, Punishments, Blacklist, Days, "
                "Pro & waitlist, Road, 1v1 stats."),
-            _c("/ping", "Checks that the bot is online."),
         ],
     },
     {
@@ -129,7 +128,6 @@ TIER_PAGES = [
             _b("At the end of the year every mode resets too and its final leaderboard is "
                "saved: /leaderboard mode:NAME year:N."),
             _b("Paused matches (/pause) only exist in the normal mode."),
-            _c("/modes", "Shows the game modes."),
         ],
     },
     {
@@ -216,8 +214,6 @@ TIER_PAGES += [
                "automatically, the result card shows the match number and it is also posted in the 1v1 logs channel "
                "(unless /alerts has switched that off). The optional date (2026/10/21 or 2026/10/21 6:00 PM, "
                "Eastern Time) logs a match played in the past."),
-            _c("/elocalc player1_elo player2_elo [mode]",
-               "What if: the elo each player would gain or lose for every score, whoever wins. Nothing is saved."),
             _c("/alerts [alert] [state]",
                "Staff. Switches the automatic posts on or off: 1v1 logs, match date changes, blacklist posts, "
                "Urchin alerts (or all). Without options it shows what is on. The data is always saved."),
@@ -331,6 +327,10 @@ BREAKLIST_PAGES = [
                "Administrators. List and create backups. /backup restore what:<breaklist, 1v1s, mutes, blacklist, links or "
                "everything> backup:<pick one> (or upload a .db file) shows a preview; add confirm:RESTORE to really restore "
                "only those tables. A backup of the current data is saved first."),
+            _c("/cleanup what [ign]",
+               "Administrators. Deletes test data by type: 1v1s, mutes and warnings, breaklist, blacklist, reports, GEXP "
+               "history, pro and waiting list, parties and tags, links, or everything. With ign only that player. It shows "
+               "what will be deleted, asks to confirm, saves a backup first and restarts the counters from 1."),
             _c("/breaklist guild [page]",
                "The list of everyone who is on the breaklist now, with the date they were added, their days "
                "in the guild and the GEXP they owe."),

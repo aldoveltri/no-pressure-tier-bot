@@ -437,6 +437,7 @@ async def setup_hook():
     await bot.load_extension("backup")
     bot.np_hooks = {"profile_card": profile_card, "profile_options": profile_options, "history_page": history_page,
                     "info_image": info_image, "info_data": get_info}
+    await bot.load_extension("cleanup")
     await bot.load_extension("hub")
 
 bot.setup_hook = setup_hook
@@ -472,10 +473,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 # ---------- utility ----------
-
-@bot.tree.command(name="ping", description="Check if the bot is online")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message("Pong!")
 
 
 # ---------- rules ----------
@@ -558,89 +555,6 @@ async def guide(interaction: discord.Interaction):
     view = GuideView(interaction.user.id, cat, page)
     view.cache[key] = data
     view.message = await interaction.followup.send(file=png_file(data, "guide.png"), view=view)
-
-
-# ---------- game modes ----------
-
-@bot.tree.command(name="modes", description="Show the game modes")
-async def modes(interaction: discord.Interaction):
-    await interaction.response.defer()
-    blocks = [
-        {"type": "heading", "text": "Normal (default)"},
-        {"type": "bullet", "text":
-         "The base mode: first to 3, with seasons and years. It is used when you don't choose a mode."},
-        {"type": "heading", "text": "Other modes"},
-    ]
-    for m in MODES:
-        blocks.append({"type": "bullet", "text": f"{m['name']}: first to {FIRST_TO[m['system']]}"})
-    blocks.append({"type": "paragraph", "text":
-                   "To use a mode, choose it in the mode option of /history, /leaderboard and the "
-                   "other commands. Each mode has its own elo, tiers and leaderboard, only lifetime "
-                   "(no seasons), and resets at the end of the year like the normal one."})
-    data = await build_text_image("GAME MODES", GUILD_NAME, blocks)
-    await interaction.followup.send(file=png_file(data, "modes.png"))
-
-
-# ---------- season / year suggestions for the commands ----------
-
-async def season_choices(current: str):
-    out = []
-    for r in await list_seasons():
-        if current and current not in str(r["id"]):
-            continue
-        label = f"Season {r['id']}" + (" (current)" if r["ended_at"] is None else "")
-        out.append(app_commands.Choice(name=label, value=r["id"]))
-    return out[:25]
-
-
-async def year_choices(current: str):
-    out = []
-    for r in await list_years():
-        if current and current not in str(r["id"]):
-            continue
-        out.append(app_commands.Choice(name=f"Year {r['id']}", value=r["id"]))
-    return out[:25]
-
-
-# ---------- linking (always verified on Hypixel) ----------
-
-async def check_hypixel_ownership(interaction: discord.Interaction, uuid: str, name: str) -> bool:
-    """Checks on Hypixel that this account has the caller's Discord username set.
-    Sends the reason and returns False if the check fails."""
-    try:
-        found, handle = await get_hypixel_discord(uuid)
-    except NoApiKey:
-        await interaction.followup.send(
-            "Linking is not available yet (the bot has no Hypixel API key). Please ask the staff to link you.")
-        return False
-    except KeyRejected:
-        log.error("The Hypixel API key was rejected: it has probably expired and needs renewing.")
-        await interaction.followup.send(
-            "Linking is temporarily unavailable. Please try again later or ask the staff to link you.")
-        return False
-    except (HypixelError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-        log.warning("Hypixel check failed: %s", e)
-        await interaction.followup.send("Hypixel is not responding right now. Please try again in a moment.")
-        return False
-
-    my_name = interaction.user.name
-    if not found:
-        await interaction.followup.send(
-            f"Hypixel has no data for **{name}**. Have you ever joined the server with this account?")
-        return False
-    if handle is None:
-        await interaction.followup.send(
-            f"**{name}** has no Discord name set on Hypixel, so it can't be verified.\n"
-            f"On Hypixel, open your profile (the player head in the lobby), go to "
-            f"**Social Media → Discord** and enter your Discord username: `{my_name}`.\n"
-            f"Then run `/link` again (it can take a minute to update).")
-        return False
-    if normalize_handle(handle) != normalize_handle(my_name):
-        await interaction.followup.send(
-            f"The Discord name set on Hypixel for **{name}** (`{handle}`) doesn't match your Discord "
-            f"username (`{my_name}`). Fix it on Hypixel and run `/link` again.")
-        return False
-    return True
 
 
 @bot.tree.command(name="link", description="Link your Discord account to your Minecraft account (verified on Hypixel)")
@@ -1134,34 +1048,6 @@ async def importmatches(interaction: discord.Interaction, file: discord.Attachme
         if len(errors) > 15:
             files.append(discord.File(io.BytesIO("\n".join(errors).encode()), filename="skipped.txt"))
     await interaction.followup.send(content=body, files=files)
-
-
-@bot.tree.command(name="elocalc", description="What if: the elo each player would gain or lose in a match (nothing is saved)")
-@app_commands.describe(player1_elo="Elo of player 1", player2_elo="Elo of player 2",
-                       mode="Game mode (leave empty for the normal mode)")
-async def elocalc(interaction: discord.Interaction, player1_elo: app_commands.Range[int, 0, 100000],
-                  player2_elo: app_commands.Range[int, 0, 100000], mode: Optional[str] = None):
-    await interaction.response.defer()
-    ok, md = await resolve_mode(interaction, mode)
-    if not ok:
-        return
-    system = mode_system(md)
-    first_to = FIRST_TO[system]
-
-    def lines(elo_w, elo_l):
-        out = []
-        for lg in range(first_to):
-            gain, loss = calcola(elo_w, elo_l, lg, system)
-            out.append(f"**{first_to}-{lg}**: winner {gain:+d} → {elo_w + gain} · loser {loss:+d} → {elo_l + loss}")
-        return "\n".join(out)
-
-    embed = discord.Embed(title="Hypothetical match" + (f" · {md['name']}" if md else ""), color=0x00C8E6)
-    embed.description = (f"**Player 1**: {player1_elo} ({tier_from_elo(player1_elo)})\n"
-                         f"**Player 2**: {player2_elo} ({tier_from_elo(player2_elo)})")
-    embed.add_field(name="If player 1 wins", value=lines(player1_elo, player2_elo), inline=False)
-    embed.add_field(name="If player 2 wins", value=lines(player2_elo, player1_elo), inline=False)
-    embed.set_footer(text="Nothing is saved: it is only a calculation.")
-    await interaction.followup.send(embed=embed)
 
 
 ALERT_CHOICES = [app_commands.Choice(name=v[0], value=k) for k, v in alerts.ALERTS.items()]
@@ -1750,20 +1636,6 @@ async def leaderboard_year_ac(interaction: discord.Interaction, current: str):
     return await year_choices(current)
 
 
-@bot.tree.command(name="resetall", description="TEST ONLY: delete ALL data and start from scratch (administrators)")
-@app_commands.describe(confirm="Type RESET EVERYTHING to confirm")
-async def resetall(interaction: discord.Interaction, confirm: str):
-    member = interaction.user
-    if not (isinstance(member, discord.Member) and member.guild_permissions.administrator):
-        await interaction.response.send_message("Only server administrators can use this command.", ephemeral=True)
-        return
-    if confirm.strip() != "RESET EVERYTHING":
-        await interaction.response.send_message("Type exactly `RESET EVERYTHING` in the confirm option.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    backup = backup_db()
-    await reset_all_data()
-    await interaction.followup.send(f"🗑️ Everything was deleted. A backup was saved as `{backup}`.")
 
 # the "mode" option suggests the game modes; the score of /match suggests the valid scores
 for _cmd in (settier, setelo, match, forfeit_cmd, removeplayer, history,

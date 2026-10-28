@@ -1192,15 +1192,38 @@ class Core:
         head = await self.head_for(uuid, name)
         return await asyncio.to_thread(draw_eligibility, name, head, days, total, owed, source), None
 
+    NAME_TABLES = ("links", "countries", "bl_entries", "blacklist", "mutes", "warnings", "pro_players",
+                   "waitlist", "excuses", "debts", "players")
+
     async def name_for(self, uuid):
+        """The current name from Mojang. If Mojang does not answer: the last name saved, or any name the bot
+        already has for this player in its own tables (never the first letters of the uuid unless nothing is known)."""
         try:
             name = await get_name(uuid)
             if name:
+                try:
+                    if await kv_get("name:" + uuid) != name:
+                        await kv_set("name:" + uuid, name)
+                except Exception:
+                    pass
                 return name
         except Exception:
             pass
-        row = await q_one("SELECT ign FROM bl_entries WHERE uuid = ? ORDER BY id DESC LIMIT 1", (uuid,))
-        return row["ign"] if row else uuid[:8]
+        try:
+            saved = await kv_get("name:" + uuid)
+            if saved:
+                return saved
+        except Exception:
+            pass
+        for table in self.NAME_TABLES:
+            try:
+                row = await q_one(f"SELECT ign FROM {table} WHERE uuid = ? AND ign IS NOT NULL AND ign != '' "
+                                  f"ORDER BY rowid DESC LIMIT 1", (uuid,))
+            except Exception:
+                continue
+            if row and row["ign"]:
+                return row["ign"]
+        return uuid[:8]
 
     async def linked_discord(self, uuid):
         try:
@@ -2322,71 +2345,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             await interaction.followup.send(content=f"✅ **{esc(name)}** was added to the breaklist.{note}",
                                             file=send_file(card, "breaklist.png"))
 
-    @app_commands.command(name="view", description="Show a player's latest breaklist entry, reason and days in guild")
-    @app_commands.describe(ign="Minecraft username of the player")
-    async def view(self, interaction: discord.Interaction, ign: str):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC LIMIT 1", (uuid,))
-        if entry is None:
-            days, state = await self.core.days_info(uuid)
-            extra = f" They have {int(days)} days in the guild." if state != "unknown" and days else ""
-            await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.{extra}")
-            return
-        if entry["status"] == "active":
-            days, _ = await self.core.days_info(uuid)
-            entry = dict(entry, days_total=days)
-        else:
-            days, state = await self.core.days_info(uuid)
-            entry = dict(entry, days_total=days)     # current total (days keep growing after they return)
-        card = await self.core.breaklist_card(entry, "BREAKLIST ENTRY")
-        await interaction.followup.send(file=send_file(card, "breaklist.png"))
 
-    @app_commands.command(name="history", description="Every time a player was on the breaklist: reason and length of the break")
-    @app_commands.describe(ign="Minecraft username of the player", page="Page number")
-    async def history(self, interaction: discord.Interaction, ign: str, page: app_commands.Range[int, 1, 100] = 1):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        rows = await q_all("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC", (uuid,))
-        if not rows:
-            await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
-            return
-        per = 4
-        pages = max(1, math.ceil(len(rows) / per))
-        page = min(page, pages)
-        chunk = rows[(page - 1) * per: page * per]
-        head = await self.core.head_for(uuid, name)
-        card = await asyncio.to_thread(draw_history, name, head, chunk, len(rows), page, pages)
-        await interaction.followup.send(file=send_file(card, "history.png"))
 
-    @app_commands.command(name="details", description="Exact times of a player's latest breaklist entry")
-    @app_commands.describe(ign="Minecraft username of the player")
-    async def details(self, interaction: discord.Interaction, ign: str):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        e = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC LIMIT 1", (uuid,))
-        if not e:
-            await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
-            return
-        e = dict(e)
-        joined, left = from_iso(e.get("joined_at")), from_iso(e["left_at"])
-        in_guild = gc.fmt_duration(e["days_total"] * 86400)
-        lines = [f"**{esc(name)}** · latest breaklist entry ({e['status']})",
-                 f"Time in the guild: **{in_guild}**",
-                 f"Joined: **{gc.fmt_date(joined)} {clock_text(joined)}**" if joined else "Joined: unknown",
-                 f"Breaklisted: **{gc.fmt_date(left)} {clock_text(left)}**",
-                 f"Into the GEXP week when breaklisted: **{into_week(e)}**",
-                 f"GEXP that week: **{n(e['gexp'])}** / required **{n(e['required'])}** (owed {n(e['owed'])})"]
-        await interaction.followup.send("\n".join(lines))
 
     async def guild_card(self, sort, page):
         """(png, page, pages, total) of /breaklist guild in the chosen order, or None when the list is empty."""
@@ -2416,77 +2376,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         view = GuildListView(self, "manual", page, pages)
         await interaction.followup.send(file=send_file(card, "breaklist_guild.png"), view=view)
 
-    @app_commands.command(name="all", description="Everyone who has ever been on the breaklist, also who is back (guild staff)")
-    @app_commands.describe(page="Page number", only="Show only who is still on it or only who is back")
-    @app_commands.choices(only=[app_commands.Choice(name="Still on the breaklist", value="active"),
-                                app_commands.Choice(name="Back in the guild", value="returned")])
-    @app_commands.check(staff_check)
-    async def all_history(self, interaction: discord.Interaction, page: app_commands.Range[int, 1, 200] = 1,
-                          only: Optional[app_commands.Choice[str]] = None):
-        await interaction.response.defer()
-        if only:
-            rows = await q_all("SELECT * FROM bl_entries WHERE status = ? ORDER BY id DESC", (only.value,))
-        else:
-            rows = await q_all("SELECT * FROM bl_entries ORDER BY id DESC")
-        if not rows:
-            await interaction.followup.send("There is nothing in the breaklist history.")
-            return
-        per = 8
-        pages = max(1, math.ceil(len(rows) / per))
-        page = min(page, pages)
-        chunk = rows[(page - 1) * per: page * per]
-        heads = await g._fetch_heads([(e["uuid"], e["ign"]) for e in chunk])
-        for e in chunk:
-            await load_flag(e["uuid"], e["ign"])
-        card = await asyncio.to_thread(draw_breaklist_all, chunk, heads, page, pages, len(rows))
-        await interaction.followup.send(file=send_file(card, "breaklist_all.png"))
 
-    @app_commands.command(name="reset", description="Delete the WHOLE breaklist (administrators). A backup is saved first")
-    @app_commands.describe(confirm="Type exactly: RESET BREAKLIST", include_days="Also delete the saved days and the GEXP debts")
-    async def reset_all(self, interaction: discord.Interaction, confirm: str, include_days: bool = False):
-        if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
-            await interaction.response.send_message("Only administrators can reset the whole breaklist.", ephemeral=True)
-            return
-        if confirm.strip() != "RESET BREAKLIST":
-            await interaction.response.send_message("Nothing was deleted. To confirm, write exactly `RESET BREAKLIST`.",
-                                                    ephemeral=True)
-            return
-        await interaction.response.defer()
-        path = await asyncio.to_thread(backup_db, "breaklist_reset")
-        count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries"))["c"]
-        await q_run("DELETE FROM bl_entries")
-        await q_run("DELETE FROM bl_requests WHERE status = 'pending'")
-        if include_days:
-            await q_run("DELETE FROM player_days")
-            await q_run("DELETE FROM day_sets")
-            await q_run("DELETE FROM debts")
-        await interaction.followup.send(f"🗑️ The breaklist was reset: **{count}** entries deleted"
-                                        + (", with the saved days and debts" if include_days else " (days and debts kept)")
-                                        + f". Backup: `{path}`.")
 
-    @app_commands.command(name="resetplayer", description="Delete the whole breaklist history of one player (guild staff)")
-    @app_commands.describe(ign="Minecraft username", include_days="Also delete their saved days and GEXP debt")
-    @app_commands.check(staff_check)
-    async def reset_player(self, interaction: discord.Interaction, ign: str, include_days: bool = False):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (uuid,)))["c"]
-        if not count and not include_days:
-            await interaction.followup.send(f"**{esc(name)}** has no breaklist history.", allowed_mentions=NO_MENTIONS)
-            return
-        await asyncio.to_thread(backup_db, "breaklist_player_reset")
-        await q_run("DELETE FROM bl_entries WHERE uuid = ?", (uuid,))
-        await q_run("DELETE FROM bl_requests WHERE uuid = ? AND status = 'pending'", (uuid,))
-        if include_days:
-            await q_run("DELETE FROM player_days WHERE uuid = ?", (uuid,))
-            await q_run("DELETE FROM day_sets WHERE uuid = ?", (uuid,))
-            await q_run("DELETE FROM debts WHERE uuid = ?", (uuid,))
-        await interaction.followup.send(
-            f"🗑️ Breaklist history of **{esc(name)}** deleted ({count} entries"
-            + (", saved days and debt too" if include_days else "") + ").", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="import", description="Add to the bot everyone who has a post in the breaklist forum (guild staff)")
     @app_commands.describe(dry_run="Only show who would be added: nothing is saved")
@@ -2916,21 +2807,6 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         posted, card = await self._repost_card(entry, text)
         await interaction.followup.send(text + (f" Card posted in {posted}." if posted else ""), allowed_mentions=NO_MENTIONS)
 
-    @app_commands.command(name="resetguildhistory", description="Forget the guild history shown for every player (administrators)")
-    @app_commands.describe(confirm="Type exactly: RESET GUILD HISTORY")
-    async def reset_guild_history(self, interaction: discord.Interaction, confirm: str):
-        if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
-            await interaction.response.send_message("Only administrators can do this.", ephemeral=True)
-            return
-        if confirm.strip() != "RESET GUILD HISTORY":
-            await interaction.response.send_message("Nothing was changed. To confirm, write exactly `RESET GUILD HISTORY`.",
-                                                    ephemeral=True)
-            return
-        await interaction.response.defer()
-        path = await asyncio.to_thread(backup_db, "guild_history_reset")
-        await kv_set("guild_history_reset", iso(now_utc()))
-        await interaction.followup.send("🗑️ The guild history of everyone was reset: from now on only the stays after this "
-                                        f"moment are shown. Backup: `{path}`. (Screenshots already posted stay in their threads.)")
 
     @app_commands.command(name="debt", description="Set a player's extra GEXP debt by hand (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player", amount="Extra GEXP owed (0 clears the debt)")
@@ -2947,19 +2823,6 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         await q_run("UPDATE bl_entries SET owed = ? WHERE uuid = ? AND status = 'active'", (amount, uuid))
         await interaction.followup.send(f"✅ **{esc(name)}** owes **{n(amount)}** extra GEXP.")
 
-    @app_commands.command(name="eligibility", description="The last 7 days of GEXP and whether a player meets the requirement")
-    @app_commands.describe(ign="Minecraft username of the player")
-    async def eligibility(self, interaction: discord.Interaction, ign: str):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        card, err = await self.core.eligibility_card(uuid, name)
-        if err:
-            await interaction.followup.send(err)
-            return
-        await interaction.followup.send(file=send_file(card, "gexp.png"))
 
     @app_commands.command(name="notice", description="Post the GEXP notice of one player now, with its buttons (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
@@ -3219,51 +3082,6 @@ class RoadCog(commands.Cog):
         card = await self.core.road_card(data)
         await interaction.followup.send(content=data["text"], file=send_file(card, "road.png"))
 
-    @app_commands.command(name="test", description="Send a test message to every channel set in the variables (administrators)")
-    async def test(self, interaction: discord.Interaction):
-        if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
-            await interaction.response.send_message("Only server administrators can use this command.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        names = [
-            ("BREAKLIST_CHANNEL_ID", "Breaklist forum"),
-            ("INACTIVITY_CHANNEL_ID", "Inactivity notices"),
-            ("EXCUSE_CHANNEL_ID", "Excuse list"),
-            ("ROAD_CHANNEL_ID", "Road to #6 forum"),
-            ("LOGS_1V1_CHANNEL_ID", "1v1 logs"),
-            ("REQUESTS_CHANNEL_ID", "Breaklist and excuse requests"),
-            ("MUTE_LOG_CHANNEL_ID", "Mute logs"),
-            ("BLACKLIST_CHANNEL_ID", "Guild blacklist"),
-            ("EVIDENCE_CHANNEL_ID", "Evidence"),
-        ]
-        lines = []
-        for env_name, label in names:
-            cid = chan_id(env_name)
-            if cid is None:
-                lines.append(f"- {label} (`{env_name}`): NOT SET (messages go in the channel where the command is used)")
-                continue
-            ch = self.core.bot.get_channel(cid)
-            if ch is None:
-                try:
-                    ch = await self.core.bot.fetch_channel(cid)
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    lines.append(f"- {label} (`{env_name}`): FAILED, channel {cid} not found or the bot cannot see it (wrong ID, or the bot is not in that server)")
-                    continue
-            kind = type(ch).__name__
-            where = getattr(getattr(ch, "guild", None), "name", "?")
-            self.core.last_error = ""
-            res = await self.core.post_to(
-                env_name, content=f"Channel test from {interaction.user.display_name}: {label}. You can delete this.",
-                thread_name="Channel test (delete me)")
-            if res:
-                lines.append(f"- {label} (`{env_name}`): OK -> {res} [{kind}]")
-            else:
-                extra = ""
-                if isinstance(ch, discord.Thread):
-                    extra = f" Thread state: archived={ch.archived}, locked={ch.locked} (an ID of a single post, not of the forum?)."
-                lines.append(f"- {label} (`{env_name}`): FAILED [{kind} in server '{where}'] Discord says: {self.core.last_error}.{extra}")
-        await interaction.followup.send("**Channel test**\n" + "\n".join(lines), ephemeral=True)
-
 
 # ======================================================================================
 # country flags, mute logs
@@ -3303,18 +3121,6 @@ class CountryCog(commands.GroupCog, name="country", description="Country flags s
         await q_run("DELETE FROM countries WHERE uuid = ?", (uuid,))
         FLAGS.pop(name.lower(), None)
         await interaction.followup.send(f"Country removed from **{esc(name)}**.")
-
-    @app_commands.command(name="view", description="Show the country of a player")
-    async def view(self, interaction: discord.Interaction, ign: str):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        row = await q_one("SELECT code FROM countries WHERE uuid = ?", (uuid,))
-        await interaction.followup.send(f"{flag_emoji(row['code'])} **{esc(name)}**: {row['code']}" if row
-                                        else f"**{esc(name)}** has no country set.")
-
 
 def parse_mute_length(text):
     """'3d', '12h', '1d12h', '2w', '30m', 'perm' -> timedelta, 'perm' for permanent, None if unreadable."""
@@ -3756,19 +3562,6 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             else:
                 await interaction.followup.send(text, allowed_mentions=MUTE_MENTIONS)
 
-    @app_commands.command(name="view", description="Punishment history of a player: every mute and verbal warning")
-    @app_commands.describe(ign="Minecraft username")
-    async def view(self, interaction: discord.Interaction, ign: str):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        embed = await punishment_embed(uuid, name)
-        if embed is None:
-            await interaction.followup.send(f"**{esc(name)}** has no mutes or warnings.", allowed_mentions=NO_MENTIONS)
-            return
-        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="warnexpiry", description="Change when a verbal warning expires (guild staff)")
     @app_commands.describe(warning="Warning number (shown in /mute view)",
@@ -3907,21 +3700,6 @@ async def logins_embed(uuid, name, days=14):
 class LoginsCog(commands.Cog):
     def __init__(self, core):
         self.core = core
-
-    @app_commands.command(name="logins", description="When a player logs in: earliest, latest, every day, average time on (guild staff)")
-    @app_commands.describe(ign="Minecraft username", days="How many days back (default 14)")
-    @app_commands.check(staff_check)
-    async def logins(self, interaction: discord.Interaction, ign: str, days: app_commands.Range[int, 1, 120] = 14):
-        await interaction.response.defer()
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        embed, text = await logins_embed(uuid, name, days)
-        if embed is None:
-            await interaction.followup.send(text, allowed_mentions=NO_MENTIONS)
-            return
-        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
 
 
 # ======================================================================================

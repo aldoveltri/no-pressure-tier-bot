@@ -134,8 +134,7 @@ class ProCog(commands.GroupCog, name="pro"):
         await interaction.followup.send(f"**{esc(name)}** removed from the Pro list.", ephemeral=True)
 
     @app_commands.command(name="list", description="Pros, how each one got the rank, and the days since their last C+ win")
-    @app_commands.describe(page="Page number")
-    async def list_(self, interaction: discord.Interaction, page: app_commands.Range[int, 1, 50] = 1):
+    async def list_(self, interaction: discord.Interaction):
         await interaction.response.defer()
         rows = await q_all("SELECT * FROM pro_players")
         if not rows:
@@ -144,18 +143,15 @@ class ProCog(commands.GroupCog, name="pro"):
         now, out = now_utc(), []
         for p in rows:
             win, anchor = await last_cplus_win(p["uuid"]), await anchor_of(p)
-            out.append({"uuid": p["uuid"], "ign": p["ign"], "how": p["how"], "win": bool(win),
-                        "days": (now - anchor).total_seconds() / 86400})
-        out.sort(key=lambda x: -x["days"])
-        per = 8
-        pages = max(1, -(-len(out) // per))
-        page = min(page, pages)
-        chunk = out[(page - 1) * per: page * per]
-        for r in chunk:
-            await bl.load_flag(r["uuid"], r["ign"])
-        heads = await bl.g._fetch_heads([(r["uuid"], r["ign"]) for r in chunk])
-        card = await asyncio.to_thread(bl.draw_pro_list, chunk, heads, page, pages, len(out), LIMIT_DAYS)
-        await interaction.followup.send(file=bl.send_file(card, "pro_list.png"))
+            days = (now - anchor).total_seconds() / 86400
+            out.append((days, f"**{esc(p['ign'])}** · {int(days)}d since "
+                              f"{'their last C+ win' if win else 'being added'} · "
+                              f"{'**demote!**' if days >= LIMIT_DAYS else f'{LIMIT_DAYS - int(days)}d left'}"
+                              f"\n-# Got Pro: {esc(p['how']) if p['how'] else 'not specified (use /pro add how:...)'}"))
+        out.sort(key=lambda x: -x[0])
+        embed = discord.Embed(title=f"Pro list · {len(out)}", color=0x00C8E6,
+                              description="\n".join(t for _, t in out)[:4000])
+        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="reminders", description="Turn the Pro reminders on or off (staff). No options: show the state")
     @app_commands.describe(reminder="Which reminder", state="on or off")

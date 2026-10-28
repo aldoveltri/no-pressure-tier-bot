@@ -468,6 +468,10 @@ GEXP_PAGES = [
                "to the next Tuesday). Leaving after 1 day and 1 minute needs a little more than leaving after "
                "exactly 1 day, and nobody owes the full 55,000 just for leaving during the week."),
             _b("Members who joined during the week count from their exact join time."),
+            _c("/gexp history ign [weeks]", f"({GUILD_ROLE}) The GEXP of a player week by week, also after they left or were kicked."),
+            _c("/purge summary [which]", f"({GUILD_ROLE}) \"A total of 25 guild members were purged putting us at 120 guild members\": "
+               "not counted are the breaklisted, excused, blacklisted, back in the guild, or who had enough GEXP. "
+               "The bot also posts it by itself a few hours after the purge (PURGE_SUMMARY_CHANNEL_ID, alert purge_summary)."),
             _c("/purge evaders [cycle] [ign] [page]", f"({GUILD_ROLE}) Lists who left the guild, what they earned, "
                "what they needed and what is missing. SUSPECT = short of the GEXP; BREAKLISTED / EXCUSED = a "
                "legitimate break; MET IT = they earned enough. cycle: this cycle (default) or the last one (after the "
@@ -689,6 +693,8 @@ EXTRA_PAGES = [
         _c("/breaklist resetplayer ign [include_days]", "Staff. Deletes one player's whole breaklist history."),
         _c("/breaklist reset confirm", "Administrators. Deletes the whole breaklist after a backup. "
            "Write RESET BREAKLIST to confirm."),
+        _c("/breaklist offer ign [kind] [note]", "Staff. Sends the breaklist offer to a player who was removed or has been "
+           "away for a few days. The buttons: Breaklist Me, or I'll reach the requirement (with a reason)."),
         _c("/gexp remind ign", "Staff. Sends the GEXP reminder of one player now, with its buttons."),
         _c("/purgetime [when]", "Everyone. The Discord timestamp of the upcoming purge, ready to copy."),
         _c("/wipeplayer ign [mode] [confirm]", "Tier Tester. Cheater: cancels all their matches and gives back the "
@@ -698,11 +704,11 @@ EXTRA_PAGES = [
            "joins another guild, the bot pings the guild master."),
     ]},
     {"title": "Custom guild tag", "blocks": [
-        _c("/tag suggest tag", "Active players. Suggest a guild tag (up to 6 letters or numbers, without the brackets) "
-           "and start a vote. Your Discord account must be linked and have the Active rank in the guild."),
-        _p("The staff presses Pick voters and chooses the active players who are online. They are pinged and have to "
-           "press Yes or No: votes are public. One No rejects the tag. If every picked player votes Yes, the guild "
-           "master is pinged to change the tag by hand."),
+        _c("/tag vote", "Active players and staff. Starts the vote with a card. Step 1: everybody votes Yes or No on "
+           "whether to change the active tag. Step 2 (if the majority says Yes): the voters are pinged and press "
+           "Suggest tag to propose as many tags as they like (up to 6 letters or numbers). Step 3: they vote for "
+           "one or more tags with the menu. The tag with the most votes wins and the guild master is pinged to "
+           "change it by hand."),
         _c("/tag list", "Staff. The latest tag votes."),
     ]},
     {"title": "Settings and tests", "blocks": [

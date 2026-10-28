@@ -297,7 +297,10 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
             return
         embed = discord.Embed(title="Guild blacklist", color=RED, description=f"{len(rows)} player(s)")
         for r in rows[:24]:
-            embed.add_field(name=f"{r['ign']} · {r['duration'] or 'no duration'}", value=r["reason"] or "-", inline=False)
+            by = str(r["added_by"] or "")
+            by = f"<@{by}>" if by.isdigit() else (by or "unknown")
+            embed.add_field(name=f"{r['ign']} · {r['duration'] or 'no duration'}",
+                            value=f"{r['reason'] or '-'}\n**Added by:** {by}", inline=False)
         if len(rows) > 24:
             embed.set_footer(text=f"Showing 24 of {len(rows)}")
         else:
@@ -988,22 +991,6 @@ class UrchinCog(commands.GroupCog, name="urchin", description="Urchin cheater ta
         png = await urchin_card(self.core, uuid, name, tags)
         await interaction.followup.send(file=discord.File(io.BytesIO(png), filename="urchin.png"), view=view)
 
-    @app_commands.command(name="test", description="Debug: show the raw answer of the Urchin API for a player")
-    @app_commands.check(perm_check)
-    async def test(self, interaction: discord.Interaction, ign: str):
-        await interaction.response.defer(ephemeral=True)
-        r = await lookup(interaction, ign)
-        if r is None:
-            return
-        uuid, name = r
-        try:
-            status, body = await urchin_fetch(uuid, name)
-        except Exception as e:
-            await interaction.followup.send(f"Error: {e}", ephemeral=True)
-            return
-        shown = body if isinstance(body, str) else json.dumps(body)[:900]
-        await interaction.followup.send(f"HTTP {status}\n```{shown[:900]}```\nTags understood: {parse_tags(body)}",
-                                        ephemeral=True)
 
     @app_commands.command(name="scan", description="Post now every guild member that is tagged on Urchin")
     @app_commands.check(perm_check)

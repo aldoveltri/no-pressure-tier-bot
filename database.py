@@ -386,15 +386,9 @@ async def verified_owner(uuid: str):
 # ---------- matches ----------
 
 async def _next_number(db) -> int:
-    """The number of the next match: the lowest number of a cancelled match that no live match is using
-    (the new match takes its place), otherwise the highest number + 1."""
-    cur = await db.execute(
-        "SELECT MIN(c.num) FROM matches c WHERE c.cancelled = 1 AND NOT EXISTS "
-        "(SELECT 1 FROM matches l WHERE l.cancelled = 0 AND l.num = c.num)")
-    row = await cur.fetchone()
-    if row and row[0] is not None:
-        return row[0]
-    cur = await db.execute("SELECT COALESCE(MAX(num), 0) + 1 FROM matches")
+    """The number of the next match: the highest number of a live match + 1.
+    (When a match is cancelled the live matches after it move down by one, so there are no gaps.)"""
+    cur = await db.execute("SELECT COALESCE(MAX(num), 0) + 1 FROM matches WHERE cancelled = 0")
     return (await cur.fetchone())[0]
 
 
@@ -708,6 +702,25 @@ async def get_match(match_number: int):
         return await cur.fetchone()
 
 
+async def match_records(rows):
+    """For every match row: ((wins, losses) of the winner, (wins, losses) of the loser) counting their live matches
+    in the same mode up to and including that match (the record they had after it)."""
+    out = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        async def rec(uuid, mid, mode_id):
+            cond, par = ("mode_id IS NULL", ()) if mode_id is None else ("mode_id = ?", (mode_id,))
+            cur = await db.execute(f"SELECT COUNT(*) FROM matches WHERE cancelled = 0 AND id <= ? AND {cond} "
+                                   "AND winner_uuid = ?", (mid, *par, uuid))
+            w = (await cur.fetchone())[0]
+            cur = await db.execute(f"SELECT COUNT(*) FROM matches WHERE cancelled = 0 AND id <= ? AND {cond} "
+                                   "AND loser_uuid = ?", (mid, *par, uuid))
+            return w, (await cur.fetchone())[0]
+        for m in rows:
+            out.append((await rec(m["winner_uuid"], m["id"], m["mode_id"]),
+                        await rec(m["loser_uuid"], m["id"], m["mode_id"])))
+    return out
+
+
 async def set_match_date(match_id: int, played_at: str):
     """Changes the date of a match (match_id is the row id: use get_match(...)['id'])."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -753,6 +766,8 @@ async def cancel_match(m):
                 await db.execute("UPDATE season_players SET elo = ? WHERE season_id = ? AND uuid = ?",
                                  (m["l_season_before"], m["season_id"], m["loser_uuid"]))
         await db.execute("UPDATE matches SET cancelled = 1 WHERE id = ?", (m["id"],))
+        # the matches after it move down by one: cancelling #2 makes the old #3 the new #2, and so on
+        await db.execute("UPDATE matches SET num = num - 1 WHERE cancelled = 0 AND num > ?", (m["num"],))
         await db.commit()
 
 

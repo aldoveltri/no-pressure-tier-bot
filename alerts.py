@@ -11,6 +11,7 @@ ALERTS = {
     "pro_day15": ("Pro reminder: day 15", "Pings a Pro who has not beaten a C+ player in 15 days"),
     "pro_day23": ("Pro reminder: day 23", "Second reminder to the Pro at day 23"),
     "pro_day30": ("Pro reminder: day 30 (demote)", "Pings the guild master to demote a Pro after 30 days without a C+ win"),
+    "purge_summary": ("Purge summary", "The 'X guild members were purged, putting us at Y' post after every purge"),
     "urchin": ("Urchin alerts", "The automatic post in the evidence channel when a guild member gets an Urchin tag"),
 }
 _cache = {}

@@ -102,19 +102,24 @@ class ProCog(commands.GroupCog, name="pro"):
             log.warning("Pro reminder not posted: set PRO_CHANNEL_ID")
 
     # ---------------- commands ----------------
-    @app_commands.command(name="add", description="Add a player to the Pro list (staff)")
-    @app_commands.describe(ign="Minecraft username")
+    @app_commands.command(name="add", description="Add a player to the Pro list, or change how they got it (staff)")
+    @app_commands.describe(ign="Minecraft username",
+                           how="How they got Pro: tier testing, Bedwars stats requirement, other (free text)")
     @app_commands.check(staff_check)
-    async def add(self, interaction: discord.Interaction, ign: str):
+    async def add(self, interaction: discord.Interaction, ign: str, how: Optional[str] = None):
         await interaction.response.defer(ephemeral=True)
         r = await lookup(interaction, ign)
         if r is None:
             return
         uuid, name = r
-        await q_run("INSERT INTO pro_players (uuid, ign, added_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign", (uuid, name, iso(now_utc())))
-        await interaction.followup.send(f"**{esc(name)}** is now on the Pro list. The {LIMIT_DAYS} days count from their "
-                                        "last win against a C+ player (or from now if there is none).", ephemeral=True)
+        how = (how or "").strip()[:200] or None
+        await q_run("INSERT INTO pro_players (uuid, ign, added_at, how) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign, how = COALESCE(excluded.how, pro_players.how)",
+                    (uuid, name, iso(now_utc()), how))
+        await interaction.followup.send(f"**{esc(name)}** is on the Pro list" + (f" ({esc(how)})" if how else "") +
+                                        f". The {LIMIT_DAYS} days count from their last win against a C+ player "
+                                        "(or from when they were added if there is none). "
+                                        "Use `/pro add` again to change how they got it.", ephemeral=True)
 
     @app_commands.command(name="remove", description="Remove a player from the Pro list (staff)")
     @app_commands.describe(ign="Minecraft username")
@@ -128,7 +133,7 @@ class ProCog(commands.GroupCog, name="pro"):
         await q_run("DELETE FROM pro_players WHERE uuid = ?", (uuid,))
         await interaction.followup.send(f"**{esc(name)}** removed from the Pro list.", ephemeral=True)
 
-    @app_commands.command(name="list", description="Pros and how long since they last beat a C+ player")
+    @app_commands.command(name="list", description="Pros, how each one got the rank, and the days since their last C+ win")
     async def list_(self, interaction: discord.Interaction):
         await interaction.response.defer()
         rows = await q_all("SELECT * FROM pro_players")
@@ -141,9 +146,12 @@ class ProCog(commands.GroupCog, name="pro"):
             days = (now - anchor).total_seconds() / 86400
             out.append((days, f"**{esc(p['ign'])}** · {int(days)}d since "
                               f"{'their last C+ win' if win else 'being added'} · "
-                              f"{'**demote!**' if days >= LIMIT_DAYS else f'{LIMIT_DAYS - int(days)}d left'}"))
+                              f"{'**demote!**' if days >= LIMIT_DAYS else f'{LIMIT_DAYS - int(days)}d left'}"
+                              f"\n-# Got Pro: {esc(p['how']) if p['how'] else 'not specified (use /pro add how:...)'}"))
         out.sort(key=lambda x: -x[0])
-        await interaction.followup.send("\n".join(t for _, t in out)[:1900], allowed_mentions=discord.AllowedMentions.none())
+        embed = discord.Embed(title=f"Pro list · {len(out)}", color=0x00C8E6,
+                              description="\n".join(t for _, t in out)[:4000])
+        await interaction.followup.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="reminders", description="Turn the Pro reminders on or off (staff). No options: show the state")
     @app_commands.describe(reminder="Which reminder", state="on or off")
@@ -169,5 +177,9 @@ class ProCog(commands.GroupCog, name="pro"):
 async def setup(bot: commands.Bot):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(SCHEMA)
+        try:
+            await db.execute("ALTER TABLE pro_players ADD COLUMN how TEXT")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
     await bot.add_cog(ProCog(bot))

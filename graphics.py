@@ -609,10 +609,15 @@ def _draw_matchlog(entries, heads, page, pages, total, cancelled_view):
         d.rounded_rectangle([PAD, y0, PAD + 8, y0 + ROW_H - 8], radius=4, fill=MUTED if cancelled else ACCENT)
 
         d.text((PAD + 24, cy - 10), f"Match #{e['id']}", font=get_font(18, True), fill=TEXT, anchor="lm")
-        d.text((PAD + 24, cy + 14), e["date"], font=get_font(15), fill=MUTED, anchor="lm")
+        d.text((PAD + 24, cy + 14), e["date"] + (f" · S{e['season']}" if e.get("season") else ""),
+               font=get_font(15), fill=MUTED, anchor="lm")
 
+        rec_w, rec_l = e.get("w_rec"), e.get("l_rec")
+        up = 8 if rec_w and not cancelled else 0                  # names move up a little to make room for the record
         _paste_head(img, d, heads.get(e["winner_uuid"]), 178, cy - 20, 40)
-        name_flag(img, d, 226, cy, e["winner"], 20, h=20, fill=MUTED if cancelled else TEXT, max_w=184)
+        name_flag(img, d, 226, cy - up, e["winner"], 20, h=20, fill=MUTED if cancelled else TEXT, max_w=184)
+        if rec_w and not cancelled:
+            d.text((226, cy + 14), rec_w, font=get_font(14, True), fill=MUTED, anchor="lm")
 
         d.text((450, cy - 7 if forfeit else cy), e["score"], font=get_font(22, True),
                fill=MUTED if cancelled else ACCENT, anchor="mm")
@@ -621,7 +626,9 @@ def _draw_matchlog(entries, heads, page, pages, total, cancelled_view):
                    fill=MUTED if cancelled else RED, anchor="mm")
 
         _paste_head(img, d, heads.get(e["loser_uuid"]), 494, cy - 20, 40)
-        name_flag(img, d, 542, cy, e["loser"], 20, h=20, fill=MUTED, max_w=185)
+        name_flag(img, d, 542, cy - up, e["loser"], 20, h=20, fill=MUTED, max_w=185)
+        if rec_l and not cancelled:
+            d.text((542, cy + 14), rec_l, font=get_font(14, True), fill=MUTED, anchor="lm")
 
         ex = WIDTH - PAD - 28
         if cancelled:

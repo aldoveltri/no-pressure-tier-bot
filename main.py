@@ -24,7 +24,7 @@ from database import (init_db, init_extras, init_seasons, init_modes, upsert_pla
                       get_current, list_seasons, list_years,
                       get_season_leaderboard, get_year_leaderboard, sort_rows,
                       end_season, end_year,
-                      get_mode_by_name, get_mode, seed_modes, reset_all_data)
+                      get_mode_by_name, get_mode, seed_modes, reset_all_data, match_records)
 from mojang import get_uuid
 import aiosqlite
 from database import DB_PATH
@@ -437,6 +437,8 @@ async def setup_hook():
     await bot.load_extension("backup")
     bot.np_hooks = {"profile_card": profile_card, "profile_options": profile_options, "history_page": history_page,
                     "info_image": info_image, "info_data": get_info}
+    await bot.load_extension("purgesum")
+    await bot.load_extension("roles")
     await bot.load_extension("cleanup")
     await bot.load_extension("hub")
 
@@ -577,6 +579,7 @@ async def link(interaction: discord.Interaction, ign: str, user: Optional[discor
             return
 
     await link_account(target.id, uuid, name, by=interaction.user.id, forced=by_staff)
+    bot.dispatch("np_linked", target.id)
     if by_staff:
         msg = f"✅ **{target.display_name}** is now linked to **{name}** (linked by staff)."
     else:
@@ -649,6 +652,7 @@ async def linkall(interaction: discord.Interaction, dry_run: bool = False):
         used_discord.add(str(member.id))
         if not dry_run:
             await link_account(member.id, uuid, name, by=interaction.user.id, forced=True)
+            bot.dispatch("np_linked", member.id)
         done.append(f"{name} ← {member.display_name}")
     text = (f"{'Would link' if dry_run else 'Linked'} **{len(done)}** of {len(todo)} unlinked guild members.\n"
             f"No Discord name on Hypixel: {no_handle} · Not in this server: {len(not_in_discord)} · "
@@ -672,6 +676,7 @@ async def bl_get_name(uuid):
 async def unlink(interaction: discord.Interaction):
     removed = await remove_link(interaction.user.id)
     if removed:
+        bot.dispatch("np_unlinked", interaction.user.id)
         await interaction.response.send_message("Your account has been unlinked.", ephemeral=True)
     else:
         await interaction.response.send_message("You don't have a linked account.", ephemeral=True)
@@ -1460,6 +1465,7 @@ def log_entries(rows):
         entries.append({
             "id": match_number(m), "date": fmt_date(m["played_at"]), "score": m["score"] or "-",
             "cancelled": cancelled, "forfeit": bool(m["forfeit"]),
+            "season": m["season_id"] if m["mode_id"] is None else None,
             "winner": m["winner_ign"], "winner_uuid": m["winner_uuid"],
             "loser": m["loser_ign"], "loser_uuid": m["loser_uuid"],
             "w_delta": 0 if cancelled else m["winner_elo_after"] - m["winner_elo_before"],
@@ -1486,7 +1492,13 @@ class MatchLogView(PagedView):
             rows = await get_cancelled_matches(limit, offset, mode_id=self.mode_id)
         else:
             rows = await get_all_matches(limit, offset, mode_id=self.mode_id)
-        data = await build_matchlog_image(log_entries(rows), self.page, self.pages, self.total,
+        entries = log_entries(rows)
+        try:
+            for e, (wr, lr) in zip(entries, await match_records(rows)):
+                e["w_rec"], e["l_rec"] = f"{wr[0]}-{wr[1]}", f"{lr[0]}-{lr[1]}"
+        except Exception:
+            log.exception("Could not count the records for the match log")
+        data = await build_matchlog_image(entries, self.page, self.pages, self.total,
                                           cancelled_view=self.cancelled)
         return png_file(data, "cancelled.png" if self.cancelled else "matches.png")
 

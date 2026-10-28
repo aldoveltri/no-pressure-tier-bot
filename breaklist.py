@@ -888,6 +888,32 @@ def draw_missing(name, head, joined, purge, r, start, current, extra_note):
 
 # ---------- inactivity notice ----------
 
+def draw_offer(ign, head, kind, requirement, note):
+    """The breaklist offer: for players who were removed or have been away for a few days."""
+    if kind == "kicked":
+        text = ("You were removed from the guild. If you want to come back later, you can ask to be put on the "
+                "breaklist: press Breaklist Me and tell the staff the reason and for how long you will be away. "
+                "The staff will answer your request.")
+        badge = "REMOVED"
+    else:
+        text = (f"You have not been online for a few days. If you can't be active right now, press Breaklist Me and tell "
+                f"the staff the reason and for how long. If you still plan to reach the weekly requirement of "
+                f"{n(requirement)} GEXP, press I'll reach the requirement and tell us why you were away.")
+        badge = "AWAY FOR DAYS"
+    if note:
+        text += f" Note from the staff: {note}"
+    id_h = 130
+    top = g.HEADER_H + 16
+    height = top + id_h + 14 + _panel_height(text, max_lines=8) + 16 + g.FOOTER_H
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, "BREAKLIST OFFER", GUILD_NAME_DISPLAY)
+    _identity(img, d, top, ign, head, badge, g.ACCENT, "", id_h)
+    _text_panel(d, top + id_h + 14, "WHY YOU ARE SEEING THIS", text, max_lines=8)
+    g._footer(d, height, "Not affiliated with Hypixel")
+    return g._png(img)
+
+
 def draw_notice(it, head):
     final = it["kind"] == "final"
     title = "FINAL GEXP REMINDER" if final else "GEXP REMINDER"
@@ -930,9 +956,9 @@ def draw_notice(it, head):
 
     bw = (g.WIDTH - 2 * g.PAD - 2 * gap) // 3
     y += bar_h + gap
-    _box(d, g.PAD, y, bw, box_h, "EARNED", n(it["weekly"]))
-    _box(d, g.PAD + bw + gap, y, bw, box_h, "REQUIRED", n(it["required"]))
-    _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "STILL NEEDED", n(it["needed"]),
+    _box(d, g.PAD, y, bw, box_h, "WEEKLY GEXP", n(it["weekly"]))
+    _box(d, g.PAD + bw + gap, y, bw, box_h, "REQUIREMENT", n(it["required"]))
+    _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "GEXP NEEDED", n(it["needed"]),
          g.RED if it["needed"] else g.GREEN, sub=f"~{n(it['per_day'])} per day")
     y += box_h + gap
     _text_panel(d, y, "WHY YOU ARE SEEING THIS", text, max_lines=7)
@@ -1664,6 +1690,22 @@ class Core:
             return await self.post_or_here(interaction, "INACTIVITY_CHANNEL_ID", **kwargs)
         return await self.post_to("INACTIVITY_CHANNEL_ID", **kwargs)
 
+    async def send_offer(self, uuid, kind, note=None, interaction=None):
+        name = await self.name_for(uuid)
+        head = await self.head_for(uuid, name)
+        await load_flag(uuid, name)
+        data = await asyncio.to_thread(draw_offer, name, head, kind, gc.WEEKLY_REQ, note)
+        did = await self.linked_discord(uuid)
+        who = f"<@{did}>" if did else f"**{esc(name)}**"
+        view = discord.ui.View(timeout=None)
+        view.add_item(NoticeButton("bl", uuid))
+        if kind != "kicked":
+            view.add_item(NoticeButton("pl", uuid))
+        kwargs = dict(content=f"{who} Breaklist offer", data=data, filename="offer.png", view=view, mentions=USER_MENTIONS)
+        if interaction is not None:
+            return await self.post_or_here(interaction, "INACTIVITY_CHANNEL_ID", **kwargs)
+        return await self.post_to("INACTIVITY_CHANNEL_ID", **kwargs)
+
     async def run_notices(self, kind):
         """The automatic notices. Returns how many were sent."""
         if chan_id("INACTIVITY_CHANNEL_ID") is None:
@@ -1981,10 +2023,11 @@ class GuildHistoryButton(discord.ui.DynamicItem[discord.ui.Button], template=r"b
         await interaction.response.send_modal(GuildHistoryModal(self.eid))
 
 
-class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<act>bl|ex|ig):(?P<uuid>[0-9a-f]{32})"):
+class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<act>bl|ex|ig|pl):(?P<uuid>[0-9a-f]{32})"):
     """Breaklist Me / Excuse Me / Ignore on a GEXP notice. The first two only send a request to the staff."""
-    LABELS = {"bl": "Breaklist Me", "ex": "Excuse Me", "ig": "Ignore"}
-    STYLES = {"bl": discord.ButtonStyle.danger, "ex": discord.ButtonStyle.secondary, "ig": discord.ButtonStyle.secondary}
+    LABELS = {"bl": "Breaklist Me", "ex": "Excuse Me", "ig": "Ignore", "pl": "I'll reach the requirement"}
+    STYLES = {"bl": discord.ButtonStyle.danger, "ex": discord.ButtonStyle.secondary, "ig": discord.ButtonStyle.secondary,
+              "pl": discord.ButtonStyle.success}
 
     def __init__(self, act: str, uuid: str):
         super().__init__(discord.ui.Button(label=self.LABELS[act], style=self.STYLES[act],
@@ -2009,6 +2052,9 @@ class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<
 
     async def callback(self, interaction: discord.Interaction):
         core: Core = interaction.client.np_core
+        if self.act == "pl":
+            await interaction.response.send_modal(PlanModal(self.uuid))
+            return
         pending = await core.pending_request(self.uuid)
         if pending:
             view = discord.ui.View(timeout=120)
@@ -2037,6 +2083,24 @@ class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<
             await core.post_request_channel(interaction, content=text)
             await interaction.followup.send(
                 "Noted. You will not get more notices this week. The staff can see your answer.", ephemeral=True)
+
+
+class PlanModal(discord.ui.Modal, title="I'll reach the requirement"):
+    reason = discord.ui.TextInput(label="Why were you away, and how will you reach it?", style=discord.TextStyle.paragraph,
+                                  max_length=400, placeholder="e.g. exams this week, I'll play a lot on the weekend")
+
+    def __init__(self, uuid: str):
+        super().__init__()
+        self.uuid = uuid
+
+    async def on_submit(self, interaction: discord.Interaction):
+        core: Core = interaction.client.np_core
+        await interaction.response.defer(ephemeral=True)
+        name = await core.name_for(self.uuid)
+        text = (f"**{esc(name)}** (<@{interaction.user.id}>) answered the breaklist offer: they plan to reach the GEXP "
+                f"requirement.\n> {esc(self.reason.value.strip())}")
+        await core.post_request_channel(interaction, content=text)
+        await interaction.followup.send("Thank you, the staff can read your answer.", ephemeral=True)
 
 
 class CancelPendingButton(discord.ui.Button):
@@ -2824,6 +2888,26 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         await interaction.followup.send(f"✅ **{esc(name)}** owes **{n(amount)}** extra GEXP.")
 
 
+    @app_commands.command(name="offer", description="Send the breaklist offer to a player who was removed or has been away for days (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player",
+                           kind="away = not online for a few days (can also say they will reach the GEXP), removed = already kicked",
+                           note="Optional note shown on the card")
+    @app_commands.choices(kind=[app_commands.Choice(name="Away for a few days", value="away"),
+                                app_commands.Choice(name="Already removed from the guild", value="kicked")])
+    @app_commands.check(staff_check)
+    async def offer(self, interaction: discord.Interaction, ign: str, kind: Optional[app_commands.Choice[str]] = None,
+                    note: Optional[app_commands.Range[str, 1, 200]] = None):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        posted = await self.core.send_offer(uuid, kind.value if kind else "away", note, interaction)
+        if posted:
+            await interaction.followup.send(f"Offer posted in {posted}.")
+        elif posted is False:
+            await interaction.followup.send("I couldn't post in the inactivity channel (check its id and my permissions).")
+
     @app_commands.command(name="notice", description="Post the GEXP notice of one player now, with its buttons (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
                            kind="friday = the under-20k reminder, final = the last reminder before the purge")
@@ -2928,6 +3012,49 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
             f"Weekly GEXP requirement changed from **{n(old)}** to **{n(amount)}**. "
             f"It applies to every new calculation, card and notice from now on.")
 
+    @app_commands.command(name="history", description="A player's GEXP week by week, also after they left or were kicked (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player", weeks="How many weeks to show (default 8)")
+    @app_commands.check(staff_check)
+    async def history(self, interaction: discord.Interaction, ign: str, weeks: app_commands.Range[int, 1, 20] = 8):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        rows = await q_all("SELECT day, gexp FROM gexp_history WHERE uuid = ? ORDER BY day", (uuid,))
+        if not rows:
+            await interaction.followup.send(f"I have no saved GEXP for **{esc(name)}** (the bot only saves it while the "
+                                            "player is in the guild and the Hypixel key is set).", allowed_mentions=NO_MENTIONS)
+            return
+        by_day = {x["day"]: x["gexp"] for x in rows}
+        members = await self.core.guild_members()
+        in_guild = bool(members) and uuid in members
+        left = await q_one("SELECT left_at FROM guild_left WHERE uuid = ? ORDER BY left_at DESC LIMIT 1", (uuid,))
+        last_day = rows[-1]["day"]
+        # weeks run Tuesday to Monday (ET), like the purge
+        from datetime import datetime as _dt
+        wk_of = {}
+        for day, val in by_day.items():
+            start = gc.week_start(_dt.fromisoformat(day).replace(tzinfo=gc.ET)).date()
+            wk_of.setdefault(start, []).append((day, val))
+        starts = sorted(wk_of, reverse=True)[:weeks]
+        lines = []
+        for st in starts:
+            total = sum(v for _, v in wk_of[st])
+            end = st + timedelta(days=6)
+            mark = "✅" if total >= gc.WEEKLY_REQ else "❌"
+            lines.append(f"{mark} `{st.strftime('%m/%d')} - {end.strftime('%m/%d')}` **{n(total)}** GEXP"
+                         + (f" · {len(wk_of[st])}/7 days saved" if len(wk_of[st]) < 7 else ""))
+        newest = sorted(by_day, reverse=True)[:14]
+        daily = " · ".join(f"{d[5:].replace('-', '/')} {n(by_day[d])}" for d in newest)
+        status = ("In the guild now" if in_guild else
+                  (f"Left the guild on {gc.fmt_date(from_iso(left['left_at']))}" if left else "Not in the guild now"))
+        embed = discord.Embed(title=f"GEXP history of {name}", color=0x00C8E6,
+                              description=f"**{status}** · requirement {n(gc.WEEKLY_REQ)} per week\n\n" + "\n".join(lines))
+        embed.add_field(name="Last days saved (day GEXP)", value=daily[:1000], inline=False)
+        embed.set_footer(text=f"Last day saved: {last_day[5:].replace('-', '/')} · weeks start on Tuesday (Eastern Time)")
+        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
+
     @app_commands.command(name="remind", description="Remind one player about the GEXP requirement now, with the buttons (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
                            kind="friday = the under-20k reminder, final = the last reminder before the purge")
@@ -3031,6 +3158,26 @@ class PurgeCog(commands.GroupCog, name="purge", description="Purge evasion check
     def __init__(self, core: Core):
         self.core = core
         super().__init__()
+
+    @app_commands.command(name="summary", description="How many members the last purge removed and how many we are now (guild staff)")
+    @app_commands.describe(which="Which purge (default: the last one)")
+    @app_commands.choices(which=[app_commands.Choice(name="The last purge", value=0),
+                                 app_commands.Choice(name="The one before", value=1)])
+    @app_commands.check(staff_check)
+    async def summary(self, interaction: discord.Interaction, which: Optional[app_commands.Choice[int]] = None):
+        import purgesum
+        await interaction.response.defer()
+        await self.core.guild_members(force=True)
+        ws = gc.week_start(now_utc()) - timedelta(days=7 * (which.value if which else 0))
+        purged, skipped, total = await purgesum.purged_members(self.core, ws)
+        names = ", ".join(esc(p["ign"]) for p in purged[:40]) or "nobody"
+        notes = ", ".join(f"{v} {k}" for k, v in skipped.items() if v)
+        await interaction.followup.send(
+            f"{purgesum.summary_text(purged, total)}\n"
+            f"-# Purge of {gc.fmt_date(ws)}. Purged: {names}. "
+            f"Not counted: {notes or 'nobody'} (breaklist, excused, blacklisted, back in the guild, or had enough GEXP). "
+            "Members who left by themselves while short of GEXP are counted too.",
+            allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="evaders", description="Members who left the guild without earning the GEXP they owed (guild staff)")
     @app_commands.describe(

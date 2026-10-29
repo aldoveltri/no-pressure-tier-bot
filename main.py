@@ -611,6 +611,37 @@ async def find_discord_member(guild, handle):
     return None
 
 
+@bot.tree.command(name="discord", description="The Discord account of a player: the one on Hypixel and the one linked here (staff)")
+@app_commands.describe(ign="Minecraft username")
+async def discord_cmd(interaction: discord.Interaction, ign: str):
+    import breaklist as bl
+    if not (is_staff(interaction.user) or bl.is_guild_staff(interaction.user)):
+        await interaction.response.send_message("Only staff can use this.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    r = await bl.lookup(interaction, ign)
+    if r is None:
+        return
+    uuid, name = r
+    try:
+        found, handle = await get_hypixel_discord(uuid)
+        on_hypixel = f"`{handle}`" if found and handle else "nothing: no Discord is set on their Hypixel profile"
+    except (NoApiKey, KeyRejected):
+        on_hypixel = "I can't read it: the Hypixel API key is missing or expired"
+    except (HypixelError, aiohttp.ClientError, asyncio.TimeoutError):
+        on_hypixel = "I can't read it right now: Hypixel is not responding"
+    row = await bl.q_one("SELECT * FROM links WHERE uuid = ?", (uuid,))
+    if row is None:
+        here = "not linked (they can use `/link`, or staff can force it with `/link user:`)"
+    else:
+        by = row.get("linked_by")
+        how = ("linked before this was recorded" if not by else
+               f"forced by <@{by}>" if row.get("forced") else "linked by themselves, verified on Hypixel")
+        here = f"<@{row['discord_id']}> · {how}"
+    await interaction.followup.send(f"**{bl.esc(name)}**\nOn Hypixel: {on_hypixel}\nLinked here: {here}",
+                                    ephemeral=True, allowed_mentions=NO_MENTIONS)
+
+
 @bot.tree.command(name="linkall", description="Link every guild member whose Hypixel Discord name matches a member of this server (staff)")
 @app_commands.describe(dry_run="Only show who would be linked: nothing is saved")
 async def linkall(interaction: discord.Interaction, dry_run: bool = False):
@@ -1660,4 +1691,15 @@ for _cmd in (settier, setelo, match, forfeit_cmd, removeplayer, history,
 match.autocomplete("score")(score_autocomplete)
 
 
-bot.run(os.getenv("TOKEN"))
+try:
+    bot.run(os.getenv("TOKEN"))
+except discord.PrivilegedIntentsRequired:
+    # MESSAGE_CONTENT_INTENT=1 but the Message Content intent is not enabled in the developer portal:
+    # start again without it (the bot works, only /chat cannot save messages) instead of crashing.
+    if (os.getenv("MESSAGE_CONTENT_INTENT") or "").strip() == "1":
+        print("Message Content intent is not enabled in the Discord developer portal: starting without it "
+              "(/chat will not save messages). Enable it in Bot > Privileged Gateway Intents, or remove MESSAGE_CONTENT_INTENT.")
+        os.environ["MESSAGE_CONTENT_INTENT"] = "0"
+        import sys
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    raise

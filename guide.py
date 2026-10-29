@@ -698,6 +698,9 @@ EXTRA_PAGES = [
         _c("/chat [ign] [search]", "Staff. What a player wrote in the guild bridge chat, newest first, with Previous / Next "
            "buttons and a Search button. Works from when it is switched on: BRIDGE_CHANNEL_ID, MESSAGE_CONTENT_INTENT=1 and "
            "the Message Content intent in the Discord developer portal."),
+        _c("/mute message [text] [reset]", "Staff. See or change the text of the mute message. Words in {braces} are filled in: "
+           "{ign} {length} {reason} {expires} {user} {role} {ping}. reset:True goes back to the original."),
+        _c("/discord ign", "Staff. The Discord on the player's Hypixel profile and the Discord linked here (verified, or forced by whom)."),
         _c("/gexp remind ign", "Staff. Sends the GEXP reminder of one player now, with its buttons."),
         _c("/purgetime [when]", "Everyone. The Discord timestamp of the upcoming purge, ready to copy."),
         _c("/wipeplayer ign [mode] [confirm]", "Tier Tester. Cheater: cancels all their matches and gives back the "

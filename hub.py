@@ -217,8 +217,11 @@ def player_panels(d):
     # gexp
     total_w, count_w = d["week"]
     if d["in_guild"] or count_w:
-        panels.append(("GEXP THIS WEEK", n(total_w), f"{count_w} days saved" + (" · excused this week" if d["excuse_now"] else ""),
-                       g.TEXT))
+        req = gc.WEEKLY_REQ
+        pct = total_w * 100 // req if req else 0
+        panels.append(("GEXP THIS WEEK", f"{n(total_w)} / {n(req)}",
+                       f"{pct}% of the requirement" + (" · excused this week" if d["excuse_now"] else ""),
+                       g.GREEN if total_w >= req else g.TEXT))
     else:
         panels.append(("GEXP THIS WEEK", "-", "No GEXP saved", g.MUTED))
     # breaklist
@@ -271,7 +274,7 @@ def player_panels(d):
     # extras
     extra = []
     if d["pro"]:
-        extra.append("Pro")
+        extra.append("Pro" + (f" ({d['pro']['how']})" if d["pro"].get("how") else ""))
         chips.append(("PRO", GOLD))
     if d["wait"] and d["wait"]["status"] == "waiting":
         extra.append("Waiting list")
@@ -530,7 +533,8 @@ async def guild_section(ctx, key, page):
         now = now_utc()
         for p in await QA("SELECT * FROM pro_players ORDER BY ign COLLATE NOCASE"):
             anchor = await pro.anchor_of(p)
-            lines.append(f"**{esc(p['ign'])}** · {int((now - anchor).total_seconds() // 86400)}d since the last C+ win")
+            lines.append(f"**{esc(p['ign'])}** · {int((now - anchor).total_seconds() // 86400)}d since the last C+ win"
+                         + (f" · {esc(p['how'])}" if p["how"] else ""))
         wait = await QA("SELECT ign FROM waitlist WHERE status = 'waiting' ORDER BY added_at")
         embed = discord.Embed(title="Pro list and waiting list", color=0x00C8E6)
         embed.add_field(name=f"Pro ({len(lines)})", value="\n".join(lines)[:1000] or "Nobody.", inline=False)

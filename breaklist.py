@@ -290,6 +290,8 @@ def _wrap_lines(text, font, width):
 
 def _box(d, x, y, w, h, label, value, color=None, size=32, sub=None, sub_color=None, sub2=None):
     d.rounded_rectangle([x, y, x + w, y + h], radius=14, fill=g.ROW_BG)
+    while size > 14 and d.textlength(str(value), font=g.get_font(size, True)) > w - 24:      # long values get smaller
+        size -= 1
     d.text((x + w // 2, y + 24), label, font=g.get_font(14, True), fill=g.MUTED, anchor="mm")
     if sub2:
         d.text((x + w // 2, y + 52), value, font=g.get_font(size, True), fill=color or g.TEXT, anchor="mm")
@@ -3885,6 +3887,20 @@ def mute_ping():
 
 
 MUTE_MENTIONS = discord.AllowedMentions(users=True, roles=True)
+DEFAULT_MUTE_MSG = ("{ign} has been muted {length} for {reason}\n{expires}\n{ping} {user} you have been muted in the "
+                    "guild bridge. {role}")
+MUTE_MSG_FIELDS = ("ign", "length", "reason", "expires", "user", "role", "ping")
+
+
+def fill_mute_msg(template, **values):
+    """The mute message: the text saved with /mute message, with {ign} {length} {reason} {expires} {user} {role} {ping}
+    replaced. An unknown {word} is left as it is."""
+    out = template
+    for k in MUTE_MSG_FIELDS:
+        out = out.replace("{" + k + "}", str(values.get(k, "")))
+    return out.strip()
+
+
 WARN_EXPIRY_DAYS = _int_env("WARN_EXPIRY_DAYS", 60)       # 0 = verbal warnings never expire
 
 
@@ -4007,19 +4023,19 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             [("LENGTH", "Permanent" if end is None else gc.fmt_duration(td.total_seconds())),
              ("EXPIRES", "Never" if end is None else gc.fmt_et(end)), ("MUTES SO FAR", str(total_mutes))],
             interaction.user.display_name, mid)
-        if did:
-            text = (f"<@{did}> you have been muted in the guild bridge. "
-                    + ("The **No Guild Bridge** role was added: you can't write there until the mute ends."
-                       if gave else "Staff will remove your guild bridge permissions."))
-        else:
-            text = (f"**{esc(name)}** has been muted in the guild bridge, but I don't know their Discord account: "
-                    "link it with `/link` or give it with the `user` option.")
-        if not gave:
-            text += "\nThe **No Guild Bridge** role could not be added automatically: please add it manually."
         how_long = "permanently" if end is None else length.strip()
         expires_line = ("This mute does not expire." if end is None else
                         f"Expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)")
-        content = f"{name} has been muted {how_long} for {reason}\n{expires_line}\n{mute_ping()} {text}".strip()
+        role_txt = ("The **No Guild Bridge** role was added: you can't write there until the mute ends."
+                    if gave else "Staff will remove your guild bridge permissions.")
+        if did:
+            who = f"<@{did}>"
+        else:
+            who = (f"**{esc(name)}** (I don't know their Discord account: link it with `/link` or give it with the "
+                   "`user` option)")
+        template = (await kv_get("mute_msg")) or DEFAULT_MUTE_MSG
+        content = fill_mute_msg(template, ign=name, length=how_long, reason=reason, expires=expires_line, user=who,
+                                role=role_txt, ping=mute_ping())
         posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, data=card, filename="mute.png",
                                          mentions=MUTE_MENTIONS, view=mute_view(mid))
         first = self.core.last_message if posted else None
@@ -4027,9 +4043,38 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             first = await interaction.followup.send(content=content, file=send_file(card, "mute.png"),
                                                     allowed_mentions=MUTE_MENTIONS, view=mute_view(mid), wait=True)
         else:
-            await interaction.followup.send(f"Mute logged in {posted}.")
+            await interaction.followup.send(f"Mute logged in {posted}. This is the message:\n\n{content}",
+                                            file=send_file(card, "mute.png"), allowed_mentions=NO_MENTIONS)
         if proofs and first is not None:                       # every proof in its own message, in order
             await send_proofs(first.channel, "m", mid, proofs)
+        if not gave:                       # only the staff who ran the command sees this, not the player
+            await interaction.followup.send("⚠️ The **No Guild Bridge** role could not be added automatically: "
+                                            "please add it manually.", ephemeral=True)
+
+    @app_commands.command(name="message", description="See or change the text of the mute message (guild staff)")
+    @app_commands.describe(text="New text. Words in {braces} are filled in: {ign} {length} {reason} {expires} {user} {role} {ping}",
+                           reset="Go back to the original text")
+    @app_commands.check(staff_check)
+    async def message(self, interaction: discord.Interaction, text: Optional[str] = None, reset: bool = False):
+        await interaction.response.defer(ephemeral=True)
+        if reset:
+            await q_run("DELETE FROM kv WHERE key = 'mute_msg'")
+            await interaction.followup.send("✅ The mute message is the original one again.", ephemeral=True)
+            return
+        if text:
+            await kv_set("mute_msg", text.replace("\\n", "\n"))
+            current = text.replace("\\n", "\n")
+            head = "✅ Saved."
+        else:
+            current = (await kv_get("mute_msg")) or DEFAULT_MUTE_MSG
+            head = "This is the current text."
+        example = fill_mute_msg(current, ign="Player", length="15m", reason="spam", expires="Expires <t:1793168990:F>",
+                                user="@Player", role="The role was added.", ping=mute_ping())
+        await interaction.followup.send(
+            f"{head} Words that are filled in: `{{ign}}` name, `{{length}}`, `{{reason}}`, `{{expires}}` expiry, "
+            f"`{{user}}` the player's Discord, `{{role}}` the sentence about the role, `{{ping}}` the staff ping. "
+            "Write `\\n` for a new line.\n\n**Text:**\n```" + current + "```\n**Example:**\n" + example,
+            ephemeral=True, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="warn", description="Log a verbal warning: it changes nothing, it is only recorded (guild staff)")
     @app_commands.describe(ign="Minecraft username", reason="Why they got the warning",

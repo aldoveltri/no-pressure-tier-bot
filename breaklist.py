@@ -175,6 +175,10 @@ CREATE TABLE IF NOT EXISTS logins (
 CREATE TABLE IF NOT EXISTS road_history (
     day TEXT NOT NULL, guild TEXT NOT NULL, exp INTEGER NOT NULL, at TEXT, PRIMARY KEY (day, guild)
 );
+CREATE TABLE IF NOT EXISTS punish_media (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL, pid INTEGER NOT NULL, ch TEXT, msg TEXT, pos INTEGER NOT NULL DEFAULT 1, name TEXT
+);
 CREATE TABLE IF NOT EXISTS guild_left (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     uuid TEXT NOT NULL, ign TEXT, joined_at TEXT, left_at TEXT NOT NULL, detected_at TEXT, rejoined_at TEXT
@@ -1431,6 +1435,9 @@ class Core:
             return banked, "breaklist"
         joined = await self.joined_for(uuid)
         if joined:
+            anchor = await kv_get("daysanchor:" + uuid)        # /breaklist update: the stay up to then is already banked
+            if anchor:
+                joined = max(joined, from_iso(anchor))
             return banked + max(0.0, (now_utc() - joined).total_seconds() / 86400), "guild"
         return banked, "unknown"
 
@@ -2015,13 +2022,13 @@ async def edit_entry(core, entry, *, reason=None, start=None, end=None, gexp=Non
     return await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry["id"],)), None
 
 
-async def repost_card(core, entry_id, text):
+async def repost_card(core, entry_id, text, title="BREAKLIST UPDATE"):
     """Posts the updated card in the thread of the entry. Returns (channel mention / None / False, card bytes)."""
     entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry_id,))
     if entry["status"] == "active":
         days, _ = await core.days_info(entry["uuid"])
         entry = dict(entry, days_total=days)
-    card = await core.breaklist_card(entry, "BREAKLIST UPDATE")
+    card = await core.breaklist_card(entry, title)
     posted = await core.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
                                 thread_name=entry["ign"], thread_key=f"bl_thread:{entry['id']}")
     return posted, card
@@ -2720,14 +2727,69 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if back is None:
             await interaction.followup.send("I couldn't read the date. Use `2026/10/03`, `2026/10/03 6:00 PM` or without year `10/03 6:00 PM` (ET or MT, see /timezone).")
             return
+        full = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry["id"],))
         await q_run("UPDATE bl_entries SET status = 'returned', returned_at = ? WHERE id = ?", (iso(back), entry["id"]))
         days, _ = await self.core.days_info(uuid)
         debt = await q_one("SELECT amount FROM debts WHERE uuid = ?", (uuid,))
         owed = debt["amount"] if debt else 0
+        # the announcement in the breaklist thread, with the expected return
+        exp = (full.get("expected_return") or "")[:10] if full else ""
+        exp_txt = ""
+        if exp:
+            try:
+                from datetime import datetime as _dt
+                exp_dt = _dt.fromisoformat(exp).replace(tzinfo=gc.ET)
+                diff = (back.astimezone(gc.ET).date() - exp_dt.date()).days
+                when_txt = ("on the expected day" if diff == 0 else
+                            f"{abs(diff)} day{'s' if abs(diff) != 1 else ''} {'late' if diff > 0 else 'early'}")
+                exp_txt = f" Expected return: **{gc.fmt_date(exp_dt)}** ({when_txt})."
+            except ValueError:
+                exp_txt = ""
+        announce = (f"✅ **{esc(name)}** is back in the guild and off the breaklist ({gc.fmt_date(back)}).{exp_txt} "
+                    f"Their {int(days)} days in the guild are kept.")
+        posted = None
+        try:
+            posted, _card = await repost_card(self.core, entry["id"], announce, "BACK IN THE GUILD")
+        except Exception:
+            log.exception("Could not announce the return in the breaklist thread")
         await interaction.followup.send(
             f"✅ **{esc(name)}** is off the breaklist. Their {int(days)} days in the guild are kept and keep growing "
-            f"from now on. Extra GEXP debt carried over: **{n(owed)}**. "
-            f"Use `/gexp missing` to calculate what they need to earn this week.")
+            f"from now on. Extra GEXP debt carried over: **{n(owed)}**.{exp_txt} "
+            + (f"Announced in {posted}. " if posted else "") +
+            "Use `/gexp missing` to calculate what they need to earn this week.", allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="update", description="Save the days a player has spent in the guild so far, without breaklisting them (guild staff)")
+    @app_commands.describe(ign="Minecraft username of a player who is in the guild")
+    @app_commands.check(staff_check)
+    async def update(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        if await q_one("SELECT id FROM bl_entries WHERE uuid = ? AND status = 'active'", (uuid,)):
+            await interaction.followup.send(f"**{esc(name)}** is on the breaklist: their days are already saved there.",
+                                            allowed_mentions=NO_MENTIONS)
+            return
+        await self.core.guild_members()
+        joined = await self.core.joined_for(uuid)
+        if joined is None:
+            await interaction.followup.send(f"I don't know when **{esc(name)}** joined the guild (are they a member? "
+                                            "Use `/breaklist adddays` to add days by hand).", allowed_mentions=NO_MENTIONS)
+            return
+        before, _ = await self.core.days_info(uuid)
+        row = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+        stay = before - (row["banked"] if row else 0.0)
+        if stay <= 0.01:
+            await interaction.followup.send("There are no new days to save.", allowed_mentions=NO_MENTIONS)
+            return
+        await self.core.add_day_set(uuid, name, stay, f"saved with /breaklist update (stay since {gc.fmt_date(joined)})",
+                                    interaction.user.id)
+        await kv_set("daysanchor:" + uuid, iso(now_utc()))
+        total, _ = await self.core.days_info(uuid)
+        await interaction.followup.send(
+            f"✅ **{esc(name)}**: **{stay:.1f}** days saved (stay since {gc.fmt_date(joined)}). They are not breaklisted: "
+            f"the days keep counting from now on. Total days in guild: **{int(total)}**.", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="setdays", description="Set the days a player has already spent in the guild (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
@@ -3328,6 +3390,51 @@ class CountryCog(commands.GroupCog, name="country", description="Country flags s
         self.core = core
         super().__init__()
 
+    def country_name(self, code):
+        best = None
+        for nm, c in COUNTRY_NAMES.items():
+            if c == code and (best is None or len(nm) < len(best)):
+                best = nm
+        return (best or code).title()
+
+    async def country_card(self, uuid, name, code, old=None, title="COUNTRY"):
+        """The card of a player's country with 1v1 record, tier, opponents, days in the guild and join date."""
+        import hub
+        from database import get_player, get_stats
+        await load_flag(uuid, name)
+        head = (await g._fetch_heads([(uuid, name)])).get(uuid)
+        chips = [(f"{code} · {self.country_name(code)}", g.ACCENT)]
+        if old and old != code:
+            chips.append((f"was {old}", (120, 130, 150)))
+        panels = [("COUNTRY", f"{self.country_name(code)} ({code})",
+                   (f"Changed from {self.country_name(old)} ({old})" if old and old != code else
+                    ("Same country as before" if old else "Country set for the first time")), g.TEXT)]
+        try:
+            p = await get_player(uuid)
+        except Exception:
+            p = None
+        if p:
+            w, l = await get_stats(uuid)
+            tot = w + l
+            panels.append(("1V1 RECORD", f"{w}W {l}L" + (f" · {w * 100 // tot}%" if tot else ""),
+                           f"Bedwars 1v1 tier {p['tier']} · {p['elo']} elo", g.TEXT))
+            wins = [r["ign"] for r in await q_all(
+                "SELECT DISTINCT p.ign FROM matches m JOIN players p ON p.uuid = m.loser_uuid "
+                "WHERE m.winner_uuid = ? AND m.cancelled = 0 AND m.mode_id IS NULL ORDER BY m.id DESC LIMIT 12", (uuid,))]
+            loss = [r["ign"] for r in await q_all(
+                "SELECT DISTINCT p.ign FROM matches m JOIN players p ON p.uuid = m.winner_uuid "
+                "WHERE m.loser_uuid = ? AND m.cancelled = 0 AND m.mode_id IS NULL ORDER BY m.id DESC LIMIT 12", (uuid,))]
+            panels.append(("BEAT", ", ".join(wins[:6]) or "Nobody yet", f"{len(wins)} different opponent{'s' if len(wins) != 1 else ''}" if wins else "", g.GREEN))
+            panels.append(("LOST TO", ", ".join(loss[:6]) or "Nobody yet", f"{len(loss)} different opponent{'s' if len(loss) != 1 else ''}" if loss else "", g.RED))
+        else:
+            panels.append(("1V1 RECORD", "No 1v1s yet", "No tier assigned", g.MUTED))
+        days, state = await self.core.days_info(uuid)
+        joined = await self.core.joined_for(uuid)
+        panels.append(("DAYS IN GUILD", f"{int(days)} days" if state != "unknown" else "Not in the guild",
+                       f"Joined {gc.fmt_date(joined)}" if joined else "No join date saved", g.TEXT))
+        return await asyncio.to_thread(hub.draw_hub, title, f"{GUILD_NAME_DISPLAY} · {name}", head, name, chips, panels,
+                                       "Staff set the country with /country set")
+
     @app_commands.command(name="set", description="Assign a country to a player: its flag shows next to the name (guild staff)")
     @app_commands.describe(ign="Minecraft username", country="Country name (Italy) or 2-letter code (IT)")
     @app_commands.check(staff_check)
@@ -3341,10 +3448,69 @@ class CountryCog(commands.GroupCog, name="country", description="Country flags s
         if r is None:
             return
         uuid, name = r
+        before = await q_one("SELECT code FROM countries WHERE uuid = ?", (uuid,))
+        old = before["code"] if before else None
         await q_run("INSERT INTO countries (uuid, ign, code) VALUES (?, ?, ?) "
                     "ON CONFLICT(uuid) DO UPDATE SET ign = excluded.ign, code = excluded.code", (uuid, name, code))
-        await interaction.followup.send(f"{flag_emoji(code)} **{esc(name)}** now has the country **{code}**. "
-                                        "The flag shows on their cards.")
+        if old and old != code:
+            text = (f"{flag_emoji(old)} → {flag_emoji(code)} **{esc(name)}**: the country changed from "
+                    f"**{self.country_name(old)}** ({old}) to **{self.country_name(code)}** ({code}).")
+        elif old:
+            text = f"{flag_emoji(code)} **{esc(name)}** already had **{self.country_name(code)}** ({code}): nothing changed."
+        else:
+            text = f"{flag_emoji(code)} **{esc(name)}** now has the country **{self.country_name(code)}** ({code})."
+        card = await self.country_card(uuid, name, code, old, "COUNTRY SET")
+        await interaction.followup.send(content=text, file=send_file(card, "country.png"), allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="view", description="The country of a player, with their 1v1s and days in the guild")
+    @app_commands.describe(ign="Minecraft username (empty: your linked account)")
+    async def view(self, interaction: discord.Interaction, ign: Optional[str] = None):
+        await interaction.response.defer()
+        if ign:
+            r = await lookup(interaction, ign)
+            if r is None:
+                return
+            uuid, name = r
+        else:
+            row = await q_one("SELECT uuid, ign FROM links WHERE discord_id = ?", (str(interaction.user.id),))
+            if not row:
+                await interaction.followup.send("Link your account with `/link` or type a username.")
+                return
+            uuid, name = row["uuid"], row["ign"]
+        c = await q_one("SELECT code FROM countries WHERE uuid = ?", (uuid,))
+        if not c:
+            await interaction.followup.send(f"**{esc(name)}** has no country yet. Staff can set it with `/country set`.",
+                                            allowed_mentions=NO_MENTIONS)
+            return
+        card = await self.country_card(uuid, name, c["code"], None, "COUNTRY")
+        await interaction.followup.send(file=send_file(card, "country.png"))
+
+    @app_commands.command(name="list", description="How many players have a country, how many are missing, and who (guild staff)")
+    @app_commands.check(staff_check)
+    async def list(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        members = await self.core.guild_members() or {}
+        rows = await q_all("SELECT uuid, code FROM countries")
+        by = {r["uuid"]: r["code"] for r in rows}
+        have = [u for u in members if u in by]
+        missing = [u for u in members if u not in by]
+        counts = {}
+        for u in have:
+            counts[by[u]] = counts.get(by[u], 0) + 1
+        top = ", ".join(f"{flag_emoji(c)} {self.country_name(c)} {k}" for c, k in sorted(counts.items(), key=lambda x: -x[1])[:15])
+        names = []
+        for u in missing[:60]:
+            names.append(esc(await self.core.name_for(u)))
+        embed = discord.Embed(title="Countries", color=0x00C8E6)
+        embed.description = (f"**{len(have)}** of **{len(members)}** guild members have a country, "
+                             f"**{len(missing)}** are missing." if members else
+                             f"{len(rows)} players have a country (I can't read the guild member list now).")
+        if top:
+            embed.add_field(name="Most common", value=top[:1000], inline=False)
+        if names:
+            embed.add_field(name="Without a country", value=(", ".join(names) + (f" and {len(missing) - 60} more" if len(missing) > 60 else ""))[:1000], inline=False)
+        embed.set_footer(text="Also under /topgexp: top 10 players without a country")
+        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="remove", description="Remove the country of a player (guild staff)")
     @app_commands.check(staff_check)
@@ -3545,17 +3711,168 @@ class WarnButton(discord.ui.DynamicItem[discord.ui.Button], template=r"wrn:(?P<a
         if self.act == "ed":
             await interaction.response.send_modal(EditWarnModal(self.wid, w["reason"] or ""))
             return
+        for pr in await proof_rows("w", self.wid):
+            await delete_proof_message(interaction.client, pr)
+        await q_run("DELETE FROM punish_media WHERE kind = 'w' AND pid = ?", (self.wid,))
         await q_run("DELETE FROM warnings WHERE id = ?", (self.wid,))
         await interaction.response.edit_message(
             content=f"~~{(interaction.message.content or '').splitlines()[0] if interaction.message.content else 'Verbal warning'}~~"
                     f"\n🗑️ Removed by {interaction.user.display_name}.", view=None)
 
 
+PROOF_TYPES = ("image/", "video/")
+
+
+def proof_ok(att):
+    return (att.content_type or "").startswith(PROOF_TYPES)
+
+
+async def send_proofs(channel, kind, pid, files, start=1, reply_to=None):
+    """Posts every proof (image or video) as its own message, in order, and remembers the messages.
+    files: [(name, bytes)]. Separate messages are never cropped by Discord. Returns how many were posted."""
+    count = 0
+    for i, (nm, data) in enumerate(files, start):
+        try:
+            msg = await channel.send(content=f"-# Proof {i} · {'mute' if kind == 'm' else 'warning'} #{pid}",
+                                     file=discord.File(io.BytesIO(data), filename=nm), allowed_mentions=NO_MENTIONS,
+                                     reference=reply_to if reply_to is not None and i == start else None)
+        except discord.HTTPException as e:
+            log.warning("Could not post a proof: %s", e)
+            continue
+        await q_run("INSERT INTO punish_media (kind, pid, ch, msg, pos, name) VALUES (?, ?, ?, ?, ?, ?)",
+                    (kind, pid, str(msg.channel.id), str(msg.id), i, nm))
+        count += 1
+    return count
+
+
+async def read_proofs(attachments):
+    """[(name, bytes)] of the valid attachments, and the number skipped because they are not images/videos."""
+    out, bad = [], 0
+    for a in attachments:
+        if a is None:
+            continue
+        if not proof_ok(a):
+            bad += 1
+            continue
+        out.append((a.filename, await a.read()))
+    return out, bad
+
+
+async def proof_rows(kind, pid):
+    return await q_all("SELECT * FROM punish_media WHERE kind = ? AND pid = ? ORDER BY pos, id", (kind, pid))
+
+
+async def delete_proof_message(bot, row):
+    try:
+        ch = bot.get_channel(int(row["ch"])) or await bot.fetch_channel(int(row["ch"]))
+        msg = await ch.fetch_message(int(row["msg"]))
+        await msg.delete()
+        return True
+    except (discord.HTTPException, ValueError, TypeError):
+        return False
+
+
+async def renumber_proofs(bot, kind, pid):
+    """After a proof is removed the remaining ones are numbered again 1, 2, 3 (the caption of each message too)."""
+    for i, row in enumerate(await proof_rows(kind, pid), 1):
+        if row["pos"] != i:
+            await q_run("UPDATE punish_media SET pos = ? WHERE id = ?", (i, row["id"]))
+            try:
+                ch = bot.get_channel(int(row["ch"])) or await bot.fetch_channel(int(row["ch"]))
+                msg = await ch.fetch_message(int(row["msg"]))
+                await msg.edit(content=f"-# Proof {i} · {'mute' if kind == 'm' else 'warning'} #{pid}")
+            except (discord.HTTPException, ValueError, TypeError):
+                pass
+
+
+class ProofModal(discord.ui.Modal):
+    """Add / replace / remove one extra image of a mute or a verbal warning (the upload is inside the pop-up)."""
+
+    def __init__(self, act, kind, pid, rows):
+        super().__init__(title={"add": "Add images", "rep": "Replace an image", "rm": "Remove an image"}[act])
+        self.act, self.kind, self.pid = act, kind, pid
+        self.select = self.upload = None
+        if act in ("rep", "rm"):
+            self.select = discord.ui.Select(options=[discord.SelectOption(label=f"Proof {r['pos']}", value=str(r["id"]))
+                                                     for r in rows[:25]], min_values=1, max_values=1)
+            self.add_item(discord.ui.Label(text="Which one", component=self.select))
+        if act in ("add", "rep"):
+            self.upload = discord.ui.FileUpload(min_values=1, max_values=3 if act == "add" else 1, required=True)
+            self.add_item(discord.ui.Label(text="Image or video", component=self.upload))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        bot = interaction.client
+        files, bad = ([], 0)
+        if self.upload is not None:
+            files, bad = await read_proofs(self.upload.values)
+            if not files:
+                await interaction.followup.send("The file has to be an image or a video.", ephemeral=True)
+                return
+        if self.act == "add":
+            n_now = len(await proof_rows(self.kind, self.pid))
+            posted = await send_proofs(interaction.channel, self.kind, self.pid, files, start=n_now + 1)
+            await interaction.followup.send(f"✅ {posted} proof{'s' if posted != 1 else ''} added."
+                                            + (f" {bad} skipped (not an image or video)." if bad else ""), ephemeral=True)
+            return
+        row = await q_one("SELECT * FROM punish_media WHERE id = ?", (int(self.select.values[0]),))
+        if row is None:
+            await interaction.followup.send("That proof doesn't exist any more.", ephemeral=True)
+            return
+        if self.act == "rm":
+            await delete_proof_message(bot, row)
+            await q_run("DELETE FROM punish_media WHERE id = ?", (row["id"],))
+            await renumber_proofs(bot, self.kind, self.pid)
+            await interaction.followup.send("🗑️ Proof removed.", ephemeral=True)
+            return
+        await delete_proof_message(bot, row)
+        await q_run("DELETE FROM punish_media WHERE id = ?", (row["id"],))
+        await send_proofs(interaction.channel, self.kind, self.pid, files, start=row["pos"])
+        await interaction.followup.send("✅ Proof replaced (the new one is posted at the bottom of the thread).",
+                                        ephemeral=True)
+
+
+class ProofButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pmd:(?P<act>add|rep|rm):(?P<kind>m|w):(?P<pid>\d+)"):
+    """Staff buttons under a mute / warning: add, replace or remove an extra image."""
+    LABELS = {"add": "Add image", "rep": "Replace image", "rm": "Remove image"}
+
+    def __init__(self, act, kind, pid):
+        super().__init__(discord.ui.Button(
+            label=self.LABELS[act], row=2,
+            style=discord.ButtonStyle.success if act == "add" else discord.ButtonStyle.secondary,
+            custom_id=f"pmd:{act}:{kind}:{pid}"))
+        self.act, self.kind, self.pid = act, kind, int(pid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["act"], match["kind"], int(match["pid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_guild_staff(interaction.user):
+            await interaction.response.send_message("Only guild staff can do this.", ephemeral=True)
+            return
+        rows = await proof_rows(self.kind, self.pid)
+        if self.act != "add" and not rows:
+            await interaction.response.send_message("There are no extra images yet: use Add image.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ProofModal(self.act, self.kind, self.pid, rows))
+
+
+def add_proof_buttons(view, kind, pid):
+    for act in ("add", "rep", "rm"):
+        view.add_item(ProofButton(act, kind, pid))
+    return view
+
+
+def mute_view(mid):
+    return add_proof_buttons(appeal_view("m", mid), "m", mid)
+
+
 def warn_view(wid):
     view = appeal_view("w", wid)
     view.add_item(WarnButton("rm", wid))
     view.add_item(WarnButton("ed", wid))
-    return view
+    return add_proof_buttons(view, "w", wid)
 
 
 def mute_ping():
@@ -3651,11 +3968,18 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
 
     @app_commands.command(name="add", description="Mute a player from the guild bridge: role, ping and log (guild staff)")
     @app_commands.describe(ign="Minecraft username", length="3d, 12h, 1d12h, 2w, 30m or perm", reason="Why they were muted",
-                           user="The Discord member to ping and give the role to (only if they are not linked)")
+                           user="The Discord member to ping and give the role to (only if they are not linked)",
+                           image="Proof: image or video (optional)", image2="Second proof (optional)",
+                           image3="Third proof (optional)")
     @app_commands.check(staff_check)
     async def add(self, interaction: discord.Interaction, ign: str, length: str, reason: str,
-                  user: Optional[discord.Member] = None):
+                  user: Optional[discord.Member] = None, image: Optional[discord.Attachment] = None,
+                  image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None):
         await interaction.response.defer()
+        proofs, bad = await read_proofs([image, image2, image3])
+        if bad:
+            await interaction.followup.send("The proofs have to be images or videos.")
+            return
         td = parse_mute_length(length)
         if td is None:
             await interaction.followup.send("I couldn't read the length. Use `3d`, `12h`, `1d12h`, `2w`, `30m` or `perm`.")
@@ -3684,8 +4008,7 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
              ("EXPIRES", "Never" if end is None else gc.fmt_et(end)), ("MUTES SO FAR", str(total_mutes))],
             interaction.user.display_name, mid)
         if did:
-            when = "This mute does not expire." if end is None else f"It expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)."
-            text = (f"<@{did}> you have been muted in the guild bridge. {when} "
+            text = (f"<@{did}> you have been muted in the guild bridge. "
                     + ("The **No Guild Bridge** role was added: you can't write there until the mute ends."
                        if gave else "Staff will remove your guild bridge permissions."))
         else:
@@ -3694,23 +4017,30 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         if not gave:
             text += "\nThe **No Guild Bridge** role could not be added automatically: please add it manually."
         how_long = "permanently" if end is None else length.strip()
-        content = f"{name} has been muted {how_long} for {reason}\n{mute_ping()} {text}".strip()
+        expires_line = ("This mute does not expire." if end is None else
+                        f"Expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)")
+        content = f"{name} has been muted {how_long} for {reason}\n{expires_line}\n{mute_ping()} {text}".strip()
         posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, data=card, filename="mute.png",
-                                         mentions=MUTE_MENTIONS, view=appeal_view("m", mid))
+                                         mentions=MUTE_MENTIONS, view=mute_view(mid))
+        first = self.core.last_message if posted else None
         if not posted:
-            await interaction.followup.send(content=content, file=send_file(card, "mute.png"), allowed_mentions=MUTE_MENTIONS,
-                                            view=appeal_view("m", mid))
+            first = await interaction.followup.send(content=content, file=send_file(card, "mute.png"),
+                                                    allowed_mentions=MUTE_MENTIONS, view=mute_view(mid), wait=True)
         else:
             await interaction.followup.send(f"Mute logged in {posted}.")
+        if proofs and first is not None:                       # every proof in its own message, in order
+            await send_proofs(first.channel, "m", mid, proofs)
 
     @app_commands.command(name="warn", description="Log a verbal warning: it changes nothing, it is only recorded (guild staff)")
     @app_commands.describe(ign="Minecraft username", reason="Why they got the warning",
                            user="The Discord member to ping (only if they are not linked)",
-                           image="A screenshot or image as proof (optional)",
+                           image="A screenshot, image or video as proof (optional)",
+                           image2="Second proof (optional)", image3="Third proof (optional)",
                            link="A message link as proof (optional)")
     @app_commands.check(staff_check)
     async def warn(self, interaction: discord.Interaction, ign: str, reason: str, user: Optional[discord.Member] = None,
-                   image: Optional[discord.Attachment] = None, link: Optional[str] = None):
+                   image: Optional[discord.Attachment] = None, link: Optional[str] = None,
+                   image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None):
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
@@ -3719,12 +4049,10 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         did = await self.target_id(uuid, user)
         now = now_utc()
         expires = now + timedelta(days=WARN_EXPIRY_DAYS) if WARN_EXPIRY_DAYS > 0 else None
-        media = []
-        if image is not None:
-            if not (image.content_type or "").startswith("image/"):
-                await interaction.followup.send("The attachment has to be an image.")
-                return
-            media.append((image.filename, await image.read()))
+        media, bad = await read_proofs([image, image2, image3])
+        if bad:
+            await interaction.followup.send("The proofs have to be images or videos.")
+            return
         wid = await q_run("INSERT INTO warnings (uuid, ign, reason, at, added_by, discord_id, expires_at, by_name, link) "
                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                           (uuid, name, reason, iso(now), str(interaction.user.id), str(did) if did else None,
@@ -3736,18 +4064,22 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             content += f"\n<@{did}>"
         if link and link.strip():
             content += f"\nProof: {link.strip()}"
-        files = [("warning.png", card), *media]
+        content += ("\nExpires " + (f"<t:{int(expires.timestamp())}:F> (<t:{int(expires.timestamp())}:R>)" if expires
+                                     else "never"))
+        files = [("warning.png", card)]
         posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, media=files,
                                          mentions=MUTE_MENTIONS, view=warn_view(wid))
+        first = self.core.last_message if posted else None
         if not posted:
-            await interaction.followup.send(content=content, files=[send_file(d, n_) for n_, d in files],
-                                            allowed_mentions=MUTE_MENTIONS, view=warn_view(wid))
+            first = await interaction.followup.send(content=content, file=send_file(card, "warning.png"),
+                                                    allowed_mentions=MUTE_MENTIONS, view=warn_view(wid), wait=True)
         else:
-            msg = self.core.last_message
-            if msg is not None:
+            if first is not None:
                 await q_run("UPDATE warnings SET post_ch = ?, post_msg = ? WHERE id = ?",
-                            (str(msg.channel.id), str(msg.id), wid))
+                            (str(first.channel.id), str(first.id), wid))
             await interaction.followup.send(f"Verbal warning logged in {posted}.")
+        if media and first is not None:                        # every proof in its own message, in order
+            await send_proofs(first.channel, "w", wid, media)
 
     @app_commands.command(name="editwarn", description="Change the reason of a verbal warning (guild staff)")
     @app_commands.describe(warning="Warning number (shown in /mute view)", reason="The new reason")
@@ -3798,6 +4130,33 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             else:
                 await interaction.followup.send(text, allowed_mentions=MUTE_MENTIONS)
 
+
+    @app_commands.command(name="warnlength", description="How long a verbal warning lasts from now on (guild staff). No options: show it")
+    @app_commands.describe(days="Days a new verbal warning lasts (0 = never expires)",
+                           apply_to_old="Also change the warnings that have not expired yet")
+    @app_commands.check(staff_check)
+    async def warnlength(self, interaction: discord.Interaction, days: Optional[app_commands.Range[int, 0, 3650]] = None,
+                         apply_to_old: bool = False):
+        global WARN_EXPIRY_DAYS
+        await interaction.response.defer()
+        if days is None:
+            await interaction.followup.send(f"A verbal warning lasts **{WARN_EXPIRY_DAYS} days**." if WARN_EXPIRY_DAYS
+                                            else "Verbal warnings never expire.")
+            return
+        WARN_EXPIRY_DAYS = days
+        await kv_set("warn_expiry_days", days)
+        changed = 0
+        if apply_to_old:
+            for w in await q_all("SELECT * FROM warnings"):
+                if w["expires_at"] and from_iso(w["expires_at"]) <= now_utc():
+                    continue                                      # already expired: left alone
+                end = (from_iso(w["at"]) + timedelta(days=days)) if days else None
+                await q_run("UPDATE warnings SET expires_at = ? WHERE id = ?", (iso(end) if end else None, w["id"]))
+                changed += 1
+        await interaction.followup.send(
+            (f"✅ New verbal warnings last **{days} days**." if days else "✅ New verbal warnings never expire.")
+            + (f" {changed} warning(s) not expired yet were changed too." if apply_to_old else
+               " The existing ones keep their date (use `apply_to_old` to change them, or `/mute warnexpiry` for one)."))
 
     @app_commands.command(name="warnexpiry", description="Change when a verbal warning expires (guild staff)")
     @app_commands.describe(warning="Warning number (shown in /mute view)",
@@ -4062,10 +4421,14 @@ async def setup(bot: commands.Bot):
     saved = await kv_get("weekly_req")
     if saved and saved.isdigit():
         gc.set_weekly_req(int(saved))
+    global WARN_EXPIRY_DAYS
+    saved = await kv_get("warn_expiry_days")
+    if saved and saved.isdigit():
+        WARN_EXPIRY_DAYS = int(saved)
     core = Core(bot)
     bot.np_core = core
     g.FLAG_LOADER = _load_flags          # every card with heads (1v1 cards too) shows the flags
-    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, BreaklistEditButton, AppealButton, AppealReviewButton, WarnButton)
+    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, BreaklistEditButton, AppealButton, AppealReviewButton, WarnButton, ProofButton)
     await bot.add_cog(Breaklist(core))
     await bot.add_cog(Excuse(core))
     await bot.add_cog(GexpTools(core))

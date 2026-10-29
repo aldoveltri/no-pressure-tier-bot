@@ -24,7 +24,7 @@ CATS = {
                ["mutes", "warnings"]),
     "breaklist": ("Breaklist: entries, saved days, debts, excuses, history",
                   ["bl_entries", "bl_requests", "player_days", "day_sets", "debts", "excuses", "guild_left"],
-                  ["guild_history_reset", "ignore:%"],
+                  ["guild_history_reset", "ignore:%", "daysanchor:%"],
                   ["bl_entries", "bl_requests", "player_days", "day_sets", "debts", "excuses", "guild_left"]),
     "blacklist": ("Blacklist", ["blacklist"], [], ["blacklist"]),
     "reports": ("Cheating reports and Urchin memory", ["cheat_reports", "ev_votes", "urchin_seen"],
@@ -34,7 +34,8 @@ CATS = {
              ["snapshot_at", "logins_since", "road_try:%"], ["gexp_history", "guild_seen", "logins"]),
     "pro": ("Pro list and waiting list", ["pro_players", "waitlist", "waitlist_notes"], ["pro:%"],
             ["pro_players", "waitlist", "waitlist_notes"]),
-    "community": ("Parties and tag votes", ["parties", "party_votes", "tag_props", "tag_ballots"], [], []),
+    "community": ("Parties and tag votes", ["parties", "party_votes", "tag_props", "tag_ballots", "tag_polls", "tag_answers", "tag_options", "tag_choices"], [], []),
+    "chat": ("Saved guild chat", ["bridge_chat"], [], []),
     "links": ("Linked accounts and countries", ["links", "countries"], [], ["links", "countries"]),
 }
 ORDER = list(CATS)

@@ -87,13 +87,78 @@ async def top_rows(core, week, page=1, per=10):
     return chunk, a, b, page, pages
 
 
-def top_text(rows, start=1):
+def top_text(rows, start=1, streaks=None):
     lines = []
     for i, r in enumerate(rows, start):
         flag = flag_emoji(r["code"])
+        weeks = f" ({streaks[r['uuid']]})" if streaks and i <= 10 and r["uuid"] in streaks else ""
         what = f" ▶️ {promotion_text(r['rank'])}" if i <= 10 else ""          # only the top 10 are promoted
-        lines.append(f"`#{i}` {esc(r['ign'])} {n(r['gexp'])}{what}" + (f" {flag}" if flag else ""))
+        lines.append(f"`#{i}` {esc(r['ign'])} {n(r['gexp'])}{weeks}{what}" + (f" {flag}" if flag else ""))
     return "\n".join(lines)
+
+
+def week_window(week, back=0):
+    """(first day, last day) as ISO dates of the week shown ('last' or 'this'), `back` weeks earlier."""
+    now = now_utc()
+    ws = gc.week_start(now)
+    if week == "this":
+        first, last = ws, now
+    else:
+        first, last = ws - timedelta(days=7), ws - timedelta(seconds=1)
+    first, last = first - timedelta(days=7 * back), last - timedelta(days=7 * back)
+    return first.astimezone(gc.ET).date().isoformat(), last.astimezone(gc.ET).date().isoformat()
+
+
+async def streaks_of(week, current_top, uuids, limit=12):
+    """{uuid: consecutive weeks (this one included) in the top 10}."""
+    sets = [set(current_top)]
+    for k in range(1, limit):
+        a, b = week_window(week, k)
+        rows = await q_all("SELECT uuid, SUM(gexp) AS total FROM gexp_history WHERE day >= ? AND day <= ? "
+                           "GROUP BY uuid ORDER BY total DESC LIMIT 10", (a, b))
+        sets.append({r["uuid"] for r in rows})
+    out = {}
+    for u in uuids:
+        c = 0
+        for st in sets:
+            if u not in st:
+                break
+            c += 1
+        out[u] = c
+    return out
+
+
+async def extras_text(core, week, top_ids):
+    """Lines under the first page: who is demoted from Active, the purge summary, the countries."""
+    out = []
+    active = (bl._env("ACTIVE_RANK_NAME") or "Active").strip().lower()
+    members = await core.guild_members() or {}
+    demoted = [u for u, m in members.items() if (m.get("rank") or "").strip().lower() == active and u not in top_ids]
+    if members:
+        names = []
+        for u in demoted[:30]:
+            code = (await q_one("SELECT code FROM countries WHERE uuid = ?", (u,)) or {}).get("code")
+            fl = flag_emoji(code)
+            names.append(esc(await core.name_for(u)) + (f" {fl}" if fl else ""))
+        out.append("`Demoted from Active`\n" + (", ".join(names) if names else "nobody")
+                   + (f" and {len(demoted) - 30} more" if len(demoted) > 30 else ""))
+    if week == "last":
+        try:
+            import purgesum
+            purged, _skipped, total = await purgesum.purged_members(core, gc.week_start(now_utc()))
+            out.append(purgesum.summary_text(purged, total))
+            out.append("-# Not counted: breaklisted, excused, blacklisted, back in the guild, or players who had enough GEXP.")
+        except Exception:
+            log.exception("Purge summary for the top failed")
+    if members:
+        have = {r["uuid"] for r in await q_all("SELECT uuid FROM countries")}
+        missing = [u for u in top_ids if u not in have]
+        line = f"-# Countries set: {len([u for u in members if u in have])}/{len(members)} members"
+        if missing:
+            miss_names = [esc(await core.name_for(u)) for u in missing]
+            line += " · top 10 without a country: " + ", ".join(miss_names)
+        out.append(line)
+    return "\n".join(out)
 
 
 def draw_top10(rows, heads, subtitle, start=1, mark=None):
@@ -136,7 +201,15 @@ async def build_page(core, week, page, mark=None):
     sub = (f"{bl.GUILD_NAME_DISPLAY} · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
            + (f" · page {page}/{pages}" if pages > 1 else ""))
     card = await asyncio.to_thread(draw_top10, rows, heads, sub, start, mark)
-    return top_text(rows, start), card, page, pages
+    top_ids = [r["uuid"] for r in (await ranking(core, week))[0][:10]]
+    streaks = await streaks_of(week, top_ids, [r["uuid"] for r in rows if r["uuid"] in top_ids])
+    text = top_text(rows, start, streaks)
+    if page == 1:
+        text = "-# *(number represents # of consecutive weeks in top 10)*\n" + text
+        extra = await extras_text(core, week, top_ids)
+        if extra:
+            text += "\n\n" + extra
+    return text[:2000], card, page, pages
 
 
 class SearchModal(discord.ui.Modal, title="Find a player in the top"):

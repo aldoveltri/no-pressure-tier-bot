@@ -127,8 +127,15 @@ class WipeCog(commands.Cog):
 # purge timestamp
 # ======================================================================================
 
+def stamp_lines(dt):
+    """The timestamp of a moment: each format shown, then the same text in a box to copy."""
+    ts = int(dt.timestamp())
+    fmts = [(f"<t:{ts}:F>", f"<t:{ts}:F>"), (f"<t:{ts}:R>", f"<t:{ts}:R>"), (f"<t:{ts}:D> <t:{ts}:t>", f"<t:{ts}:D> <t:{ts}:t>")]
+    return "\n".join(f"`{i}.` {show}\n```{raw}```" for i, (show, raw) in enumerate(fmts, 1))
+
+
 class PurgeTimeCog(commands.Cog):
-    @app_commands.command(name="purgetime", description="Discord timestamp of the upcoming purge, ready to copy")
+    @app_commands.command(name="purgetime", description="Discord timestamps of the last and the upcoming purge, or of a time you type, ready to copy")
     @app_commands.describe(when="Optional: another date/time, e.g. 2026/11/03 12:00 AM (the time zone of /timezone)")
     async def purgetime(self, interaction: discord.Interaction, when: Optional[str] = None):
         if when:
@@ -137,14 +144,13 @@ class PurgeTimeCog(commands.Cog):
                 await interaction.response.send_message(
                     "I couldn't read it. Use `2026/11/03 12:00 AM` (time zone: see /timezone).", ephemeral=True)
                 return
-            title = "Timestamp"
+            embed = discord.Embed(title="Timestamp", color=0x00C8E6, description=f"{gc.fmt_et(end)}\n\n{stamp_lines(end)}")
         else:
-            end = gc.week_end(now_utc())
-            title = "Upcoming purge"
-        ts = int(end.timestamp())
-        embed = discord.Embed(title=title, color=0x00C8E6)
-        embed.description = (f"{gc.fmt_et(end)}\n\n**Preview:** <t:{ts}:F> · <t:{ts}:R>\n\nCopy what you need:\n"
-                             f"```<t:{ts}:F>```\n```<t:{ts}:R>```\n```<t:{ts}:D> <t:{ts}:t>```")
+            now = now_utc()
+            nxt, last = gc.week_end(now), gc.week_start(now)
+            embed = discord.Embed(title="Purge timestamps", color=0x00C8E6)
+            embed.add_field(name=f"Upcoming purge · {gc.fmt_et(nxt)}", value=stamp_lines(nxt), inline=False)
+            embed.add_field(name=f"Last purge · {gc.fmt_et(last)}", value=stamp_lines(last), inline=False)
         await interaction.response.send_message(embed=embed)
 
 

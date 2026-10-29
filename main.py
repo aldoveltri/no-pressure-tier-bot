@@ -57,7 +57,10 @@ log.setLevel(logging.INFO)
 log.addHandler(_handler)
 log.addHandler(logging.StreamHandler())
 
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
+_intents = discord.Intents.default()
+if (os.getenv("MESSAGE_CONTENT_INTENT") or "").strip() == "1":
+    _intents.message_content = True            # only when the guild chat is saved (/chat): turn it on in the developer portal too
+bot = commands.Bot(command_prefix="!", intents=_intents)
 
 NO_MENTIONS = discord.AllowedMentions.none()
 SEASON_ELO_LOSS = 100
@@ -439,6 +442,7 @@ async def setup_hook():
                     "info_image": info_image, "info_data": get_info}
     await bot.load_extension("purgesum")
     await bot.load_extension("roles")
+    await bot.load_extension("chat")
     await bot.load_extension("cleanup")
     await bot.load_extension("hub")
 

@@ -40,9 +40,17 @@ async def days_board(core, page=1):
         return None
     banked = {r["uuid"]: r["banked"] for r in await q_all("SELECT uuid, banked FROM player_days")}
     now = now_utc()
+    anchors = {}
+    for r in await q_all("SELECT key, value FROM kv WHERE key LIKE 'daysanchor:%'"):
+        try:
+            anchors[r["key"].split(":", 1)[1]] = from_iso(r["value"]).timestamp() * 1000
+        except Exception:
+            pass
     rows = []
     for uuid, m in members.items():
         joined = m.get("joined")
+        if joined and anchors.get(uuid):
+            joined = max(joined, anchors[uuid])
         stay = (now.timestamp() - joined / 1000) / 86400 if joined else 0
         rows.append((uuid, banked.get(uuid, 0.0) + max(0.0, stay)))
     rows.sort(key=lambda x: -x[1])
@@ -245,7 +253,10 @@ class ToolsCog(commands.Cog):
     @app_commands.check(staff_check)
     async def timezone(self, interaction: discord.Interaction, zone: Optional[str] = None):
         if zone is None:
-            await interaction.response.send_message(f"The time zone is **{gc.TZ_NAME}**.", ephemeral=True)
+            import staff2
+            now = now_utc()
+            await interaction.response.send_message(
+                f"The time zone is **{gc.TZ_NAME}**. Right now: {gc.fmt_et(now)}\n\n{staff2.stamp_lines(now)}", ephemeral=True)
             return
         gc.set_tz(zone)
         await kv_set("tz", zone)

@@ -695,6 +695,9 @@ EXTRA_PAGES = [
            "Write RESET BREAKLIST to confirm."),
         _c("/breaklist offer ign [kind] [note]", "Staff. Sends the breaklist offer to a player who was removed or has been "
            "away for a few days. The buttons: Breaklist Me, or I'll reach the requirement (with a reason)."),
+        _c("/chat [ign] [search]", "Staff. What a player wrote in the guild bridge chat, newest first, with Previous / Next "
+           "buttons and a Search button. Works from when it is switched on: BRIDGE_CHANNEL_ID, MESSAGE_CONTENT_INTENT=1 and "
+           "the Message Content intent in the Discord developer portal."),
         _c("/gexp remind ign", "Staff. Sends the GEXP reminder of one player now, with its buttons."),
         _c("/purgetime [when]", "Everyone. The Discord timestamp of the upcoming purge, ready to copy."),
         _c("/wipeplayer ign [mode] [confirm]", "Tier Tester. Cheater: cancels all their matches and gives back the "

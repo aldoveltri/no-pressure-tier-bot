@@ -139,3 +139,8 @@ Variables: `APPEALS_CHANNEL_ID` (where feedback and appeals arrive), `BETRAYAL_P
 
 ## Custom tag votes (tags.py)
 `/tag suggest`. Variables: `ACTIVE_RANK_NAME` (default `Active`: the Hypixel guild rank of active players), `TAG_CHANNEL_ID` (where the votes are posted, default the channel of the command), `TAG_PING_USER_ID` (who is pinged to change the tag, default `BETRAYAL_PING_USER_ID`).
+
+## Added later
+- `/breaklist offer`, `/gexp history`, `/purge summary` (also posted by itself after the purge: `PURGE_SUMMARY_CHANNEL_ID`, `PURGE_SUMMARY_DELAY_MINUTES`), `/pro list` (shows how each Pro got the rank), `/tag vote` (yes/no, then tags), `/cleanup`.
+- `roles.py`: gives the role `GUILD_MEMBER_ROLE_ID` to linked guild members and removes it from who left the guild or unlinked (the bot needs Manage Roles and its role must be above that role).
+- `chat.py`: `/chat [ign] [search]` guild chat history. Set `BRIDGE_CHANNEL_ID` and `MESSAGE_CONTENT_INTENT=1` and turn on the Message Content intent in the Discord developer portal.

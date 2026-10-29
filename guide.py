@@ -79,18 +79,19 @@ TIER_PAGES = [
     {
         "title": "Your stats",
         "blocks": [
-            _c("/profile [ign]",
+            _c("/profile [player] [hidden]",
                "Everything the bot knows about a player in one card: 1v1 tier and record, guild rank, days in the "
-               "guild, GEXP of the week, breaklist, excuses, purge, mutes and warns, blacklist, last login. "
-               "Buttons open the details: 1v1 stats (with a menu for modes, seasons and years), Matches, Guild & GEXP, "
-               "Breaklist, Punishments, Blacklist, Logins. Leave ign empty to see yourself."),
+               "guild, GEXP of the week (earned / requirement and %), breaklist, excuses, purge, mutes and warns, blacklist, last login. "
+               "Buttons open the details: 1v1 stats (with a menu for modes, seasons and years), Matches, Guild & GEXP (this guild week), "
+               "Breaklist, Excuses, Punishments, Blacklist, Logins. Start typing a name and the bot suggests it; leave player empty to see yourself. "
+               "hidden:True shows the answer only to you."),
             _c("/history [ign] [mode]",
                "Match history of the current year, 10 per page, with match number, date, score and the "
                "elo gained or lost. Cancelled matches appear with a grey CANCELLED label."),
             _c("/matches [mode]", "The latest matches of the whole guild."),
             _c("/cancelled [mode]", "The latest cancelled matches."),
             _c("/paused", "Matches that were interrupted and will be continued later."),
-            _c("/info", "The same as /profile but for the guild: members, GEXP, breaklist, excused, purge, punishments, "
+            _c("/info [hidden]", "The same as /profile but for the guild: members, GEXP, breaklist, excused, purge, punishments, "
                "blacklist, 1v1s. Buttons: Top GEXP, Ranks, Breaklist, Excused, Purge, Punishments, Blacklist, Days, "
                "Pro & waitlist, Road, 1v1 stats."),
         ],
@@ -445,8 +446,8 @@ GEXP_PAGES = [
             _b("Earns 9,286: the requirement is met, but the 40 are still owed."),
             _b("Earns 9,326: the requirement is met and the debt is paid completely."),
             _b("Earns 9,300: the requirement is met and the debt goes down by 14, so 26 are still owed."),
-            _c("/gexp missing ign [joined] [start_gexp] [current_gexp] [debt] [save]",
-               f"({GUILD_ROLE}) Calculates what a player must earn this week. Write the day and exact time "
+            _c("/gexp missing [ign] [joined] [start_gexp] [current_gexp] [debt] [save]",
+               f"({GUILD_ROLE}) Calculates what a player must earn this week. Without a player it only calculates what someone who joins at `joined` would need. Write the day and exact time "
                f"they joined, in Eastern Time (for example 2026/10/21 6:00 PM, the year is optional), and the GEXP they had at that "
                f"moment. The card shows the normal requirement, the starting GEXP, the current GEXP, the extra "
                f"debt, the total target and the remaining debt after the progress."),
@@ -584,6 +585,9 @@ BLACKLIST_PAGES = [
         _c("/blacklist remove ign", "Takes the player off the blacklist and posts it."),
         _c("/blacklist view ign", "One entry: the videos and links written in the reason are shown outside the embed so they play."),
         _c("/blacklist list", "Everyone on the blacklist, with reason and duration."),
+        _c("/blacklist reset ign", "Deletes the whole blacklist history of a player (removed entries too), after a confirmation. "
+           "The same is the red Reset blacklist history button in /profile > Blacklist (staff)."),
+        _c("/blacklist delete ign entry", "Deletes one entry from a player's history (the # shown in /profile > Blacklist)."),
     ]},
     {"title": "Cheating reports", "blocks": [
         _c("/evidence add ign", "Opens a report in the evidence thread: a message with the suspect's skin, "

@@ -195,7 +195,8 @@ async def setup_tables():
                                  ("guild_seen", "login_polled_at", "TEXT"), ("guild_seen", "online", "INTEGER"), ("warnings", "expires_at", "TEXT"),
                                  ("bl_entries", "visiting_guild", "TEXT"), ("bl_entries", "visit_kind", "TEXT"),
                                  ("bl_entries", "preferred", "TEXT"), ("bl_entries", "expected_return", "TEXT"), ("warnings", "by_name", "TEXT"), ("warnings", "link", "TEXT"),
-                                 ("warnings", "post_ch", "TEXT"), ("warnings", "post_msg", "TEXT")):
+                                 ("warnings", "post_ch", "TEXT"), ("warnings", "post_msg", "TEXT"),
+                                 ("mutes", "post_ch", "TEXT"), ("mutes", "post_msg", "TEXT")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             except aiosqlite.OperationalError:
@@ -865,7 +866,7 @@ def draw_punish_card(kind, name, head, reason, rows, by, number):
 
 # ---------- GEXP of the last 7 days ----------
 
-def draw_eligibility(name, head, days, total, owed, source):
+def draw_eligibility(name, head, days, total, owed, source, subtitle="last 7 days"):
     """days: list of (day 'YYYY-MM-DD', gexp), oldest first."""
     daily = gc.WEEKLY_REQ / 7
     ok = total >= gc.WEEKLY_REQ
@@ -876,7 +877,7 @@ def draw_eligibility(name, head, days, total, owed, source):
     height = top + id_h + 14 + rows_h + ((14 + info_h) if info_h else 0) + 16 + g.FOOTER_H
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
-    g._header(d, "GEXP ELIGIBILITY", f"{GUILD_NAME_DISPLAY} · last 7 days")
+    g._header(d, "GEXP ELIGIBILITY", f"{GUILD_NAME_DISPLAY} · {subtitle}")
 
     y = top
     d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + id_h], radius=16, fill=g.ROW_BG)
@@ -1305,12 +1306,20 @@ class Core:
         if not history:
             return None, ("I have no GEXP data for this player. The bot needs the Hypixel key and the guild name "
                           "(`HYPIXEL_GUILD_NAME`), and the player must have been in the guild while the bot was saving data.")
-        days = sorted(history.items())[-7:]
+        # the guild week (Tuesday 12:00 AM ET until now), not the last 7 days: at day 7/7 it is the same thing
+        now = now_utc()
+        ws = gc.week_start(now).astimezone(gc.ET).date().isoformat()
+        today = now.astimezone(gc.ET).date()
+        day_no = (today - gc.week_start(now).astimezone(gc.ET).date()).days + 1
+        days = [(d_, v) for d_, v in sorted(history.items()) if ws <= d_ <= today.isoformat()]
+        if not days:
+            days = [(today.isoformat(), 0)]
         total = sum(v for _, v in days)
         debt = await q_one("SELECT amount FROM debts WHERE uuid = ?", (uuid,))
         owed = debt["amount"] if debt and debt["amount"] > 0 else None
         head = await self.head_for(uuid, name)
-        return await asyncio.to_thread(draw_eligibility, name, head, days, total, owed, source), None
+        sub = f"this guild week · day {min(day_no, 7)}/7"
+        return await asyncio.to_thread(draw_eligibility, name, head, days, total, owed, source, sub), None
 
     NAME_TABLES = ("links", "countries", "bl_entries", "blacklist", "mutes", "warnings", "pro_players",
                    "waitlist", "excuses", "debts", "players")
@@ -3233,14 +3242,14 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
 
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")
     @app_commands.describe(
-        ign="Minecraft username of the player",
+        ign="Minecraft username of the player (empty: only calculate what someone joining at `joined` would need)",
         joined="Join time (ET or MT, see /timezone): 2026/10/21 6:00 PM (year optional). Empty = their join time in the guild",
         start_gexp="The GEXP they had at that moment (default 0)",
         current_gexp="Their GEXP now (default: taken from Hypixel)",
         debt="Extra GEXP debt (default: the saved debt)",
         save="Save the remaining debt as the player's new debt")
     @app_commands.check(staff_check)
-    async def missing(self, interaction: discord.Interaction, ign: str, joined: Optional[str] = None,
+    async def missing(self, interaction: discord.Interaction, ign: Optional[str] = None, joined: Optional[str] = None,
                       start_gexp: app_commands.Range[int, 0, 100_000_000] = 0,
                       current_gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                       debt: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
@@ -3251,6 +3260,23 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
             await interaction.followup.send(
                 "I couldn't read the join time. Use year/month/day and the time in your timezone (see /timezone), "
                 "for example `2026/10/21 6:00 PM`, `2026/10/21 18:00` or without year `10/21 6:00 PM`.")
+            return
+        if ign is None:                                   # no player: what someone who joins at that moment must earn
+            if join_dt is None:
+                await interaction.followup.send("Write the player, or the time they join with `joined` "
+                                                "(for example `2026/10/21 6:00 PM`).")
+                return
+            now = now_utc()
+            if join_dt.astimezone(UTC) > now + timedelta(days=7):
+                await interaction.followup.send("That join time is too far in the future.")
+                return
+            normal = gc.required_from(join_dt)
+            res = gc.settle_debt(normal, debt or 0, (current_gexp if current_gexp is not None else start_gexp) - start_gexp)
+            card = await asyncio.to_thread(draw_missing, "New member", None, join_dt, gc.week_end(join_dt), res, start_gexp,
+                                           start_gexp if current_gexp is None else current_gexp,
+                                           "Calculation without a player: this is what someone who joins at that moment "
+                                           "must earn by the purge.")
+            await interaction.followup.send(file=send_file(card, "gexp_missing.png"))
             return
         r = await lookup(interaction, ign)
         if r is None:
@@ -3722,6 +3748,84 @@ class WarnButton(discord.ui.DynamicItem[discord.ui.Button], template=r"wrn:(?P<a
                     f"\n🗑️ Removed by {interaction.user.display_name}.", view=None)
 
 
+async def build_mute_card(core, m, by=None):
+    """The mute card of a saved mute (also used after the reason is edited)."""
+    total = (await q_one("SELECT COUNT(*) AS c FROM mutes WHERE uuid = ?", (m["uuid"],)))["c"]
+    end = from_iso(m["end_at"]) if m.get("end_at") else None
+    head = await core.head_for(m["uuid"], m["ign"])
+    await load_flag(m["uuid"], m["ign"])
+    return await asyncio.to_thread(
+        draw_punish_card, "MUTE", m["ign"], head, m["reason"],
+        [("LENGTH", mute_length_text(m)), ("EXPIRES", "Never" if end is None else gc.fmt_et(end)),
+         ("MUTES SO FAR", str(total))], by or "staff", m["id"])
+
+
+async def refresh_mute_post(bot, mid, by=None):
+    m = await q_one("SELECT * FROM mutes WHERE id = ?", (mid,))
+    msg = await post_message_of(bot, m) if m else None
+    if msg is None:
+        return False
+    card = await build_mute_card(bot.np_core, m, by)
+    keep = [a for a in msg.attachments if a.filename != "mute.png"]
+    await msg.edit(attachments=[*keep, discord.File(io.BytesIO(card), filename="mute.png")])
+    return True
+
+
+class EditMuteModal(discord.ui.Modal):
+    def __init__(self, mid, reason):
+        super().__init__(title=f"Edit mute #{mid}")
+        self.mid = mid
+        self.text = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=400, required=True, default=reason)
+        self.add_item(discord.ui.Label(text="Reason", component=self.text))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await q_run("UPDATE mutes SET reason = ? WHERE id = ?", (self.text.value, self.mid))
+        ok = await refresh_mute_post(interaction.client, self.mid, interaction.user.display_name)
+        await interaction.response.send_message(
+            f"✅ Reason of mute #{self.mid} updated." + ("" if ok else " (I couldn't redraw the old card.)"), ephemeral=True)
+
+
+class MuteButton(discord.ui.DynamicItem[discord.ui.Button], template=r"mut:(?P<act>rm|ed):(?P<mid>\d+)"):
+    """Staff buttons on a mute card: remove it (lifting it first when active) or edit its reason."""
+
+    def __init__(self, act, mid):
+        super().__init__(discord.ui.Button(
+            label="Remove mute" if act == "rm" else "Edit reason", row=1,
+            style=discord.ButtonStyle.danger if act == "rm" else discord.ButtonStyle.secondary,
+            custom_id=f"mut:{act}:{mid}"))
+        self.act, self.mid = act, int(mid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["act"], int(match["mid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_guild_staff(interaction.user):
+            await interaction.response.send_message("Only guild staff can do this.", ephemeral=True)
+            return
+        m = await q_one("SELECT * FROM mutes WHERE id = ?", (self.mid,))
+        if m is None:
+            await interaction.response.send_message("This mute doesn't exist any more.", ephemeral=True)
+            return
+        if self.act == "ed":
+            await interaction.response.send_modal(EditMuteModal(self.mid, m["reason"] or ""))
+            return
+        await interaction.response.defer()
+        note = ""
+        if m["status"] == "active":
+            cog = interaction.client.get_cog("mute") or interaction.client.get_cog("MuteCog")
+            did = m.get("discord_id") or await interaction.client.np_core.linked_discord(m["uuid"])
+            ok = await cog.bridge_role(did, give=False) if cog else False
+            note = " The No Guild Bridge role was removed." if ok else " Remove the No Guild Bridge role by hand if they have it."
+        for pr in await proof_rows("m", self.mid):
+            await delete_proof_message(interaction.client, pr)
+        await q_run("DELETE FROM punish_media WHERE kind = 'm' AND pid = ?", (self.mid,))
+        await q_run("DELETE FROM mutes WHERE id = ?", (self.mid,))
+        first = (interaction.message.content or "Mute").splitlines()[0]
+        await interaction.edit_original_response(
+            content=f"~~{first}~~\n🗑️ Removed by {interaction.user.display_name}.{note}", attachments=[], view=None)
+
+
 PROOF_TYPES = ("image/", "video/")
 
 
@@ -3867,7 +3971,10 @@ def add_proof_buttons(view, kind, pid):
 
 
 def mute_view(mid):
-    return add_proof_buttons(appeal_view("m", mid), "m", mid)
+    view = appeal_view("m", mid)
+    view.add_item(MuteButton("rm", mid))
+    view.add_item(MuteButton("ed", mid))
+    return add_proof_buttons(view, "m", mid)
 
 
 def warn_view(wid):
@@ -4042,7 +4149,13 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         if not posted:
             first = await interaction.followup.send(content=content, file=send_file(card, "mute.png"),
                                                     allowed_mentions=MUTE_MENTIONS, view=mute_view(mid), wait=True)
+            if first is not None:
+                await q_run("UPDATE mutes SET post_ch = ?, post_msg = ? WHERE id = ?",
+                            (str(first.channel.id), str(first.id), mid))
         else:
+            if first is not None:
+                await q_run("UPDATE mutes SET post_ch = ?, post_msg = ? WHERE id = ?",
+                            (str(first.channel.id), str(first.id), mid))
             await interaction.followup.send(f"Mute logged in {posted}. This is the message:\n\n{content}",
                                             file=send_file(card, "mute.png"), allowed_mentions=NO_MENTIONS)
         if proofs and first is not None:                       # every proof in its own message, in order
@@ -4473,7 +4586,7 @@ async def setup(bot: commands.Bot):
     core = Core(bot)
     bot.np_core = core
     g.FLAG_LOADER = _load_flags          # every card with heads (1v1 cards too) shows the flags
-    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, BreaklistEditButton, AppealButton, AppealReviewButton, WarnButton, ProofButton)
+    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, BreaklistEditButton, AppealButton, AppealReviewButton, WarnButton, MuteButton, ProofButton)
     await bot.add_cog(Breaklist(core))
     await bot.add_cog(Excuse(core))
     await bot.add_cog(GexpTools(core))

@@ -290,8 +290,8 @@ def player_panels(d):
 # ======================================================================================
 
 PLAYER_SECTIONS = [("summary", "Summary"), ("stats", "1v1 stats"), ("matches", "Matches"), ("guild", "Guild & GEXP"),
-                   ("breaklist", "Breaklist"), ("punish", "Punishments"), ("blacklist", "Blacklist"),
-                   ("logins", "Logins")]
+                   ("breaklist", "Breaklist"), ("excuses", "Excuses"), ("punish", "Punishments"),
+                   ("blacklist", "Blacklist"), ("logins", "Logins")]
 
 
 async def player_section(ctx, key, page):
@@ -371,6 +371,15 @@ async def player_section(ctx, key, page):
             embed.add_field(name="Earlier entries", inline=False, value="\n".join(
                 f"#{r['id']} · {gc.fmt_date(from_iso(r['added_at']))} · {r['status']} · {(r['reason'] or '-')[:80]}" for r in past))
         return Out(content=evidence.video_text(active or rows[0]), embed=embed)
+    if key == "excuses":
+        rows = await QA("SELECT * FROM excuses WHERE uuid = ? ORDER BY week DESC", uuid)
+        if not rows:
+            return Out(content=f"**{esc(name)}** has no excuses saved by this bot.")
+        embed = discord.Embed(title=f"Excuses of {name}", color=0x00C8E6,
+                              description="\n".join(f"`{day_text(r['week'])}` week · {(r['reason'] or 'no reason')[:120]}"
+                                                    for r in rows[:15]))
+        embed.set_footer(text=f"{len(rows)} excuse{'s' if len(rows) != 1 else ''} saved by this bot")
+        return Out(embed=embed)
     if key == "logins":
         embed, text = await bl.logins_embed(uuid, name, 14)
         return Out(content=text, embed=embed)
@@ -617,6 +626,10 @@ class HubView(discord.ui.View):
             prev.callback, nxt.callback = self._page_cb(-1), self._page_cb(1)
             self.add_item(prev)
             self.add_item(nxt)
+        if ctx.kind == "player" and key == "blacklist":
+            rst = discord.ui.Button(label="Reset blacklist history", style=discord.ButtonStyle.danger, row=4)
+            rst.callback = self._reset_cb
+            self.add_item(rst)
         if ctx.kind == "guild" and key == "top":
             find = discord.ui.Button(label="🔍 Search", style=discord.ButtonStyle.primary, row=4)
             find.callback = self._find_cb
@@ -627,6 +640,13 @@ class HubView(discord.ui.View):
                                              for l, v in options["items"]])
             sel.callback = self._select_cb(sel, options["kind"])
             self.add_item(sel)
+
+    async def _reset_cb(self, interaction):
+        import evidence
+        if interaction.user.id != self.ctx.owner_id or not evidence.allowed(interaction.user):
+            await interaction.response.send_message("Only the guild staff can do this.", ephemeral=True)
+            return
+        await evidence.ask_reset(interaction, self.ctx.uuid, self.ctx.name)
 
     async def _find_cb(self, interaction):
         if interaction.user.id != self.ctx.owner_id:
@@ -706,26 +726,54 @@ class HubCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="profile", description="Everything about a player: 1v1s, guild, breaklist, punishments and more")
-    @app_commands.describe(ign="Minecraft username (leave empty for your linked account)")
-    async def profile(self, interaction: discord.Interaction, ign: Optional[str] = None):
-        await interaction.response.defer()
-        r = await resolve_player(interaction, ign)
+    @app_commands.describe(player="Minecraft username (leave empty for your linked account)",
+                           hidden="Only you see the answer")
+    async def profile(self, interaction: discord.Interaction, player: Optional[str] = None, hidden: bool = False):
+        await interaction.response.defer(ephemeral=hidden)
+        r = await resolve_player(interaction, player)
         if r is None:
             return
         ctx = Ctx(self.bot, interaction.user.id, "player", r[0], r[1])
         out = await render(ctx, "summary", 1)
         kw = await message_kwargs(ctx, "summary", out)
         await interaction.followup.send(content=kw["content"], file=kw["attachments"][0] if kw["attachments"] else discord.utils.MISSING,
-                                        view=kw["view"], allowed_mentions=NO_MENTIONS)
+                                        view=kw["view"], allowed_mentions=NO_MENTIONS, ephemeral=hidden)
+
+    @profile.autocomplete("player")
+    async def _profile_ac(self, interaction: discord.Interaction, current: str):
+        return await player_choices(current)
 
     @app_commands.command(name="info", description="Everything about the guild: members, GEXP, breaklist, punishments and more")
-    async def info(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+    @app_commands.describe(hidden="Only you see the answer")
+    async def info(self, interaction: discord.Interaction, hidden: bool = False):
+        await interaction.response.defer(ephemeral=hidden)
         ctx = Ctx(self.bot, interaction.user.id, "guild")
         out = await render(ctx, "summary", 1)
         kw = await message_kwargs(ctx, "summary", out)
         await interaction.followup.send(content=kw["content"], file=kw["attachments"][0] if kw["attachments"] else discord.utils.MISSING,
-                                        view=kw["view"], allowed_mentions=NO_MENTIONS)
+                                        view=kw["view"], allowed_mentions=NO_MENTIONS, ephemeral=hidden)
+
+
+NAME_TABLES = ("links", "players", "countries", "bl_entries", "pro_players", "blacklist", "mutes", "warnings",
+               "waitlist", "guild_left", "excuses")
+
+
+async def player_choices(current, limit=25):
+    """Names to suggest while typing a player: every name the bot already knows (linked, 1v1s, breaklist, mutes...)."""
+    cur = (current or "").strip().replace("%", "").replace("_", r"\_")
+    found = {}
+    for pattern in (f"{cur}%", f"%{cur}%"):
+        for table in NAME_TABLES:
+            if len(found) >= limit:
+                break
+            for r in await QA(f"SELECT DISTINCT ign FROM {table} WHERE ign LIKE ? ESCAPE '\\' AND ign != '' LIMIT ?",
+                              pattern, limit):
+                if r["ign"] and r["ign"].lower() not in found:
+                    found[r["ign"].lower()] = r["ign"]
+        if len(found) >= limit:
+            break
+    names = sorted(found.values(), key=lambda x: (not x.lower().startswith(cur.lower()), x.lower()))
+    return [app_commands.Choice(name=x[:100], value=x[:100]) for x in names[:limit]]
 
 
 async def setup(bot: commands.Bot):

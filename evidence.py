@@ -165,6 +165,54 @@ async def blacklist_upsert(uuid, ign, reason, duration, by):
     return await q_one("SELECT * FROM blacklist WHERE id = ?", (rid,)), True
 
 
+class ResetBlacklistView(discord.ui.View):
+    """Asks for a confirmation before the whole blacklist history of a player is deleted."""
+
+    def __init__(self, owner_id, uuid, name):
+        super().__init__(timeout=120)
+        self.owner_id, self.uuid, self.name = owner_id, uuid, name
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Only who started this can confirm.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Delete the whole history", style=discord.ButtonStyle.danger)
+    async def go(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows = await q_all("SELECT id FROM blacklist WHERE uuid = ?", (self.uuid,))
+        await q_run("DELETE FROM blacklist WHERE uuid = ?", (self.uuid,))
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"🗑️ The blacklist history of **{esc(self.name)}** was deleted ({len(rows)} entr"
+                    f"{'ies' if len(rows) != 1 else 'y'}). Posts already made on Discord stay there.", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Nothing was deleted.", view=None)
+
+
+async def ask_reset(interaction, uuid, name):
+    """Sends the confirmation (only the person who asked sees it). Used by /blacklist reset and the profile button."""
+    rows = await q_all("SELECT * FROM blacklist WHERE uuid = ? ORDER BY id", (uuid,))
+    if not rows:
+        text = f"**{esc(name)}** has no blacklist history."
+        view = None
+    else:
+        lines = [f"`#{r['id']}` {r['status']} · {r['duration'] or 'no duration'} · {(r['reason'] or '-')[:60]}" for r in rows[:15]]
+        text = (f"Delete **all {len(rows)}** blacklist entries of **{esc(name)}** (also the removed ones)? "
+                "To delete one only, use `/blacklist delete`.\n" + "\n".join(lines))
+        view = ResetBlacklistView(interaction.user.id, uuid, name)
+    kw = dict(content=text, ephemeral=True, allowed_mentions=NO_MENTIONS)
+    if view:
+        kw["view"] = view
+    if interaction.response.is_done():
+        await interaction.followup.send(**kw)
+    else:
+        await interaction.response.send_message(**kw)
+
+
 class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild blacklist"):
     def __init__(self, bot):
         self.bot = bot
@@ -272,6 +320,34 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
                   if await alerts.enabled("blacklist") else None)
         await interaction.followup.send(f"**{esc(name)}** was removed from the blacklist" + (f" ({posted})." if posted else "."),
                                         allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="reset", description="Delete the whole blacklist history of a player, removed entries too (guild staff)")
+    @app_commands.describe(ign="Minecraft username")
+    @app_commands.check(perm_check)
+    async def reset(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer(ephemeral=True)
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        await ask_reset(interaction, r[0], r[1])
+
+    @app_commands.command(name="delete", description="Delete one blacklist entry from a player's history (guild staff)")
+    @app_commands.describe(ign="Minecraft username", entry="Entry number (the # shown in /profile > Blacklist)")
+    @app_commands.check(perm_check)
+    async def delete(self, interaction: discord.Interaction, ign: str, entry: int):
+        await interaction.response.defer(ephemeral=True)
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        row = await q_one("SELECT * FROM blacklist WHERE id = ? AND uuid = ?", (entry, uuid))
+        if not row:
+            await interaction.followup.send(f"**{esc(name)}** has no blacklist entry #{entry}.", ephemeral=True,
+                                            allowed_mentions=NO_MENTIONS)
+            return
+        await q_run("DELETE FROM blacklist WHERE id = ?", (entry,))
+        await interaction.followup.send(f"🗑️ Entry #{entry} of **{esc(name)}** deleted ({row['status']} · "
+                                        f"{(row['reason'] or '-')[:80]}).", ephemeral=True, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="view", description="Show one player's blacklist entry, with the videos and links playable")
     @app_commands.describe(ign="Minecraft username")

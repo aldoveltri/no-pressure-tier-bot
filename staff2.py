@@ -179,8 +179,6 @@ class Betrayal(commands.Cog):
             ours = bl.HYPIXEL_GUILD_NAME.lower()
             for e in await q_all("SELECT * FROM bl_entries WHERE status = 'active'"):
                 key = f"betrayal:{e['id']}"
-                if await kv_get(key):
-                    continue
                 guild = await bl.api_guild({"player": e["uuid"]})
                 await asyncio.sleep(0.5)
                 if not guild or guild.get("name", "").lower() == ours:
@@ -189,12 +187,22 @@ class Betrayal(commands.Cog):
                 if guild.get("name", "").lower() in approved:
                     continue                                   # a guild the staff approved: not a betrayal
                 await kv_set(key, iso(now_utc()))
+                # the breaklist is over and the saved days go with it
+                await q_run("UPDATE bl_entries SET status = 'betrayed', returned_at = ? WHERE id = ?",
+                            (iso(now_utc()), e["id"]))
+                row = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (e["uuid"],))
+                if row and row["banked"] > 0:
+                    await q_run("INSERT INTO day_sets (uuid, ign, days, note, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                (e["uuid"], e["ign"], -row["banked"], "joined another guild while breaklisted", None,
+                                 iso(now_utc())))
+                    await q_run("UPDATE player_days SET banked = 0, updated_at = ? WHERE uuid = ?",
+                                (iso(now_utc()), e["uuid"]))
                 m = next((x for x in guild.get("members", []) if x.get("uuid") == e["uuid"]), None)
                 since = f" since <t:{int(m['joined'] / 1000)}:D>" if m and m.get("joined") else ""
                 ping_user, ping_role = bl._env("BETRAYAL_PING_USER_ID"), bl._env("BETRAYAL_PING_ROLE_ID")
                 ping = (f"<@{ping_user}>" if ping_user.isdigit() else f"<@&{ping_role}>" if ping_role.isdigit() else "")
                 text = (f"{ping} 🚨 **{esc(e['ign'])}** is on the breaklist but joined **{esc(guild.get('name', '?'))}**{since}. "
-                        "They agreed to stay guildless: the breaklist no longer applies.").strip()
+                        "They agreed to stay guildless: the breaklist no longer applies and their saved days were reset to 0.").strip()
                 env = "BETRAYAL_CHANNEL_ID" if bl.chan_id("BETRAYAL_CHANNEL_ID") else "BREAKLIST_CHANNEL_ID"
                 await self.bot.np_core.post_to(env, content=text, thread_name="Breaklist betrayals",
                                                thread_key="betrayal_thread",

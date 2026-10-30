@@ -705,6 +705,10 @@ EXTRA_PAGES = [
         _c("/breaklist card [part] [show]", "Staff. Shows or hides parts of the breaklist card (time into the week, days, "
            "join time, breaklist time, notice...)."),
         _c("/breaklist notice kind [text] [reset]", "Staff. Edits the NOTICE text of the breaklist card."),
+        _c("/breaklist welcome [text] [reset]", "Staff. Edits the message (with bullet points) sent when a breaklist request is accepted."),
+        _c("/rejoin [note]", "Players on the breaklist. Asks the staff to let them back into the guild (needs /link)."),
+        _c("/otherguild guild [reason]", "Players on the breaklist. Asks the staff to approve another guild for them."),
+        _c("/elocalc", "What-if calculator: the elo each player would gain or lose in a match. Nothing is saved."),
         _c("/chat [ign] [search]", "Staff. What a player wrote in the guild bridge chat, newest first, with Previous / Next "
            "buttons and a Search button. Works from when it is switched on: BRIDGE_CHANNEL_ID, MESSAGE_CONTENT_INTENT=1 and "
            "the Message Content intent in the Discord developer portal."),

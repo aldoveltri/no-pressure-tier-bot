@@ -24,7 +24,7 @@ from PIL import Image, ImageDraw
 import alerts
 import gexpcalc as gc
 import graphics as g
-from database import DB_PATH, backup_db
+from database import DB_PATH, backup_db, get_link
 from mojang import get_uuid, get_name
 
 log = logging.getLogger("tierbot")
@@ -650,7 +650,7 @@ def short_et(dt):
 
 
 def draw_purge(rows, heads, title, subtitle, page, pages):
-    row_h = 96
+    row_h = 108
     top = g.HEADER_H + 40
     height = top + max(1, len(rows)) * row_h + g.FOOTER_H
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
@@ -669,20 +669,20 @@ def draw_purge(rows, heads, title, subtitle, page, pages):
         d.rounded_rectangle([g.PAD, y0, g.WIDTH - g.PAD, y0 + row_h - 8], radius=14, fill=g.ROW_BG)
         d.rounded_rectangle([g.PAD, y0, g.PAD + 8, y0 + row_h - 8], radius=4, fill=color)
         hx = g.PAD + 28
-        g._paste_head(img, d, heads.get(e["uuid"]), hx, cy - 28, 56)
+        g._paste_head(img, d, heads.get(e["uuid"]), hx, cy - 30, 56)
         nx = hx + 56 + 14
-        g.name_flag(img, d, nx, cy - 16, e["ign"], 24, h=24, max_w=230)
-        g._badge(d, 478, cy - 16, label, color, w=118, h=28, font_size=14)
+        g.name_flag(img, d, nx, cy - 28, e["ign"], 24, h=24, max_w=230)
+        g._badge(d, 478, cy - 28, label, color, w=118, h=28, font_size=14)
         detail = f"In {short_et(e['start'])} · Out {short_et(e['left'])} · {gc.fmt_duration(e['stay'])}"
         if e["rejoined"]:
             detail += " · rejoined"
-        d.text((nx, cy + 18), detail, font=g.get_font(14), fill=g.MUTED, anchor="lm")
+        d.text((nx, cy + 28), detail, font=g.get_font(14), fill=g.MUTED, anchor="lm")
         d.text((640, cy), n(e["earned"]), font=g.get_font(20, True), fill=g.TEXT, anchor="mm")
         d.text((736, cy), n(e["required"]), font=g.get_font(20, True), fill=g.TEXT, anchor="mm")
         short = e["short"]
         d.text((828, cy), f"-{n(short)}" if short else "0", font=g.get_font(22, True),
                fill=(g.RED if e["status"] == "suspect" else g.MUTED) if short else g.GREEN, anchor="mm")
-    g._footer(d, height, f"Page {page}/{pages}")
+    g._footer(d, height, f"Page {page}/{pages} · times in {gc.TZ_NAME}")
     return g._png(img)
 
 
@@ -1064,16 +1064,17 @@ def draw_offer(ign, head, kind, requirement, note):
                 f"the staff the reason and for how long. If you still plan to reach the weekly requirement of "
                 f"{n(requirement)} GEXP, press I'll reach the requirement and tell us why you were away.")
         badge = "AWAY FOR DAYS"
-    if note:
-        text += f" Note from the staff: {note}"
     id_h = 130
     top = g.HEADER_H + 16
-    height = top + id_h + 14 + _panel_height(text, max_lines=8) + 16 + g.FOOTER_H
+    height = (top + id_h + 14 + _panel_height(text, max_lines=8) + 16 + g.FOOTER_H
+              + ((_panel_height(note, max_lines=5) + 14) if note else 0))
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
     g._header(d, "BREAKLIST OFFER", GUILD_NAME_DISPLAY)
     _identity(img, d, top, ign, head, badge, g.ACCENT, "", id_h)
-    _text_panel(d, top + id_h + 14, "WHY YOU ARE SEEING THIS", text, max_lines=8)
+    y = _text_panel(d, top + id_h + 14, "WHY YOU ARE SEEING THIS", text, max_lines=8)
+    if note:
+        _text_panel(d, y + 14, "NOTE FROM THE STAFF", note, max_lines=5)
     g._footer(d, height, "Not affiliated with Hypixel")
     return g._png(img)
 
@@ -2687,10 +2688,28 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:
         # the player cannot see the staff request channel: the answer goes to the inactivity notices
         text = (f"<@{row['requester_id']}> your {row['kind']} request for **{esc(name)}** was {word} "
                 f"by {esc(staff.display_name)}.")
+        if status == "accepted" and row["kind"] == "breaklist":
+            text += "\n\n" + await welcome_text()
         posted = await core.post_to("INACTIVITY_CHANNEL_ID", content=text, mentions=USER_MENTIONS,
                                     thread_name="Requests", thread_key="inactivity_requests_thread")
         if not posted:
             await interaction.channel.send(text, allowed_mentions=USER_MENTIONS)
+
+
+DEFAULT_WELCOME = (
+    "**Thank you for choosing No Pressure** 💙\n"
+    "• take as long as you need for your break\n"
+    "• your days will be saved (if the guild is full we'll make room for you)\n"
+    "• you can still attend guild parties and 1v1s\n"
+    "• access to the guild chats, including #guild-bridge\n"
+    "• good terms with the guild\n\n"
+    "**Also**\n"
+    "• rejoin any time with `/rejoin`, or simply ask zCqmbo\n"
+    "• if you change your mind about being guildless, ask to join another guild with `/otherguild`")
+
+
+async def welcome_text():
+    return (await kv_get("bl_welcome")) or DEFAULT_WELCOME
 
 
 # ======================================================================================
@@ -3042,6 +3061,19 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             return
         full = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry["id"],))
         await q_run("UPDATE bl_entries SET status = 'returned', returned_at = ? WHERE id = ?", (iso(back), entry["id"]))
+        lost = ""
+        try:                                   # in another (not approved) guild: the saved days are gone
+            og = await api_guild({"player": uuid})
+            appr = [x.strip().lower() for x in re.split(r"[,;]", (full or {}).get("visiting_guild") or "") if x.strip()]
+            if og and og.get("name", "").lower() not in ((HYPIXEL_GUILD_NAME or "").lower(), *appr):
+                prev = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+                if prev and prev["banked"] > 0:
+                    await q_run("INSERT INTO day_sets (uuid, ign, days, note, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                (uuid, name, -prev["banked"], "joined another guild", None, iso(now_utc())))
+                    await q_run("UPDATE player_days SET banked = 0, updated_at = ? WHERE uuid = ?", (iso(now_utc()), uuid))
+                    lost = f"\n⚠️ They are in **{esc(og.get('name', '?'))}**, so their saved days were reset to 0."
+        except Exception:
+            log.exception("Could not check the guild of a returning player")
         days, _ = await self.core.days_info(uuid)
         debt = await q_one("SELECT amount FROM debts WHERE uuid = ?", (uuid,))
         owed = debt["amount"] if debt else 0
@@ -3069,7 +3101,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             f"✅ **{esc(name)}** is off the breaklist. Their {int(days)} days in the guild are kept and keep growing "
             f"from now on. Extra GEXP debt carried over: **{n(owed)}**.{exp_txt} "
             + (f"Announced in {posted}. " if posted else "") +
-            "Use `/gexp missing` to calculate what they need to earn this week.", allowed_mentions=NO_MENTIONS)
+            "Use `/gexp missing` to calculate what they need to earn this week." + lost, allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="update", description="Save the days a player has spent in the guild so far, without breaklisting them (guild staff)")
     @app_commands.describe(ign="Minecraft username of a player who is in the guild")
@@ -3266,15 +3298,16 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                            end="When they were breaklisted (same format)", gexp="GEXP earned that week",
                            days="Total days in the guild (sets the saved days)",
                            expected_return="Expected return date, no time (2026/11/15). Write none to remove it",
-                           owed="Total extra GEXP owed (this week + earlier debt)")
+                           owed="Total extra GEXP owed (this week + earlier debt)",
+                           guild="Add an approved guild (kept with the ones already approved). Write none to clear them all")
     @app_commands.check(staff_check)
     async def edit(self, interaction: discord.Interaction, ign: str, reason: Optional[str] = None,
                    start: Optional[str] = None, end: Optional[str] = None,
                    gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                    days: Optional[app_commands.Range[float, 0, 5000]] = None, expected_return: Optional[str] = None,
-                   owed: Optional[app_commands.Range[int, 0, 100_000_000]] = None):
+                   owed: Optional[app_commands.Range[int, 0, 100_000_000]] = None, guild: Optional[str] = None):
         await interaction.response.defer()
-        if all(v is None for v in (reason, start, end, gexp, days, expected_return, owed)):
+        if all(v is None for v in (reason, start, end, gexp, days, expected_return, owed, guild)):
             await interaction.followup.send("Give at least one thing to change.")
             return
         r = await lookup(interaction, ign)
@@ -3290,6 +3323,25 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if err:
             await interaction.followup.send(err)
             return
+        if guild is not None:
+            if guild.strip().lower() in ("none", "no", "-", "guildless"):
+                merged = None
+            else:
+                have = [x.strip() for x in re.split(r"[,;]", new.get("visiting_guild") or "") if x.strip()]
+                for x in re.split(r"[,;]", guild):
+                    if x.strip() and x.strip().lower() not in [h.lower() for h in have]:
+                        have.append(x.strip())
+                merged = ", ".join(have)
+            await q_run("UPDATE bl_entries SET visiting_guild = ?, visit_kind = COALESCE(visit_kind, 'temporary') WHERE id = ?",
+                        (merged, new["id"]))
+            new = await q_one("SELECT * FROM bl_entries WHERE id = ?", (new["id"],))
+        if guild is not None:
+            if guild.strip().lower() in ("none", "no", "-", "guildless", ""):
+                await q_run("UPDATE bl_entries SET visiting_guild = NULL, visit_kind = NULL, preferred = NULL WHERE id = ?", (new["id"],))
+            else:
+                await q_run("UPDATE bl_entries SET visiting_guild = ?, visit_kind = ? WHERE id = ?",
+                            (guild.strip(), purpose or new.get("visit_kind") or "temporary", new["id"]))
+            new = await q_one("SELECT * FROM bl_entries WHERE id = ?", (new["id"],))
         if owed is not None:
             await q_run("UPDATE bl_entries SET owed = ? WHERE id = ?", (owed, new["id"]))
             if new["status"] == "active":
@@ -3336,6 +3388,21 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         else:
             msg = "Current text:\n> " + (CARD_NOTICES.get(kind) or "(the default)")
         await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="welcome", description="Edit the message players get when their breaklist request is accepted (guild staff)")
+    @app_commands.describe(text="The new message (Discord formatting works, new line = \\n). Empty = show the current one",
+                           reset="Go back to the default message")
+    @app_commands.check(staff_check)
+    async def welcome(self, interaction: discord.Interaction, text: Optional[app_commands.Range[str, 1, 1500]] = None,
+                      reset: bool = False):
+        if reset:
+            await kv_set("bl_welcome", "")
+            await interaction.response.send_message("✅ Back to the default message.", ephemeral=True)
+        elif text:
+            await kv_set("bl_welcome", text.replace("\\n", "\n"))
+            await interaction.response.send_message("✅ Saved. Players now get:\n\n" + text.replace("\\n", "\n"), ephemeral=True)
+        else:
+            await interaction.response.send_message("Current message:\n\n" + await welcome_text(), ephemeral=True)
 
     @app_commands.command(name="approve", description="Approve a guild for a breaklisted player, or go back to guildless (guild staff)")
     @app_commands.describe(ign="Minecraft username", guild="The approved guild (several: XL, Other). Write none to make them guildless again",
@@ -4921,6 +4988,44 @@ def prune_auto_backups(keep: int):
 
 # ======================================================================================
 
+class PlayerRequests(commands.Cog):
+    """/rejoin and /otherguild: what a player on the breaklist can ask the staff for."""
+    def __init__(self, core):
+        self.core = core
+
+    async def _send(self, interaction, title, extra):
+        await interaction.response.defer(ephemeral=True)
+        link = await get_link(interaction.user.id)
+        if not link:
+            await interaction.followup.send("Link your Minecraft account first with `/link`.", ephemeral=True)
+            return
+        uuid, name = link["uuid"], link["ign"]
+        if not await q_one("SELECT id FROM bl_entries WHERE uuid = ? AND status = 'active'", (uuid,)):
+            await interaction.followup.send("You are not on the breaklist.", ephemeral=True)
+            return
+        embed = discord.Embed(title=title, color=0x00C8E6, timestamp=now_utc())
+        embed.add_field(name="Player", value=f"**{esc(name)}**", inline=True)
+        embed.add_field(name="Discord", value=f"<@{interaction.user.id}>", inline=True)
+        for k, v in extra:
+            embed.add_field(name=k, value=v, inline=False)
+        role = _env("REQUESTS_PING_ROLE_ID")
+        await self.core.post_request_channel(interaction, content=f"<@&{role}>" if role.isdigit() else None, embed=embed)
+        await interaction.followup.send("✅ Your request was sent to the staff. They will answer in the requests thread.",
+                                        ephemeral=True)
+
+    @app_commands.command(name="rejoin", description="On the breaklist: ask the staff to let you back into the guild")
+    @app_commands.describe(note="Anything the staff should know")
+    async def rejoin(self, interaction: discord.Interaction, note: Optional[app_commands.Range[str, 1, 300]] = None):
+        await self._send(interaction, "Rejoin request", [("Note", note)] if note else [])
+
+    @app_commands.command(name="otherguild", description="On the breaklist: ask the staff to approve another guild for you")
+    @app_commands.describe(guild="The guild you want to join", reason="Why")
+    async def otherguild(self, interaction: discord.Interaction, guild: app_commands.Range[str, 1, 60],
+                         reason: Optional[app_commands.Range[str, 1, 300]] = None):
+        await self._send(interaction, "Other guild request",
+                         [("Guild", esc(guild))] + ([("Reason", reason)] if reason else []))
+
+
 async def setup(bot: commands.Bot):
     await setup_tables()
     saved = await kv_get("weekly_req")
@@ -4943,4 +5048,5 @@ async def setup(bot: commands.Bot):
     core.mute_cog = MuteCog(core)
     await bot.add_cog(core.mute_cog)
     await bot.add_cog(LoginsCog(core))
+    await bot.add_cog(PlayerRequests(core))
     await bot.add_cog(Scheduler(core))

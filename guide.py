@@ -699,6 +699,12 @@ EXTRA_PAGES = [
            "Write RESET BREAKLIST to confirm."),
         _c("/breaklist offer ign [kind] [note]", "Staff. Sends the breaklist offer to a player who was removed or has been "
            "away for a few days. The buttons: Breaklist Me, or I'll reach the requirement (with a reason)."),
+        _c("/breaklist add (preview)", "Staff. Shows the card only to you first, with Confirm / Edit / Edit debt / Cancel. "
+           "Nothing is posted until Confirm. Up to 3 optional images are posted after the cards. `gexp` is required when "
+           "the bot has no saved GEXP for the player."),
+        _c("/breaklist card [part] [show]", "Staff. Shows or hides parts of the breaklist card (time into the week, days, "
+           "join time, breaklist time, notice...)."),
+        _c("/breaklist notice kind [text] [reset]", "Staff. Edits the NOTICE text of the breaklist card."),
         _c("/chat [ign] [search]", "Staff. What a player wrote in the guild bridge chat, newest first, with Previous / Next "
            "buttons and a Search button. Works from when it is switched on: BRIDGE_CHANNEL_ID, MESSAGE_CONTENT_INTENT=1 and "
            "the Message Content intent in the Discord developer portal."),

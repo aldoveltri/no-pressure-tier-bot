@@ -107,7 +107,14 @@ class WipeCog(commands.Cog):
         uuid, name = r
         matches, changes = await plan_wipe(uuid, mode_id)
         if not matches:
-            await interaction.followup.send(f"**{esc(name)}** has no matches to wipe.", allowed_mentions=NO_MENTIONS)
+            if confirm:
+                await asyncio.to_thread(backup_db, "wipe_player")
+                await remove_player(uuid, mode_id)
+                await interaction.followup.send(f"**{esc(name)}** has no matches to cancel: removed from the leaderboard.",
+                                                allowed_mentions=NO_MENTIONS)
+            else:
+                await interaction.followup.send(f"**{esc(name)}** has no matches to cancel. Run it again with confirm:True "
+                                                "to remove them from the leaderboard anyway.", allowed_mentions=NO_MENTIONS)
             return
         lines = [f"**{esc(v[0])}**: {v[1]} → **{v[2]}** ({v[2] - v[1]:+d})" for v in changes.values() if v[1] is not None]
         embed = discord.Embed(title=("Wiped " if confirm else "Would wipe ") + name,

@@ -12,6 +12,8 @@ ALERTS = {
     "pro_day23": ("Pro reminder: day 23", "Second reminder to the Pro at day 23"),
     "pro_day30": ("Pro reminder: day 30 (demote)", "Pings the guild master to demote a Pro after 30 days without a C+ win"),
     "purge_summary": ("Purge summary", "The 'X guild members were purged, putting us at Y' post after every purge"),
+    "breaklist_edit": ("Breaklist edit posts", "The new card posted in the breaklist thread when a staff member edits an entry or its debt"),
+    "guild_history": ("Guild history image", "The 'Guild history we know' image posted under a new breaklist notice"),
     "urchin": ("Urchin alerts", "The automatic post in the evidence channel when a guild member gets an Urchin tag"),
 }
 _cache = {}

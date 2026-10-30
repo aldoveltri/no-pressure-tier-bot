@@ -142,5 +142,6 @@ Variables: `APPEALS_CHANNEL_ID` (where feedback and appeals arrive), `BETRAYAL_P
 
 ## Added later
 - `/breaklist offer`, `/gexp history`, `/purge summary` (also posted by itself after the purge: `PURGE_SUMMARY_CHANNEL_ID`, `PURGE_SUMMARY_DELAY_MINUTES`), `/pro list` (shows how each Pro got the rank), `/tag vote` (yes/no, then tags), `/cleanup`.
+- `/breaklist add` now opens a preview (Confirm / Edit / Edit debt / Cancel) and accepts 3 optional images; `/breaklist card` and `/breaklist notice` change the card; `/alerts` has `breaklist_edit` and `guild_history`; the Edit debt button / `owed` option of `/breaklist edit` change the extra GEXP owed.
 - `roles.py`: gives the role `GUILD_MEMBER_ROLE_ID` to linked guild members and removes it from who left the guild or unlinked (the bot needs Manage Roles and its role must be above that role).
 - `chat.py`: `/chat [ign] [search]` guild chat history. Set `BRIDGE_CHANNEL_ID` and `MESSAGE_CONTENT_INTENT=1` and turn on the Message Content intent in the Discord developer portal.

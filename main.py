@@ -1090,6 +1090,34 @@ async def importmatches(interaction: discord.Interaction, file: discord.Attachme
     await interaction.followup.send(content=body, files=files)
 
 
+@bot.tree.command(name="elocalc", description="What if: the elo each player would gain or lose in a match (nothing is saved)")
+@app_commands.describe(player1_elo="Elo of player 1", player2_elo="Elo of player 2",
+                       mode="Game mode (leave empty for the normal mode)")
+async def elocalc(interaction: discord.Interaction, player1_elo: app_commands.Range[int, 0, 100000],
+                  player2_elo: app_commands.Range[int, 0, 100000], mode: Optional[str] = None):
+    await interaction.response.defer()
+    ok, md = await resolve_mode(interaction, mode)
+    if not ok:
+        return
+    system = mode_system(md)
+    first_to = FIRST_TO[system]
+
+    def lines(elo_w, elo_l):
+        out = []
+        for lg in range(first_to):
+            gain, loss = calcola(elo_w, elo_l, lg, system)
+            out.append(f"**{first_to}-{lg}**: winner {gain:+d} → {elo_w + gain} · loser {loss:+d} → {elo_l + loss}")
+        return "\n".join(out)
+
+    embed = discord.Embed(title="Hypothetical match" + (f" · {md['name']}" if md else ""), color=0x00C8E6)
+    embed.description = (f"**Player 1**: {player1_elo} ({tier_from_elo(player1_elo)})\n"
+                         f"**Player 2**: {player2_elo} ({tier_from_elo(player2_elo)})")
+    embed.add_field(name="If player 1 wins", value=lines(player1_elo, player2_elo), inline=False)
+    embed.add_field(name="If player 2 wins", value=lines(player2_elo, player1_elo), inline=False)
+    embed.set_footer(text="Nothing is saved: it is only a calculation.")
+    await interaction.followup.send(embed=embed)
+
+
 ALERT_CHOICES = [app_commands.Choice(name=v[0], value=k) for k, v in alerts.ALERTS.items()]
 
 

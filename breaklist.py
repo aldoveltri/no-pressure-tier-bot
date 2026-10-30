@@ -1093,7 +1093,7 @@ def draw_notice(it, head):
     if it.get("debt"):
         need_line += f" You also owe {n(it['debt'])} extra GEXP from before."
     how = ("Use the buttons below: Breaklist Me and Excuse Me send a request to the staff (you can cancel it "
-           "until they decide), Ignore tells the staff you will reach the requirement or don't intend to act.")
+           "until they decide), 'I plan to meet req' tells the staff you will reach the requirement.")
     text = f"{why} {need_line} {how}"
 
     id_h, box_h, gap = 130, 110, 14
@@ -2454,7 +2454,7 @@ class GuildHistoryButton(discord.ui.DynamicItem[discord.ui.Button], template=r"b
 
 class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<act>bl|ex|ig|pl):(?P<uuid>[0-9a-f]{32})"):
     """Breaklist Me / Excuse Me / Ignore on a GEXP notice. The first two only send a request to the staff."""
-    LABELS = {"bl": "Breaklist Me", "ex": "Excuse Me", "ig": "Ignore", "pl": "I'll reach the requirement"}
+    LABELS = {"bl": "Breaklist Me", "ex": "Excuse Me", "ig": "I plan to meet req", "pl": "I'll reach the requirement"}
     STYLES = {"bl": discord.ButtonStyle.danger, "ex": discord.ButtonStyle.secondary, "ig": discord.ButtonStyle.secondary,
               "pl": discord.ButtonStyle.success}
 

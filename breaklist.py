@@ -1920,9 +1920,12 @@ class Core:
         excused = await self.excused_now() | await self.ignored_now()
         on_bl = {r["uuid"] for r in await q_all("SELECT uuid FROM bl_entries WHERE status = 'active'")}
         sent = 0
+        exempt = {x.strip().lower() for x in (_env("REMINDER_EXEMPT") or "okish").split(",") if x.strip()}
         for uuid, m in members.items():
             if uuid in excused or uuid in on_bl:
                 continue
+            if exempt and (await self.name_for(uuid) or "").lower() in exempt:
+                continue                                   # bots / accounts that never get reminders
             joined = await self.joined_for(uuid)
             if kind == "friday" and joined and now - joined < timedelta(days=7):
                 continue
@@ -4507,12 +4510,15 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
     @app_commands.describe(ign="Minecraft username", length="3d, 12h, 1d12h, 2w, 30m or perm", reason="Why they were muted",
                            user="The Discord member to ping and give the role to (only if they are not linked)",
                            image="Proof: image or video (optional)", image2="Second proof (optional)",
-                           image3="Third proof (optional)")
+                           image3="Third proof (optional)",
+                           silent="Only log it: no role, no ping, nothing posted (for mutes from before the bot)",
+                           start="When the mute started (ET or MT, 2026/10/03 6:00 PM). Default: now")
     @app_commands.check(staff_check)
     async def add(self, interaction: discord.Interaction, ign: str, length: str, reason: str,
                   user: Optional[discord.Member] = None, image: Optional[discord.Attachment] = None,
-                  image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None):
-        await interaction.response.defer()
+                  image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None,
+                  silent: bool = False, start: Optional[str] = None):
+        await interaction.response.defer(ephemeral=silent)
         proofs, bad = await read_proofs([image, image2, image3])
         if bad:
             await interaction.followup.send("The proofs have to be images or videos.")
@@ -4529,13 +4535,19 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             await interaction.followup.send(f"**{esc(name)}** already has an active mute. Use `/mute end` first.")
             return
         now = now_utc()
+        if start:
+            now = gc.parse_et(start)
+            if now is None:
+                await interaction.followup.send("I couldn't read the start date. Use `2026/10/03 6:00 PM` (ET or MT, see /timezone).")
+                return
         end = None if td == "perm" else now + td
         did = await self.target_id(uuid, user)
+        over = bool(end and end <= now_utc())                   # an old mute that has already run out
         mid = await q_run("INSERT INTO mutes (uuid, ign, reason, start_at, end_at, status, added_by, discord_id) "
-                          "VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
-                          (uuid, name, reason, iso(now), iso(end) if end else None, str(interaction.user.id),
-                           str(did) if did else None))
-        gave = await self.bridge_role(did, give=True)
+                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                          (uuid, name, reason, iso(now), iso(end) if end else None, "expired" if over else "active",
+                           str(interaction.user.id), str(did) if did else None))
+        gave = False if (silent or over) else await self.bridge_role(did, give=True)
         total_mutes = (await q_one("SELECT COUNT(*) AS c FROM mutes WHERE uuid = ?", (uuid,)))["c"]
         head = await self.core.head_for(uuid, name)
         await load_flag(uuid, name)
@@ -4544,6 +4556,11 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             [("LENGTH", "Permanent" if end is None else gc.fmt_duration(td.total_seconds())),
              ("EXPIRES", "Never" if end is None else gc.fmt_et(end)), ("MUTES SO FAR", str(total_mutes))],
             interaction.user.display_name, mid)
+        if silent:
+            await interaction.followup.send(
+                f"✅ Mute of **{esc(name)}** logged quietly ({'already over' if over else 'active, the role was NOT added'}): "
+                "no role, no ping, nothing posted.", file=send_file(card, "mute.png"), allowed_mentions=NO_MENTIONS)
+            return
         how_long = "permanently" if end is None else length.strip()
         expires_line = ("This mute does not expire." if end is None else
                         f"Expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)")

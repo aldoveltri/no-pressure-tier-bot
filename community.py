@@ -105,13 +105,49 @@ def party_view(pid):
     view.add_item(PartyButton("m", pid))
     view.add_item(PartyButton("n", pid))
     view.add_item(PartyButton("st", pid))
+    view.add_item(PartyButton("ad", pid))
     return view
 
 
-class PartyButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pt:(?P<act>y|m|n|st):(?P<pid>\d+)"):
+class AddGuestModal(discord.ui.Modal, title="Add a player to the party"):
+    def __init__(self, pid):
+        super().__init__()
+        self.pid = pid
+        self.ign = discord.ui.TextInput(max_length=16, placeholder="Minecraft username (not in the guild is fine)")
+        self.answer = discord.ui.TextInput(max_length=1, default="y", placeholder="y = showing up, m = maybe, n = not")
+        self.add_item(discord.ui.Label(text="Minecraft username", component=self.ign))
+        self.add_item(discord.ui.Label(text="Answer: y / m / n", component=self.answer))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        ans = self.answer.value.strip().lower()[:1] or "y"
+        if ans not in ("y", "m", "n"):
+            await interaction.followup.send("The answer has to be y, m or n.", ephemeral=True)
+            return
+        try:
+            res = await bl.get_uuid(self.ign.value.strip())
+        except Exception:
+            res = None
+        if not res:
+            await interaction.followup.send("That is not a valid Minecraft username.", ephemeral=True)
+            return
+        uuid, name = res
+        await q_run("INSERT INTO party_votes (party_id, discord_id, name, uuid, vote) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(party_id, discord_id) DO UPDATE SET name = excluded.name, uuid = excluded.uuid, "
+                    "vote = excluded.vote", (self.pid, f"guest:{uuid}", name, uuid, ans))
+        party = await q_one("SELECT * FROM parties WHERE id = ?", (self.pid,))
+        try:
+            await interaction.message.edit(embed=await party_embed(party), view=party_view(self.pid))
+        except Exception:
+            pass
+        await interaction.followup.send(f"✅ **{esc(name)}** was added to the party.", ephemeral=True)
+
+
+class PartyButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pt:(?P<act>y|m|n|st|ad):(?P<pid>\d+)"):
     def __init__(self, act, pid):
         labels = {"y": ("Showing up", discord.ButtonStyle.success), "m": ("Maybe", discord.ButtonStyle.secondary),
-                  "n": ("Not showing up", discord.ButtonStyle.danger), "st": ("Attendee stats (staff)", discord.ButtonStyle.primary)}
+                  "n": ("Not showing up", discord.ButtonStyle.danger), "st": ("Attendee stats (staff)", discord.ButtonStyle.primary),
+                  "ad": ("Add a player (staff)", discord.ButtonStyle.secondary)}
         label, style = labels[act]
         super().__init__(discord.ui.Button(label=label, style=style, custom_id=f"pt:{act}:{pid}"))
         self.act, self.pid = act, int(pid)
@@ -133,6 +169,12 @@ class PartyButton(discord.ui.DynamicItem[discord.ui.Button], template=r"pt:(?P<a
             core = interaction.client.np_core
             embeds = await attendee_stats(core, party)
             await interaction.followup.send(embeds=embeds[:4], ephemeral=True)
+            return
+        if self.act == "ad":
+            if not bl.is_guild_staff(interaction.user):
+                await interaction.response.send_message("Only guild staff can add players.", ephemeral=True)
+                return
+            await interaction.response.send_modal(AddGuestModal(self.pid))
             return
         name, uuid = await voter_identity(interaction.user.id, interaction.user.display_name)
         row = await q_one("SELECT vote FROM party_votes WHERE party_id = ? AND discord_id = ?",
@@ -520,29 +562,6 @@ class ApplicationsCog(commands.GroupCog, name="applications", description="Guild
     async def _before(self):
         await self.bot.wait_until_ready()
         await asyncio.sleep(60)
-
-    @app_commands.command(name="check", description="Test the Hypixel forums connection: shows the latest posts it can read (guild staff)")
-    @app_commands.check(staff_check)
-    async def check(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        if not self.url():
-            await interaction.followup.send("HYPIXEL_THREAD_URL is not set on the host.", ephemeral=True)
-            return
-        try:
-            status, posts, page = await fetch_thread_posts(self.url())
-        except Exception as e:
-            await interaction.followup.send(f"Could not reach the forums: {e}", ephemeral=True)
-            return
-        if status != 200 or not posts:
-            await interaction.followup.send(f"HTTP {status}, posts read: {len(posts)}. The forum probably blocks the bot "
-                                            f"(Cloudflare) or its page layout is different.", ephemeral=True)
-            return
-        lines = [f"**#{p['id']}** {esc(p['author'])}: {esc(p['text'][:100]) or '(images)'}" for p in posts[-4:]]
-        last = await kv_get("hx_last_post")
-        await interaction.followup.send(f"Connection OK (page {page}, {len(posts)} posts read). Last post seen by the bot: "
-                                        f"{last or 'none yet (it starts counting from now)'}\n" + "\n".join(lines),
-                                        ephemeral=True)
-
 
 async def setup(bot: commands.Bot):
     async with aiosqlite.connect(bl.DB_PATH) as db:

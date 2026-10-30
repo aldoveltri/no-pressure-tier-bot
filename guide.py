@@ -706,6 +706,8 @@ EXTRA_PAGES = [
            "join time, breaklist time, notice...)."),
         _c("/breaklist notice kind [text] [reset]", "Staff. Edits the NOTICE text of the breaklist card."),
         _c("/breaklist welcome [text] [reset]", "Staff. Edits the message (with bullet points) sent when a breaklist request is accepted."),
+        _c("/mute add ... silent:True start:...", "Staff. Only logs a mute (no role, no ping, nothing posted): for mutes from before the bot. "
+           "`start` sets when it began; if it already ran out it is saved as over."),
         _c("/rejoin [note]", "Players on the breaklist. Asks the staff to let them back into the guild (needs /link)."),
         _c("/otherguild guild [reason]", "Players on the breaklist. Asks the staff to approve another guild for them."),
         _c("/elocalc", "What-if calculator: the elo each player would gain or lose in a match. Nothing is saved."),

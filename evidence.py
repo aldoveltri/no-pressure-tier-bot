@@ -656,10 +656,10 @@ def view_for(row, ending=False):
 
 async def refresh(interaction, rid, *, ending=False, phase=None, new_files=None):
     """Redraws the report in the message that was clicked. The uploaded files stay; new_files = [(name, bytes)]."""
+    if not interaction.response.is_done():
+        await interaction.response.defer()                # first: drawing the card can take more than the 3 seconds Discord allows
     row = await q_one("SELECT * FROM cheat_reports WHERE id = ?", (rid,))
     embeds, content, png, card_name = await build_report(row, phase or phase_of(row, ending))
-    if not interaction.response.is_done():
-        await interaction.response.defer()
     keep = [a for a in (getattr(getattr(interaction, "message", None), "attachments", None) or [])
             if not a.filename.startswith("card-")]            # the old picture is replaced by the new one
     attachments = (keep + [discord.File(io.BytesIO(data), filename=name) for name, data in (new_files or [])]

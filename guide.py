@@ -67,8 +67,38 @@ START_PAGES = [
     ]},
 ]
 
+TESTER_PAGES = [
+    {"title": "Logging matches", "blocks": [
+        _p("For the Tier Tester role. You can set tiers and elo and log, fix or cancel matches. You cannot end "
+           "seasons or years. Most commands have a mode option for the other game modes (not /pause, /resume, "
+           "/droppause)."),
+        _h("After a tier test"),
+        _c("/settier ign tier", "Gives a tier after a tier test. The elo is set to the minimum of that tier."),
+        _c("/setelo ign elo", "Sets the elo of a player by hand (0 to 5000)."),
+        _h("Finished matches"),
+        _c("/match winner loser score [mode] [date]", "Logs a finished 1v1. The score is like 3-1 (5-3 in Classic 1v1): the bot suggests the valid ones. Both players need a tier in that mode. The elo is calculated by itself and the result card is posted in the 1v1 logs channel. The optional date (2026/10/21 or 2026/10/21 6:00 PM, Eastern Time) logs a match played in the past."),
+        _c("/forfeit player opponent [player_games] [opponent_games] [pause_id]", "The player who left loses by forfeit: the elo changes like the biggest loss (3-0, or 5-0 in Classic 1v1). Give the games each one had won (or the pause_id) so the card shows the real score."),
+    ]},
+    {"title": "Interrupted & fixes", "blocks": [
+        _h("Interrupted matches"),
+        _c("/pause player1 player2 games1 games2", "Saves an interrupted match (for example 2-1) to continue it later. The elo does not change yet."),
+        _c("/resume pause_id winner score", "Finishes a paused match with the final score and logs it."),
+        _c("/droppause pause_id", "Throws away a paused match that will not be continued."),
+        _h("Fixing mistakes"),
+        _c("/undo match_id", "Cancels a match and gives the elo back. It only works on the latest match of both players, and only if their elo was not changed by hand after it."),
+        _c("/setdate match_id date", "Changes the date of a logged match and makes a new card. Write 2026/10/21 (or 2026/10/21 6:00 PM)."),
+        _c("/removeplayer ign", "Removes a player from the leaderboard and /profile. Their matches stay in the history. /settier or /setelo brings them back."),
+        _h("Other"),
+        _c("/alerts [alert] [state]", "Switches the automatic posts on or off. Without options it shows what is on. The data is always saved."),
+        _c("/link ign user:@member", "Links a member without the Hypixel verification."),
+        _c("/linkall [dry_run]", "Links every guild member whose Discord name on Hypixel matches a member of this server. Use dry_run first."),
+        _c("/refreshnames", "Checks Mojang for changed usernames right now (it also runs every 6 hours)."),
+    ]},
+]
+
 GUIDE_CATEGORIES = [
     {"name": "Members", "description": "Every command members can use", "pages": START_PAGES},
+    {"name": "Tier Testers", "description": "Commands of the Tier Tester role", "pages": TESTER_PAGES},
 ]
 
 GUIDE_PAGES = START_PAGES

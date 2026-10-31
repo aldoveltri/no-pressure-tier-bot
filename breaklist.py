@@ -3374,7 +3374,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         await interaction.response.send_message("**Breaklist card parts**\n" + "\n".join(lines) +
                                                 "\nChange one with `/breaklist card part:... show:on/off`.", ephemeral=True)
 
-    @app_commands.command(name="notice", description="Edit the notice text on the breaklist card (guild staff)")
+    @app_commands.command(name="cardnotice", description="Edit the notice text on the breaklist card (guild staff)")
     @app_commands.describe(kind="Which notice", text="The new text ({guild} = approved guild, for the visiting notice). Empty = show the current one",
                            reset="Go back to the default text")
     @app_commands.choices(kind=[app_commands.Choice(name=v[:100], value=k) for k, v in NOTICE_KINDS.items()])

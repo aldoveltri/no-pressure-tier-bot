@@ -197,7 +197,9 @@ async def setup_tables():
                                  ("bl_entries", "visiting_guild", "TEXT"), ("bl_entries", "visit_kind", "TEXT"),
                                  ("bl_entries", "preferred", "TEXT"), ("bl_entries", "expected_return", "TEXT"), ("warnings", "by_name", "TEXT"), ("warnings", "link", "TEXT"),
                                  ("warnings", "post_ch", "TEXT"), ("warnings", "post_msg", "TEXT"),
-                                 ("mutes", "post_ch", "TEXT"), ("mutes", "post_msg", "TEXT")):
+                                 ("mutes", "post_ch", "TEXT"), ("mutes", "post_msg", "TEXT"),
+                                 ("mutes", "link", "TEXT"), ("day_sets", "entry_id", "INTEGER"),
+                                 ("bl_entries", "no_count", "INTEGER DEFAULT 0")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
             except aiosqlite.OperationalError:
@@ -785,6 +787,66 @@ def draw_gexp_history(name, head, status, weeks, daily, required):
             d.text((cx + cw / 2, base + 14), lab, font=g.get_font(11), fill=g.MUTED, anchor="mm")
     g._footer(d, height, "Line = requirement")
     return g._png(img)
+
+
+def draw_country_list(rows, have, total, missing):
+    """rows: [(code, country name, count, flag image or None)] most common first. Bars show the % of the guild."""
+    row_h = 52
+    top = g.HEADER_H + 16
+    shown = rows[:16]
+    height = top + 124 + len(shown) * (row_h + 6) + 20 + g.FOOTER_H
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, "COUNTRIES", f"{GUILD_NAME_DISPLAY} · where the guild plays from")
+    bw = (g.WIDTH - 2 * g.PAD - 14) // 2
+    _box(d, g.PAD, top, bw, 110, "HAVE A COUNTRY", f"{have} / {total}",
+         sub=f"{have * 100 // max(1, total)}% of the guild", sub_color=g.MUTED)
+    _box(d, g.PAD + bw + 14, top, bw, 110, "MISSING", str(missing), g.RED if missing else g.GREEN,
+         sub="no country set yet", sub_color=g.MUTED)
+    y = top + 124
+    biggest = max([r[2] for r in shown] or [1])
+    for code, name, cnt, flag in shown:
+        d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + row_h], radius=12, fill=g.ROW_BG)
+        x = g.PAD + 16
+        if flag is not None:
+            fw = int(flag.width * 26 / flag.height)
+            img.paste(flag.resize((fw, 26)), (x, y + 13))
+        d.text((x + 46, y + row_h // 2), name[:22], font=g.get_font(19, True), fill=g.TEXT, anchor="lm")
+        bx0, bx1 = g.PAD + 280, g.WIDTH - g.PAD - 150
+        d.rounded_rectangle([bx0, y + 19, bx1, y + 33], radius=7, fill=g.TRACK)
+        d.rounded_rectangle([bx0, y + 19, bx0 + max(12, int((bx1 - bx0) * cnt / biggest)), y + 33], radius=7, fill=g.ACCENT)
+        d.text((g.WIDTH - g.PAD - 16, y + row_h // 2), f"{cnt} · {cnt * 100 / max(1, have):.0f}%",
+               font=g.get_font(18, True), fill=g.TEXT, anchor="rm")
+        y += row_h + 6
+    if len(rows) > len(shown):
+        d.text((g.WIDTH // 2, y + 6), f"and {len(rows) - len(shown)} more countries", font=g.get_font(15), fill=g.MUTED, anchor="mm")
+    g._footer(d, height, "Percentages are of the players who have a country")
+    return g._png(img)
+
+
+class CountryListView(discord.ui.View):
+    def __init__(self, cog, by_country, missing_names):
+        super().__init__(timeout=900)
+        self.by_country, self.missing_names = by_country, missing_names
+        top = sorted(by_country.items(), key=lambda x: -len(x[1]))[:25]
+        if top:
+            sel = discord.ui.Select(placeholder="Who is from…?", options=[
+                discord.SelectOption(label=f"{cog.country_name(c)} ({len(v)})"[:100], value=c, emoji=flag_emoji(c))
+                for c, v in top])
+            sel.callback = self.pick
+            self.add_item(sel)
+        self.cog = cog
+
+    async def pick(self, interaction: discord.Interaction):
+        code = interaction.data["values"][0]
+        names = ", ".join(esc(x) for x in sorted(self.by_country.get(code, []), key=str.lower))
+        await interaction.response.send_message(f"{flag_emoji(code)} **{self.cog.country_name(code)}** "
+                                                f"({len(self.by_country.get(code, []))}): {names}"[:1900], ephemeral=True)
+
+    @discord.ui.button(label="Without a country", style=discord.ButtonStyle.secondary, row=1)
+    async def nocountry(self, interaction: discord.Interaction, button: discord.ui.Button):
+        txt = ", ".join(esc(x) for x in self.missing_names) or "Everybody has one."
+        await interaction.response.send_message(f"**Without a country ({len(self.missing_names)}):** {txt}"[:1900], ephemeral=True)
 
 
 def draw_history_card(name, lines):
@@ -1613,6 +1675,14 @@ class Core:
                 span = f"{max(0, int((b - a).total_seconds() // 86400))} days" if a and b else "unknown length"
                 lines.append(f"• **{esc(HYPIXEL_GUILD_NAME or 'This guild')}**: "
                              f"{gc.fmt_date(a) if a else '?'} → {gc.fmt_date(b)} ({span})")
+            seen_g = []                          # guilds the staff approved in earlier breaklists (Hypixel doesn't keep them)
+            for ent in await q_all("SELECT visiting_guild, left_at FROM bl_entries WHERE uuid = ? AND visiting_guild IS NOT NULL "
+                                   "ORDER BY id", (uuid,)):
+                for gname in re.split(r"[,;]", ent["visiting_guild"] or ""):
+                    gname = gname.strip()
+                    if gname and gname.lower() not in [x.lower() for x in seen_g]:
+                        seen_g.append(gname)
+                        lines.append(f"• Approved to visit **{esc(gname)}** (breaklist of {gc.fmt_date(from_iso(ent['left_at']))})")
             other = await api_guild({"player": uuid})
             if other:
                 m = next((x for x in other.get("members", []) if x.get("uuid") == uuid), None)
@@ -1698,7 +1768,7 @@ class Core:
                     "gexp": gexp, "required": required, "owed": total_debt, "reason": reason or None,
                     "status": "active", "visiting_guild": (visiting or "").strip() or None,
                     "visit_kind": visit_kind, "expected_return": expected_return, "preferred": None}
-            count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (uuid,)))["c"] + 1
+            count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ? AND COALESCE(no_count, 0) = 0", (uuid,)))["c"] + 1
             return {"entry": fake, "count": count, "debt": debt}
         entry_id = await q_run(
             "INSERT INTO bl_entries (uuid, ign, added_at, added_by, joined_at, left_at, days_total, gexp, required, "
@@ -1720,12 +1790,12 @@ class Core:
         if expected_return:
             await q_run("UPDATE bl_entries SET expected_return = ? WHERE id = ?", (expected_return, entry_id))
         entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry_id,))
-        count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (uuid,)))["c"]
+        count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ? AND COALESCE(no_count, 0) = 0", (uuid,)))["c"]
         return {"entry": entry, "count": count}
 
     async def breaklist_card(self, entry, title, count=None):
         if count is None:
-            count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (entry["uuid"],)))["c"]
+            count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ? AND COALESCE(no_count, 0) = 0", (entry["uuid"],)))["c"]
         head = await self.head_for(entry["uuid"], entry["ign"])
         await load_flag(entry["uuid"], entry["ign"])
         await load_card_settings()
@@ -2083,7 +2153,8 @@ def edit_stamp(dt):
     return f"{local:%Y/%m/%d} {(local.strftime('%I').lstrip('0') or '12')}:{local.strftime('%M %p')}"
 
 
-async def edit_entry(core, entry, *, reason=None, start=None, end=None, gexp=None, expected_return=None, days=None, by=None):
+async def edit_entry(core, entry, *, reason=None, start=None, end=None, gexp=None, expected_return=None, days=None, by=None,
+                     required=None):
     """Changes a breaklist entry. Returns (new entry, None) or (None, error text). Strings are the typed values."""
     fields = {}
     joined, left = from_iso(entry.get("joined_at")), from_iso(entry["left_at"])
@@ -2109,9 +2180,10 @@ async def edit_entry(core, entry, *, reason=None, start=None, end=None, gexp=Non
     if reason is not None:
         fields["reason"] = reason.strip() or None
     new_gexp = entry["gexp"] if gexp is None else gexp
-    if start or end or gexp is not None:
+    if start or end or gexp is not None or required is not None:
         ws = gc.week_start(new_left)
-        required = gc.required_elapsed(max(new_joined, ws) if new_joined else ws, new_left)
+        if required is None:
+            required = gc.required_elapsed(max(new_joined, ws) if new_joined else ws, new_left)
         old_week_owed = max(0, entry["required"] - entry["gexp"])
         carried = max(0, entry["owed"] - old_week_owed)               # the debt from earlier weeks stays
         owed = carried + max(0, required - new_gexp)
@@ -2151,6 +2223,39 @@ async def repost_card(core, entry_id, text, title="BREAKLIST UPDATE", kind=None)
     posted = await core.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
                                 thread_name=entry["ign"], thread_key=f"bl_thread:{entry['id']}", view=view)
     return posted, card
+
+
+class ConfirmView(discord.ui.View):
+    """Confirm / Cancel for the staff member who ran the command. `await view.wait_answer()` -> True when confirmed."""
+    def __init__(self, user_id):
+        super().__init__(timeout=300)
+        self.user_id, self.ok = user_id, None
+        self.event = asyncio.Event()
+
+    async def wait_answer(self):
+        try:
+            await asyncio.wait_for(self.event.wait(), 300)
+        except asyncio.TimeoutError:
+            return False
+        return bool(self.ok)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.ok = True
+        await interaction.response.defer()
+        self.event.set()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.ok = False
+        await interaction.response.edit_message(content="Cancelled: nothing was saved.", view=None)
+        self.event.set()
 
 
 class AddPreviewModal(discord.ui.Modal):
@@ -2219,7 +2324,7 @@ class AddPreviewView(discord.ui.View):
 
     def header(self):
         return (f"👀 **Preview for {esc(self.name)}**: nothing is posted yet. "
-                "Press **Confirm** to send it to the breaklist channel, or **Edit** to change it."
+                "Press **Confirm** to send it to the breaklist channel (the guild history below is posted with it), or **Edit** to change it."
                 + (f"\n📎 {len(self.media)} image(s) will be posted after the cards." if self.media else ""))
 
     def _parse(self):
@@ -2269,7 +2374,15 @@ class AddPreviewView(discord.ui.View):
             self.params.update(old)
             await interaction.followup.send(err + "\nNothing was changed.", ephemeral=True)
             return
-        await interaction.edit_original_response(content=self.header(), attachments=[send_file(card, "preview.png")],
+        files = [send_file(card, "preview.png")]
+        if await alerts.enabled("guild_history"):
+            try:
+                hist = await self.core.guild_history_image(self.uuid, self.name)
+            except Exception:
+                hist = None
+            if hist:
+                files.append(send_file(hist, "guild_history_preview.png"))
+        await interaction.edit_original_response(content=self.header(), attachments=files,
                                                  view=self)
 
     async def interaction_check(self, interaction):
@@ -2386,40 +2499,68 @@ class BreaklistEditButton(discord.ui.DynamicItem[discord.ui.Button], template=r"
 
 
 class DebtModal(discord.ui.Modal):
+    """Edit the numbers of an entry: extra GEXP owed, GEXP required at the breaklist, days in the guild."""
     def __init__(self, entry):
-        super().__init__(title=f"Extra GEXP owed: {entry['ign']}"[:45])
+        super().__init__(title=f"Numbers: {entry['ign']}"[:45])
         self.eid = entry["id"]
-        wk = max(0, entry["required"] - entry["gexp"])
         self.cur = entry["owed"]
-        self.owed = discord.ui.TextInput(max_length=12, required=True, default=str(entry["owed"]),
+        wk = max(0, entry["required"] - entry["gexp"])
+        self.owed = discord.ui.TextInput(max_length=12, required=False, default=str(entry["owed"]),
                                          placeholder=f"Total, this week's {n(wk)} included")
+        self.req = discord.ui.TextInput(max_length=12, required=False, default=str(entry["required"]))
+        self.days = discord.ui.TextInput(max_length=8, required=False,
+                                         default=f"{entry['days_total']:.2f}".rstrip("0").rstrip("."))
         self.add_item(discord.ui.Label(text="Extra GEXP owed (total)", component=self.owed))
+        self.add_item(discord.ui.Label(text="GEXP required at the breaklist", component=self.req))
+        self.add_item(discord.ui.Label(text="Days in the guild", component=self.days))
 
     async def on_submit(self, interaction: discord.Interaction):
-        t = self.owed.value.replace(",", "").strip()
-        if not t.isdigit():
-            await interaction.response.send_message("The amount has to be a number.", ephemeral=True)
+        owed_t, req_t, days_t = (x.value.replace(",", "").strip() for x in (self.owed, self.req, self.days))
+        for t in (owed_t, req_t):
+            if t and not t.isdigit():
+                await interaction.response.send_message("GEXP amounts have to be whole numbers.", ephemeral=True)
+                return
+        try:
+            days_v = float(days_t) if days_t else None
+        except ValueError:
+            await interaction.response.send_message("The days have to be a number.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (self.eid,))
         if entry is None:
             await interaction.followup.send("This entry doesn't exist any more.", ephemeral=True)
             return
-        await q_run("UPDATE bl_entries SET owed = ? WHERE id = ?", (int(t), self.eid))
-        if entry["status"] == "active":
-            await q_run("INSERT INTO debts (uuid, ign, amount, updated_at) VALUES (?, ?, ?, ?) "
-                        "ON CONFLICT(uuid) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at",
-                        (entry["uuid"], entry["ign"], int(t), iso(now_utc())))
-        posted, _ = await repost_card(interaction.client.np_core, self.eid,
-                                      f"💰 The extra GEXP owed by **{esc(entry['ign'])}** is now **{n(int(t))}** "
-                                      f"(was {n(self.cur)}), changed by {interaction.user.display_name}.", kind="edit")
-        await interaction.followup.send("✅ Debt updated." + (f" New card posted in {posted}." if posted else ""),
+        core = interaction.client.np_core
+        changes = []
+        if req_t and int(req_t) != entry["required"]:
+            new, err = await edit_entry(core, entry, required=int(req_t), by=interaction.user.id)
+            if err:
+                await interaction.followup.send(err, ephemeral=True)
+                return
+            entry = new
+            changes.append(f"required **{n(int(req_t))}**")
+        if owed_t and int(owed_t) != entry["owed"]:
+            await q_run("UPDATE bl_entries SET owed = ? WHERE id = ?", (int(owed_t), self.eid))
+            if entry["status"] == "active":
+                await q_run("INSERT INTO debts (uuid, ign, amount, updated_at) VALUES (?, ?, ?, ?) "
+                            "ON CONFLICT(uuid) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at",
+                            (entry["uuid"], entry["ign"], int(owed_t), iso(now_utc())))
+            changes.append(f"extra GEXP owed **{n(int(owed_t))}**")
+        if days_v is not None and abs(days_v - entry["days_total"]) > 0.01:
+            await edit_entry(core, entry, days=days_v, by=interaction.user.id)
+            changes.append(f"days in the guild **{days_v:g}**")
+        if not changes:
+            await interaction.followup.send("Nothing changed.", ephemeral=True)
+            return
+        posted, _ = await repost_card(core, self.eid, f"💰 Numbers of **{esc(entry['ign'])}** changed by "
+                                      f"{interaction.user.display_name}: " + ", ".join(changes) + ".", kind="edit")
+        await interaction.followup.send("✅ Updated: " + ", ".join(changes) + (f". New card posted in {posted}." if posted else "."),
                                         ephemeral=True)
 
 
 class BreaklistDebtButton(discord.ui.DynamicItem[discord.ui.Button], template=r"bl:dt:(?P<eid>\d+)"):
     def __init__(self, eid):
-        super().__init__(discord.ui.Button(label="Edit debt (staff)", style=discord.ButtonStyle.secondary,
+        super().__init__(discord.ui.Button(label="Edit numbers (staff)", style=discord.ButtonStyle.secondary,
                                            emoji="💰", custom_id=f"bl:dt:{eid}"))
         self.eid = int(eid)
 
@@ -2666,7 +2807,9 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:
                 reason = row["reason"] or "Requested by the player"
                 if row["duration"]:
                     reason = f"{reason} (away: {row['duration']})"
-                res = await core.do_breaklist(row["uuid"], name, reason=reason[:300], added_by=str(staff.id))
+                asked = from_iso(row.get("created_at")) if row.get("created_at") else None
+                res = await core.do_breaklist(row["uuid"], name, reason=reason[:300], added_by=str(staff.id),
+                                              end=asked)               # the breaklist starts when they asked for it
                 if "error" in res:
                     await interaction.followup.send(res["error"], ephemeral=True)
                     return
@@ -2839,8 +2982,15 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if err:
             await interaction.followup.send(err, ephemeral=True)
             return
-        await interaction.followup.send(content=view.header(), file=send_file(card, "preview.png"), view=view,
-                                        ephemeral=True)
+        files = [send_file(card, "preview.png")]
+        if await alerts.enabled("guild_history"):
+            try:
+                hist = await self.core.guild_history_image(uuid, name)
+            except Exception:
+                hist = None
+            if hist:
+                files.append(send_file(hist, "guild_history_preview.png"))
+        await interaction.followup.send(content=view.header(), files=files, view=view, ephemeral=True)
 
     async def guild_card(self, sort, page):
         """(png, page, pages, total) of /breaklist guild in the chosen order, or None when the list is empty."""
@@ -2996,16 +3146,21 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
 
     @app_commands.command(name="addold", description="Record an OLD breaklist of a player, already finished (guild staff)")
     @app_commands.describe(
-        ign="Minecraft username of the player", reason="Why they were breaklisted",
-        start="When they joined the guild that time (ET or MT, see /timezone): 2026/07/28 5:28 PM, year optional",
-        end="When they were breaklisted (same format)", gexp="GEXP earned that week before the breaklist",
+        ign="Minecraft username of the player",
+        end="When they were breaklisted (ET or MT, see /timezone): 2026/07/28 5:28 PM, year optional",
+        reason="Why they were breaklisted",
+        gexp="GEXP earned that week before the breaklist",
+        required="GEXP required at the breaklist (default: calculated from the dates)",
+        start="When they joined the guild that time (same format). Default: their latest join date",
         returned="When they came back (default: the end date)",
         days="Days of that stay, added to their total (default: from start to end; 0 = add nothing)")
     @app_commands.check(staff_check)
     async def add_old(self, interaction: discord.Interaction, ign: str, end: str, reason: Optional[str] = None,
-                      start: Optional[str] = None, gexp: app_commands.Range[int, 0, 100_000_000] = 0,
+                      gexp: app_commands.Range[int, 0, 100_000_000] = 0,
+                      required: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
+                      start: Optional[str] = None,
                       returned: Optional[str] = None, days: Optional[app_commands.Range[float, 0, 5000]] = None):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         r = await lookup(interaction, ign)
         if r is None:
             return
@@ -3018,31 +3173,51 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                     await interaction.followup.send(f"I couldn't read the {key} date. Use `2026/07/28 5:28 PM` or "
                                                     "`07/28 5:28 PM` (only one AM/PM, after the time).")
                     return
-        joined, left = parsed.get("start"), parsed["end"]
+        left = parsed["end"]
+        joined = parsed.get("start")
+        if joined is None:
+            try:
+                jf = await self.core.joined_for(uuid)
+            except Exception:
+                jf = None
+            joined = jf if jf and jf < left else None
         back = parsed.get("returned") or left
         if joined and left <= joined:
             await interaction.followup.send("The end date must be after the start date.")
             return
         ws = gc.week_start(left)
-        required = gc.required_elapsed(max(joined, ws) if joined else ws, left)
+        calc_req = gc.required_elapsed(max(joined, ws) if joined else ws, left)
+        req = calc_req if required is None else required
         if days is None:
             days = max(0.0, (left - joined).total_seconds() / 86400) if joined else 0.0
+        summary = (f"**Old breaklist of {esc(name)}**\n"
+                   f"• Joined the guild: {gc.fmt_et(joined) if joined else 'unknown'}\n"
+                   f"• Breaklisted: {gc.fmt_et(left)}\n• Came back: {gc.fmt_et(back)}\n"
+                   f"• GEXP earned: {n(gexp)} · required: {n(req)}{'' if required is None else ' (typed)'}\n"
+                   f"• Days added to their total: **{days:g}**\n• Reason: {esc(reason or '-')}\n"
+                   "Press **Confirm** to save it.")
+        view = ConfirmView(interaction.user.id)
+        await interaction.followup.send(summary, view=view, ephemeral=True, allowed_mentions=NO_MENTIONS)
+        if not await view.wait_answer():
+            return
         await q_run(
             "INSERT INTO bl_entries (uuid, ign, added_at, added_by, joined_at, left_at, days_total, gexp, required, owed, "
             "reason, status, returned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'returned', ?)",
             (uuid, name, iso(left), str(interaction.user.id), iso(joined) if joined else None, iso(left), days, gexp,
-             required, max(0, required - gexp), reason or None, iso(back)))
-        count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ?", (uuid,)))["c"]
+             req, max(0, req - gexp), reason or None, iso(back)))
+        entry_id = (await q_one("SELECT MAX(id) AS i FROM bl_entries WHERE uuid = ?", (uuid,)))["i"]
+        count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ? AND COALESCE(no_count, 0) = 0", (uuid,)))["c"]
         total_txt = ""
         if days > 0.01:
-            await self.core.add_day_set(uuid, name, days, f"old breaklist {gc.fmt_date(left)}", interaction.user.id)
+            sid, _ = await self.core.add_day_set(uuid, name, days, f"old breaklist {gc.fmt_date(left)}", interaction.user.id)
+            await q_run("UPDATE day_sets SET entry_id = ? WHERE id = ?", (entry_id, sid))
             total, _ = await self.core.days_info(uuid)
             total_txt = (f" Their **{days:g} days** of that stay were added: total days in the guild now **{int(total)}** "
-                         f"(remove the set with `/breaklist removedays`).")
-        await interaction.followup.send(
-            f"✅ Old breaklist of **{esc(name)}** saved ({gc.fmt_date(left)} → {gc.fmt_date(back)}). "
-            f"They have now been breaklisted **{count}** times.{total_txt} Debt was not changed. "
-            "See it with `/breaklist history`.", allowed_mentions=NO_MENTIONS)
+                         f"(remove the set with `/breaklist removedays`: the old breaklist goes away with it).")
+        await interaction.edit_original_response(
+            content=f"✅ Old breaklist of **{esc(name)}** saved ({gc.fmt_date(left)} → {gc.fmt_date(back)}). "
+                    f"They have now been breaklisted **{count}** times.{total_txt} Debt was not changed. "
+                    "See it with `/breaklist history`.", view=None)
 
     @app_commands.command(name="remove", description="Take a player off the breaklist when they rejoin (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
@@ -3188,17 +3363,117 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         rows = await q_all("SELECT * FROM day_sets WHERE uuid = ? ORDER BY id DESC", (uuid,))
         total, _ = await self.core.days_info(uuid)
         banked = (await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,)) or {"banked": 0})["banked"]
-        lines = []
-        for x in rows[:20]:
-            mark = "~~" if x["removed"] else ""
-            lines.append(f"{mark}**Set #{x['id']}** · {x['days']:+g} days · {gc.fmt_date(from_iso(x['added_at']))} · "
-                         f"{x['note'] or '-'}{mark}{' (removed)' if x['removed'] else ''}")
+        def dh(d):
+            d = abs(d)
+            return f"{int(d)}d {int(round((d - int(d)) * 24)) % 24}h"
+
+        blocks = []
+        for x in rows[:12]:
+            ent = await q_one("SELECT left_at FROM bl_entries WHERE id = ?", (x.get("entry_id"),)) if x.get("entry_id") else None
+            lines = [f"**{dh(x['days'])}** banked" + (" (taken away)" if x["days"] < 0 else ""),
+                     f"Added: {gc.fmt_et(from_iso(x['added_at']))}"]
+            if ent:
+                lines.append(f"Breaklisted: {gc.fmt_et(from_iso(ent['left_at']))}")
+            lines.append(f"Set: #{x['id']} · {x['note'] or '-'}")
+            txt = "\n".join(lines)
+            blocks.append(f"~~{txt}~~ (removed)" if x["removed"] else txt)
         live = sum(x["days"] for x in rows if not x["removed"])
-        if abs(banked - live) > 0.01:
-            lines.append(f"Days from before the sets were recorded: **{banked - live:g}**")
+        extra = f"\nDays from before the sets were recorded: **{dh(banked - live)}**" if abs(banked - live) > 0.01 else ""
         await interaction.followup.send(
-            f"**{esc(name)}** · banked days: **{banked:g}** · total days in guild: **{int(total)}**\n"
-            + ("\n".join(lines) if lines else "No sets recorded yet."), allowed_mentions=NO_MENTIONS)
+            f"**{esc(name)}**\nBanked: **{dh(banked)}** · Guild time: **{int(total)}d**\n\n"
+            + ("\n\n".join(blocks) if blocks else "No sets recorded yet.") + extra, allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="restore", description="Undo a mistake: put the last breaklist of a player back on the list (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player")
+    @app_commands.check(staff_check)
+    async def restore(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        if await q_one("SELECT id FROM bl_entries WHERE uuid = ? AND status = 'active'", (uuid,)):
+            await interaction.followup.send(f"**{esc(name)}** is already on the breaklist.")
+            return
+        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? AND status IN ('betrayed', 'returned') "
+                            "ORDER BY id DESC LIMIT 1", (uuid,))
+        if entry is None:
+            await interaction.followup.send(f"**{esc(name)}** has no breaklist to put back.")
+            return
+        await q_run("UPDATE bl_entries SET status = 'active', returned_at = NULL WHERE id = ?", (entry["id"],))
+        await q_run("DELETE FROM kv WHERE key = ?", (f"betrayal:{entry['id']}",))
+        back = ""
+        lost = await q_one("SELECT * FROM day_sets WHERE uuid = ? AND removed = 0 AND days < 0 AND note LIKE 'joined another guild%' "
+                           "ORDER BY id DESC LIMIT 1", (uuid,))
+        if lost:                                           # the days taken away by the guild check come back
+            await q_run("UPDATE day_sets SET removed = 1 WHERE id = ?", (lost["id"],))
+            prev = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+            new = (prev["banked"] if prev else 0.0) - lost["days"]
+            await q_run("INSERT INTO player_days (uuid, ign, banked, updated_at) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(uuid) DO UPDATE SET banked = excluded.banked, updated_at = excluded.updated_at",
+                        (uuid, name, new, iso(now_utc())))
+            back = f" Their **{-lost['days']:g} days** came back."
+        total, _ = await self.core.days_info(uuid)
+        await q_run("UPDATE bl_entries SET days_total = ? WHERE id = ?", (total, entry["id"]))
+        posted, _c = await repost_card(self.core, entry["id"], f"↩️ The breaklist of **{esc(name)}** was put back by "
+                                                              f"{interaction.user.display_name}.")
+        await interaction.followup.send(f"✅ **{esc(name)}** is on the breaklist again.{back}"
+                                        + (f" Card posted in {posted}." if posted else ""), allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="counts", description="See which breaklists count as 'times breaklisted' and switch one off or on (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player", entry="Entry number to switch (see the list)",
+                           counts="True = it counts, False = it does not count")
+    @app_commands.check(staff_check)
+    async def counts(self, interaction: discord.Interaction, ign: str, entry: Optional[int] = None,
+                     counts: Optional[bool] = None):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        if entry is not None and counts is not None:
+            row = await q_one("SELECT id FROM bl_entries WHERE id = ? AND uuid = ?", (entry, uuid))
+            if row is None:
+                await interaction.followup.send(f"**{esc(name)}** has no entry #{entry}.")
+                return
+            await q_run("UPDATE bl_entries SET no_count = ? WHERE id = ?", (0 if counts else 1, entry))
+        rows = await q_all("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY id", (uuid,))
+        lines = [f"{'✅ counts' if not x.get('no_count') else '⛔ does not count'} · **#{x['id']}** · "
+                 f"{gc.fmt_date(from_iso(x['left_at']))} · {x['status']} · {esc((x.get('reason') or '-')[:60])}" for x in rows]
+        total = sum(1 for x in rows if not x.get("no_count"))
+        await interaction.followup.send(
+            f"**{esc(name)}** · counted as breaklisted **{total}** time{'s' if total != 1 else ''}\n" + "\n".join(lines or ["No entries."])
+            + "\nSwitch one with `/breaklist counts ign entry:<number> counts:False`.", allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="editset", description="Change one set of days: its days or its note (guild staff)")
+    @app_commands.describe(ign="Minecraft username of the player", set="Set number (see /breaklist days)",
+                           days="New number of days of this set", note="New note")
+    @app_commands.check(staff_check)
+    async def editset(self, interaction: discord.Interaction, ign: str, set: int,
+                      days: Optional[app_commands.Range[float, -5000, 5000]] = None, note: Optional[str] = None):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        row = await q_one("SELECT * FROM day_sets WHERE id = ? AND uuid = ? AND removed = 0", (set, uuid))
+        if row is None:
+            await interaction.followup.send(f"**{esc(name)}** has no active set #{set}. See `/breaklist days`.")
+            return
+        if days is None and note is None:
+            await interaction.followup.send("Give the new `days` and/or a new `note`.")
+            return
+        if days is not None:
+            prev = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
+            new = max(0.0, (prev["banked"] if prev else 0.0) + days - row["days"])
+            await q_run("UPDATE day_sets SET days = ? WHERE id = ?", (days, set))
+            await q_run("UPDATE player_days SET banked = ?, updated_at = ? WHERE uuid = ?", (new, iso(now_utc()), uuid))
+            await q_run("UPDATE bl_entries SET days_total = ? WHERE uuid = ? AND status = 'active'", (new, uuid))
+        if note is not None:
+            await q_run("UPDATE day_sets SET note = ? WHERE id = ?", (note, set))
+        total, _ = await self.core.days_info(uuid)
+        await interaction.followup.send(f"✅ Set **#{set}** of **{esc(name)}** changed. Total days in guild now: "
+                                        f"**{int(total)}**.", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="removedays", description="Remove one set of days from a player (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player", set="Set number (see /breaklist days)")
@@ -3217,12 +3492,18 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         prev = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
         new = max(0.0, (prev["banked"] if prev else 0.0) - row["days"])
         await q_run("UPDATE day_sets SET removed = 1 WHERE id = ?", (set,))
+        gone = ""
+        if row.get("entry_id"):                    # the old breaklist that came with these days goes away too
+            ent = await q_one("SELECT id, status FROM bl_entries WHERE id = ?", (row["entry_id"],))
+            if ent and ent["status"] != "active":
+                await q_run("DELETE FROM bl_entries WHERE id = ?", (ent["id"],))
+                gone = " The old breaklist linked to it was deleted too (it no longer counts)."
         await q_run("UPDATE player_days SET banked = ?, updated_at = ? WHERE uuid = ?", (new, iso(now_utc()), uuid))
         await q_run("UPDATE bl_entries SET days_total = ? WHERE uuid = ? AND status = 'active'", (new, uuid))
         total, _ = await self.core.days_info(uuid)
         await interaction.followup.send(
             f"✅ Set **#{set}** ({row['days']:+g} days) removed from **{esc(name)}**. "
-            f"Total days in guild now: **{int(total)}**.", allowed_mentions=NO_MENTIONS)
+            f"Total days in guild now: **{int(total)}**.{gone}", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="move", description="Move a player to another position in /breaklist guild (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player on the breaklist", position="New position (1 = first)")
@@ -3302,15 +3583,17 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                            days="Total days in the guild (sets the saved days)",
                            expected_return="Expected return date, no time (2026/11/15). Write none to remove it",
                            owed="Total extra GEXP owed (this week + earlier debt)",
+                           required="GEXP required at the breaklist (when the calculated one is wrong)",
                            guild="Add an approved guild (kept with the ones already approved). Write none to clear them all")
     @app_commands.check(staff_check)
     async def edit(self, interaction: discord.Interaction, ign: str, reason: Optional[str] = None,
                    start: Optional[str] = None, end: Optional[str] = None,
                    gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                    days: Optional[app_commands.Range[float, 0, 5000]] = None, expected_return: Optional[str] = None,
-                   owed: Optional[app_commands.Range[int, 0, 100_000_000]] = None, guild: Optional[str] = None):
+                   owed: Optional[app_commands.Range[int, 0, 100_000_000]] = None, guild: Optional[str] = None,
+                   required: Optional[app_commands.Range[int, 0, 100_000_000]] = None):
         await interaction.response.defer()
-        if all(v is None for v in (reason, start, end, gexp, days, expected_return, owed, guild)):
+        if all(v is None for v in (reason, start, end, gexp, days, expected_return, owed, guild, required)):
             await interaction.followup.send("Give at least one thing to change.")
             return
         r = await lookup(interaction, ign)
@@ -3322,7 +3605,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
             return
         new, err = await edit_entry(self.core, entry, reason=reason, start=start, end=end, gexp=gexp,
-                                    expected_return=expected_return, days=days, by=interaction.user.id)
+                                    expected_return=expected_return, days=days, by=interaction.user.id,
+                                    required=required)
         if err:
             await interaction.followup.send(err)
             return
@@ -3337,13 +3621,6 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                 merged = ", ".join(have)
             await q_run("UPDATE bl_entries SET visiting_guild = ?, visit_kind = COALESCE(visit_kind, 'temporary') WHERE id = ?",
                         (merged, new["id"]))
-            new = await q_one("SELECT * FROM bl_entries WHERE id = ?", (new["id"],))
-        if guild is not None:
-            if guild.strip().lower() in ("none", "no", "-", "guildless", ""):
-                await q_run("UPDATE bl_entries SET visiting_guild = NULL, visit_kind = NULL, preferred = NULL WHERE id = ?", (new["id"],))
-            else:
-                await q_run("UPDATE bl_entries SET visiting_guild = ?, visit_kind = ? WHERE id = ?",
-                            (guild.strip(), purpose or new.get("visit_kind") or "temporary", new["id"]))
             new = await q_one("SELECT * FROM bl_entries WHERE id = ?", (new["id"],))
         if owed is not None:
             await q_run("UPDATE bl_entries SET owed = ? WHERE id = ?", (owed, new["id"]))
@@ -3942,20 +4219,20 @@ class CountryCog(commands.GroupCog, name="country", description="Country flags s
         counts = {}
         for u in have:
             counts[by[u]] = counts.get(by[u], 0) + 1
-        top = ", ".join(f"{flag_emoji(c)} {self.country_name(c)} {k}" for c, k in sorted(counts.items(), key=lambda x: -x[1])[:15])
-        names = []
-        for u in missing[:60]:
-            names.append(esc(await self.core.name_for(u)))
-        embed = discord.Embed(title="Countries", color=0x00C8E6)
-        embed.description = (f"**{len(have)}** of **{len(members)}** guild members have a country, "
-                             f"**{len(missing)}** are missing." if members else
-                             f"{len(rows)} players have a country (I can't read the guild member list now).")
-        if top:
-            embed.add_field(name="Most common", value=top[:1000], inline=False)
-        if names:
-            embed.add_field(name="Without a country", value=(", ".join(names) + (f" and {len(missing) - 60} more" if len(missing) > 60 else ""))[:1000], inline=False)
-        embed.set_footer(text="Also under /topgexp: top 10 players without a country")
-        await interaction.followup.send(embed=embed, allowed_mentions=NO_MENTIONS)
+        by_country = {}
+        for u in have:
+            by_country.setdefault(by[u], []).append(await self.core.name_for(u))
+        missing_names = [await self.core.name_for(u) for u in missing]
+        rows_img = []
+        for c, k in sorted(counts.items(), key=lambda x: -x[1]):
+            rows_img.append((c, self.country_name(c), k, await _flag_image(c)))
+        if not members:
+            await interaction.followup.send(f"{len(rows)} players have a country (I can't read the guild member list now).")
+            return
+        card = await asyncio.to_thread(draw_country_list, rows_img, len(have), len(members), len(missing))
+        await interaction.followup.send(file=send_file(card, "countries.png"),
+                                        view=CountryListView(self, by_country, missing_names),
+                                        allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="remove", description="Remove the country of a player (guild staff)")
     @app_commands.check(staff_check)
@@ -4511,13 +4788,14 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
                            user="The Discord member to ping and give the role to (only if they are not linked)",
                            image="Proof: image or video (optional)", image2="Second proof (optional)",
                            image3="Third proof (optional)",
+                           link="Link to the message that got them muted (optional)",
                            silent="Only log it: no role, no ping, nothing posted (for mutes from before the bot)",
                            start="When the mute started (ET or MT, 2026/10/03 6:00 PM). Default: now")
     @app_commands.check(staff_check)
     async def add(self, interaction: discord.Interaction, ign: str, length: str, reason: str,
                   user: Optional[discord.Member] = None, image: Optional[discord.Attachment] = None,
                   image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None,
-                  silent: bool = False, start: Optional[str] = None):
+                  silent: bool = False, start: Optional[str] = None, link: Optional[str] = None):
         await interaction.response.defer(ephemeral=silent)
         proofs, bad = await read_proofs([image, image2, image3])
         if bad:
@@ -4547,6 +4825,8 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                           (uuid, name, reason, iso(now), iso(end) if end else None, "expired" if over else "active",
                            str(interaction.user.id), str(did) if did else None))
+        if link:
+            await q_run("UPDATE mutes SET link = ? WHERE id = ?", (link.strip(), mid))
         gave = False if (silent or over) else await self.bridge_role(did, give=True)
         total_mutes = (await q_one("SELECT COUNT(*) AS c FROM mutes WHERE uuid = ?", (uuid,)))["c"]
         head = await self.core.head_for(uuid, name)
@@ -4574,6 +4854,8 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         template = (await kv_get("mute_msg")) or DEFAULT_MUTE_MSG
         content = fill_mute_msg(template, ign=name, length=how_long, reason=reason, expires=expires_line, user=who,
                                 role=role_txt, ping=mute_ping())
+        if link:
+            content += f"\nMessage: {link.strip()}"
         posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, data=card, filename="mute.png",
                                          mentions=MUTE_MENTIONS, view=mute_view(mid))
         first = self.core.last_message if posted else None

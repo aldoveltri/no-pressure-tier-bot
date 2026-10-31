@@ -201,8 +201,12 @@ class Betrayal(commands.Cog):
                 since = f" since <t:{int(m['joined'] / 1000)}:D>" if m and m.get("joined") else ""
                 ping_user, ping_role = bl._env("BETRAYAL_PING_USER_ID"), bl._env("BETRAYAL_PING_ROLE_ID")
                 ping = (f"<@{ping_user}>" if ping_user.isdigit() else f"<@&{ping_role}>" if ping_role.isdigit() else "")
+                apr = (e.get("visiting_guild") or "").strip()
+                rule = (f"Their approved guild{'s are' if ',' in apr else ' is'} **{esc(apr)}**, not this one"
+                        if apr else "They agreed to stay guildless")
                 text = (f"{ping} 🚨 **{esc(e['ign'])}** is on the breaklist but joined **{esc(guild.get('name', '?'))}**{since}. "
-                        "They agreed to stay guildless: the breaklist no longer applies and their saved days were reset to 0.").strip()
+                        f"{rule}: the breaklist no longer applies and their saved days were reset to 0. "
+                        "Wrong? `/breaklist restore` puts it back with the days.").strip()
                 env = "BETRAYAL_CHANNEL_ID" if bl.chan_id("BETRAYAL_CHANNEL_ID") else "BREAKLIST_CHANNEL_ID"
                 await self.bot.np_core.post_to(env, content=text, thread_name="Breaklist betrayals",
                                                thread_key="betrayal_thread",

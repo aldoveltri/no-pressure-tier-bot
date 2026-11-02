@@ -965,7 +965,7 @@ def draw_guild_text(name, head, lines):
 
 # ---------- mute / warning card ----------
 
-def draw_punish_card(kind, name, head, reason, rows, by, number):
+def draw_punish_card(kind, name, head, reason, rows, by, number, history=None):
     """kind: 'MUTE' or 'VERBAL WARNING'. rows: [(label, value)] shown as boxes (length, expires, totals...)."""
     color = g.RED if kind == "MUTE" else (241, 196, 15)
     lines = _wrap_lines(reason or "No reason given.", g.get_font(22), g.WIDTH - 2 * g.PAD - 70)[:5]
@@ -973,7 +973,9 @@ def draw_punish_card(kind, name, head, reason, rows, by, number):
     id_h = 130
     box_h = 112
     reason_h = 70 + 30 * len(lines)
-    height = top + id_h + 16 + box_h + 16 + reason_h + 16 + g.FOOTER_H
+    hist = list(history or [])[:6]
+    hist_h = (60 + 28 * len(hist)) if hist else 0
+    height = top + id_h + 16 + box_h + 16 + reason_h + ((16 + hist_h) if hist_h else 0) + 16 + g.FOOTER_H
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
     g._header(d, kind, f"{GUILD_NAME_DISPLAY} · #{number}")
@@ -991,6 +993,12 @@ def draw_punish_card(kind, name, head, reason, rows, by, number):
     d.text((g.PAD + 28, y + 30), "REASON", font=g.get_font(15, True), fill=g.MUTED, anchor="lm")
     for i, line in enumerate(lines):
         d.text((g.PAD + 28, y + 64 + i * 30), line, font=g.get_font(22), fill=g.TEXT, anchor="lm")
+    if hist:
+        y += reason_h + 16
+        d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + hist_h], radius=16, fill=g.ROW_BG)
+        d.text((g.PAD + 28, y + 28), "PUNISHMENT HISTORY", font=g.get_font(15, True), fill=g.MUTED, anchor="lm")
+        for i, line in enumerate(hist):
+            d.text((g.PAD + 28, y + 62 + i * 28), line[:90], font=g.get_font(19), fill=g.TEXT, anchor="lm")
     g._footer(d, height, f"By {by}")
     return g._png(img)
 
@@ -1082,7 +1090,8 @@ def draw_missing(name, head, joined, purge, r, start, current, extra_note):
     if extra_note:
         lines.append(extra_note)
     text = " ".join(lines)
-    height = top + id_h + gap + box_h + gap + box_h + gap + _panel_height(text, max_lines=5) + 16 + g.FOOTER_H
+    bar_h = 86
+    height = top + id_h + gap + bar_h + gap + box_h + gap + box_h + gap + _panel_height(text, max_lines=5) + 16 + g.FOOTER_H
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
     g._header(d, "GEXP REQUIREMENT", f"{GUILD_NAME_DISPLAY} · weekly requirement {n(gc.WEEKLY_REQ)} GEXP")
@@ -1091,8 +1100,19 @@ def draw_missing(name, head, joined, purge, r, start, current, extra_note):
     d.text((g.WIDTH - g.PAD - 30, top + id_h - 28), f"Purge {gc.fmt_et(purge)}", font=g.get_font(16),
            fill=g.MUTED, anchor="rm")
 
-    bw = (g.WIDTH - 2 * g.PAD - 2 * gap) // 3
     y = top + id_h + gap
+    d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + bar_h], radius=16, fill=g.ROW_BG)
+    bx0, bx1 = g.PAD + 28, g.WIDTH - g.PAD - 28
+    by = y + 52
+    d.rounded_rectangle([bx0, by - 11, bx1, by + 11], radius=11, fill=g.TRACK)
+    frac = min(1.0, r["progress"] / max(1, r["target"]))
+    if frac > 0:
+        d.rounded_rectangle([bx0, by - 11, bx0 + max(14, int((bx1 - bx0) * frac)), by + 11], radius=11,
+                            fill=g.GREEN if frac >= 1 else g.ACCENT)
+    d.text((bx0, y + 22), "PROGRESS THIS WEEK", font=g.get_font(14, True), fill=g.MUTED, anchor="lm")
+    d.text((bx1, y + 22), f"{frac * 100:.0f}%", font=g.get_font(16, True), fill=g.TEXT, anchor="rm")
+    y += bar_h + gap
+    bw = (g.WIDTH - 2 * g.PAD - 2 * gap) // 3
     _box(d, g.PAD, y, bw, box_h, "NORMAL REQUIREMENT", n(r["normal"]),
          sub=f"{gc.fmt_duration(gc.secs(joined, purge))} until the purge")
     _box(d, g.PAD + bw + gap, y, bw, box_h, "STARTING GEXP", n(start))
@@ -1932,7 +1952,7 @@ class Core:
         required = gc.required_from(max(joined, ws)) if joined and joined > ws else gc.WEEKLY_REQ
         seconds_left = max(0, gc.secs(now, purge))
         needed = max(0, required - weekly)
-        per_day = math.ceil(needed / max(seconds_left / 86400, 1 / 24)) if needed else 0
+        per_day = math.ceil(needed / max(1, math.ceil(seconds_left / 86400))) if needed else 0
         row = await q_one("SELECT amount FROM debts WHERE uuid = ?", (uuid,))
         return {"uuid": uuid, "kind": kind, "weekly": weekly, "required": required, "needed": needed,
                 "per_day": per_day, "seconds_left": seconds_left, "purge": purge, "joined": joined,
@@ -1970,6 +1990,7 @@ class Core:
         who = f"<@{did}>" if did else f"**{esc(name)}**"
         view = discord.ui.View(timeout=None)
         view.add_item(NoticeButton("bl", uuid))
+        view.add_item(NoticeButton("ex", uuid))
         if kind != "kicked":
             view.add_item(NoticeButton("pl", uuid))
         kwargs = dict(content=f"{who} Breaklist offer", data=data, filename="offer.png", view=view, mentions=USER_MENTIONS)
@@ -1998,7 +2019,8 @@ class Core:
                 continue                                   # bots / accounts that never get reminders
             joined = await self.joined_for(uuid)
             if kind == "friday" and joined and now - joined < timedelta(days=7):
-                continue
+                if not await q_one("SELECT id FROM bl_entries WHERE uuid = ?", (uuid,)):
+                    continue                               # brand new members wait a week; people back from the breaklist don't
             it = await self.notice_item(uuid, kind, members)
             if it is None:
                 continue
@@ -2044,19 +2066,19 @@ class Core:
             return None, "No guild in ROAD_GUILDS is above us: we are #1!"
         targets = []
         hist = await q_all("SELECT day, guild, exp, at FROM road_history WHERE day >= ? ORDER BY day",
-                           ((datetime.now(gc.ET) - timedelta(days=14)).date().isoformat(),))
+                           ((datetime.now(gc.ET) - timedelta(days=31)).date().isoformat(),))
         by_guild, taken = {}, {}
         for r in hist:
             by_guild.setdefault(r["guild"], {})[r["day"]] = r["exp"]
             taken.setdefault(r["guild"], {})[r["day"]] = r["at"]
 
         def rate(guild):
-            """GEXP per day. It uses the real time between the two readings (so a reading taken at 11 PM and one
+            """GEXP per day over the last ~30 days. It uses the real time between the two readings (so a reading taken at 11 PM and one
             taken at 12:10 AM are not both counted as a whole day); old readings without a time use the days."""
             days_ = sorted(by_guild.get(guild, {}))
             if len(days_) < 2:
                 return None
-            a, b = days_[max(0, len(days_) - 8)], days_[-1]
+            a, b = days_[max(0, len(days_) - 31)], days_[-1]      # about the last month: a week is too noisy
             gain = by_guild[guild][b] - by_guild[guild][a]
             at_a, at_b = taken[guild].get(a), taken[guild].get(b)
             if at_a and at_b:
@@ -2651,7 +2673,7 @@ class NoticeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:(?P<
                 return
             await kv_set(f"ignore:{self.uuid}:{wkey}", iso(now_utc()))
             text = (f"**{esc(name)}** (<@{interaction.user.id}>) has acknowledged the GEXP notice and has indicated "
-                    f"that they expect to reach the requirement this week, or that they do not intend to act on it. "
+                    f"that they intend to meet the requirement this week. "
                     f"No further notices will be sent for them until the next week.")
             await core.post_request_channel(interaction, content=text)
             await interaction.followup.send(
@@ -4293,7 +4315,11 @@ class AppealModal(discord.ui.Modal):
         embed.add_field(name="Punishment reason", value=(row["reason"] or "-")[:500], inline=False)
         embed.add_field(name="Message", value=self.text.value[:1000], inline=False)
         view = discord.ui.View(timeout=None)
-        view.add_item(AppealReviewButton("ok", interaction.user.id))
+        if self.mode == "ap":
+            view.add_item(AppealDecideButton("yes", interaction.user.id, self.kind, self.pid))
+            view.add_item(AppealDecideButton("no", interaction.user.id, self.kind, self.pid))
+        else:
+            view.add_item(AppealReviewButton("ok", interaction.user.id))
         view.add_item(AppealReviewButton("tk", interaction.user.id))
         posted = await core.post_to("APPEALS_CHANNEL_ID", embed=embed, view=view, thread_name="Appeals and feedback",
                                     thread_key="appeals_thread")
@@ -4353,11 +4379,92 @@ class AppealReviewButton(discord.ui.DynamicItem[discord.ui.Button], template=r"a
         await interaction.response.edit_message(embed=embed, view=None)
 
 
+class AppealDecideModal(discord.ui.Modal):
+    """Staff answer to an appeal: accept (with the new punishment) or deny. It is posted in the mute logs and pings the player."""
+
+    def __init__(self, accept, uid, kind, pid):
+        super().__init__(title="Accept the appeal" if accept else "Deny the appeal")
+        self.accept, self.uid, self.kind, self.pid = accept, uid, kind, pid
+        self.new = None
+        if accept:
+            self.new = discord.ui.TextInput(max_length=200, required=True,
+                                            placeholder="e.g. mute reduced to 4h, or: warning only, or: removed")
+            self.add_item(discord.ui.Label(text="New punishment", component=self.new))
+        self.why = discord.ui.TextInput(style=discord.TextStyle.paragraph, max_length=900, required=False,
+                                        placeholder="Explain the decision to the player")
+        self.add_item(discord.ui.Label(text="Explanation", component=self.why))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_guild_staff(interaction.user):
+            await interaction.response.send_message("Only guild staff can do this.", ephemeral=True)
+            return
+        table = "mutes" if self.kind == "m" else "warnings"
+        row = await q_one(f"SELECT * FROM {table} WHERE id = ?", (self.pid,))
+        what = "mute" if self.kind == "m" else "verbal warning"
+        ign = esc(row["ign"]) if row else "the player"
+        why = (self.why.value or "").strip()
+        if self.accept:
+            text = (f"<@{self.uid}> your appeal of **{ign}**'s {what} #{self.pid} was **accepted**.\n"
+                    f"New punishment: {self.new.value.strip()}")
+        else:
+            text = f"<@{self.uid}> your appeal of **{ign}**'s {what} #{self.pid} was **denied**."
+        if why:
+            text += f"\nReason: {why}"
+        core = interaction.client.np_core
+        posted = await core.post_to("MUTE_LOG_CHANNEL_ID", content=text, mentions=MUTE_MENTIONS)
+        msg = interaction.message
+        embed = msg.embeds[0]
+        embed.set_footer(text=f"{'Accepted' if self.accept else 'Denied'} by {interaction.user.display_name}")
+        await interaction.response.edit_message(embed=embed, view=None)
+        if not posted:
+            await interaction.followup.send("I couldn't post the answer in the mute logs (MUTE_LOG_CHANNEL_ID): "
+                                            "tell the player yourself.", ephemeral=True)
+        elif self.accept and self.kind == "m":
+            await interaction.followup.send("Remember to change the mute itself if needed (/mute removemute or "
+                                            "/mute end).", ephemeral=True)
+
+
+class AppealDecideButton(discord.ui.DynamicItem[discord.ui.Button],
+                         template=r"apd:(?P<act>yes|no):(?P<uid>\d+):(?P<kind>m|w):(?P<pid>\d+)"):
+    def __init__(self, act, uid, kind, pid):
+        super().__init__(discord.ui.Button(
+            label="Accept" if act == "yes" else "Deny",
+            style=discord.ButtonStyle.success if act == "yes" else discord.ButtonStyle.danger,
+            custom_id=f"apd:{act}:{uid}:{kind}:{pid}"))
+        self.act, self.uid, self.kind, self.pid = act, int(uid), kind, int(pid)
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["act"], int(match["uid"]), match["kind"], int(match["pid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_guild_staff(interaction.user):
+            await interaction.response.send_message("Only guild staff can do this.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AppealDecideModal(self.act == "yes", self.uid, self.kind, self.pid))
+
+
 def appeal_view(kind, pid):
     view = discord.ui.View(timeout=None)
     view.add_item(AppealButton("fb", kind, pid))
     view.add_item(AppealButton("ap", kind, pid))
     return view
+
+
+async def punish_history(uuid, kind, pid):
+    """Short lines with the other mutes and verbal warnings of a player (newest first), for the cards."""
+    rows = []
+    for r in await q_all("SELECT id, reason, start_at AS at, end_at FROM mutes WHERE uuid = ?", (uuid,)):
+        if kind == "m" and r["id"] == pid:
+            continue
+        length = mute_length_text(r)
+        rows.append((r["at"], f"Mute #{r['id']} · {(r['reason'] or '-')[:34]} · {length} · {gc.fmt_date(from_iso(r['at']))}"))
+    for r in await q_all("SELECT id, reason, at FROM warnings WHERE uuid = ?", (uuid,)):
+        if kind == "w" and r["id"] == pid:
+            continue
+        rows.append((r["at"], f"Warning #{r['id']} · {(r['reason'] or '-')[:40]} · {gc.fmt_date(from_iso(r['at']))}"))
+    rows.sort(key=lambda x: x[0], reverse=True)
+    return [t for _a, t in rows][:6]
 
 
 async def build_warn_card(core, w):
@@ -4369,7 +4476,7 @@ async def build_warn_card(core, w):
     return await asyncio.to_thread(
         draw_punish_card, "VERBAL WARNING", w["ign"], head, w["reason"],
         [("WARNINGS SO FAR", str(number)), ("EXPIRES", gc.fmt_date(expires) if expires else "Never")],
-        w.get("by_name") or "staff", w["id"])
+        w.get("by_name") or "staff", w["id"], await punish_history(w["uuid"], "w", w["id"]))
 
 
 async def post_message_of(bot, w):
@@ -4451,7 +4558,7 @@ async def build_mute_card(core, m, by=None):
     return await asyncio.to_thread(
         draw_punish_card, "MUTE", m["ign"], head, m["reason"],
         [("LENGTH", mute_length_text(m)), ("EXPIRES", "Never" if end is None else gc.fmt_et(end)),
-         ("MUTES SO FAR", str(total))], by or "staff", m["id"])
+         ("MUTES SO FAR", str(total))], by or "staff", m["id"], await punish_history(m["uuid"], "m", m["id"]))
 
 
 async def refresh_mute_post(bot, mid, by=None):
@@ -4835,7 +4942,7 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             draw_punish_card, "MUTE", name, head, reason,
             [("LENGTH", "Permanent" if end is None else gc.fmt_duration(td.total_seconds())),
              ("EXPIRES", "Never" if end is None else gc.fmt_et(end)), ("MUTES SO FAR", str(total_mutes))],
-            interaction.user.display_name, mid)
+            interaction.user.display_name, mid, await punish_history(uuid, "m", mid))
         if silent:
             await interaction.followup.send(
                 f"✅ Mute of **{esc(name)}** logged quietly ({'already over' if over else 'active, the role was NOT added'}): "
@@ -5337,7 +5444,7 @@ async def setup(bot: commands.Bot):
     core = Core(bot)
     bot.np_core = core
     g.FLAG_LOADER = _load_flags          # every card with heads (1v1 cards too) shows the flags
-    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, BreaklistEditButton, BreaklistDebtButton, AppealButton, AppealReviewButton, WarnButton, MuteButton, ProofButton)
+    bot.add_dynamic_items(NoticeButton, RequestButton, GuildHistoryButton, BreaklistEditButton, BreaklistDebtButton, AppealButton, AppealReviewButton, AppealDecideButton, WarnButton, MuteButton, ProofButton)
     await bot.add_cog(Breaklist(core))
     await bot.add_cog(Excuse(core))
     await bot.add_cog(GexpTools(core))

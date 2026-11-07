@@ -116,7 +116,11 @@ async def send_embed(core, interaction, env_name, *, embed=None, embeds=None, co
         kwargs["view"] = view
     if media:
         kwargs["files"] = [discord.File(io.BytesIO(data), filename=name) for name, data in media]
-    core.last_message = await interaction.channel.send(**kwargs)
+    try:
+        core.last_message = await interaction.channel.send(**kwargs)
+    except discord.HTTPException as ex:                 # no access to this channel (50001) or the like: answer in the command reply
+        log.warning("I can't post in the channel of the command (%s): check %s and the bot's permissions", ex, env_name)
+        core.last_message = await interaction.followup.send(**kwargs, wait=True)
     return None
 
 

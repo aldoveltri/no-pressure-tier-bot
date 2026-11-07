@@ -3659,11 +3659,21 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.command(name="guildhistory", description="Add the guild history of a breaklisted player: screenshot and/or text (guild staff)")
     @app_commands.describe(ign="Minecraft username", image="Screenshot of the guild history (for example from /member)",
                            image2="Another screenshot (optional)",
-                           text="Or paste the history as text: one guild per line")
+                           text="Or paste the history as text: one guild per line",
+                           manage="To change what was added before: show the list, replace the text, or delete one",
+                           number="With manage: which one (from the list)")
+    @app_commands.choices(manage=[app_commands.Choice(name="Show the list", value="list"),
+                                  app_commands.Choice(name="Replace the text of one", value="replace"),
+                                  app_commands.Choice(name="Delete one", value="delete")])
     @app_commands.check(staff_check)
     async def guildhistory(self, interaction: discord.Interaction, ign: str, image: Optional[discord.Attachment] = None,
-                           image2: Optional[discord.Attachment] = None, text: Optional[str] = None):
+                           image2: Optional[discord.Attachment] = None, text: Optional[str] = None,
+                           manage: Optional[app_commands.Choice[str]] = None, number: Optional[int] = None):
         await interaction.response.defer()
+        if manage is not None:
+            await self._ghist_manage(interaction, ign, None if manage.value == "list" else number, text,
+                                     manage.value == "delete")
+            return
         r = await lookup(interaction, ign)
         if r is None:
             return
@@ -3687,7 +3697,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if target is not None:
             msg = await target.send(content=content, files=files, allowed_mentions=NO_MENTIONS)
             await interaction.followup.send(f"Posted in {target.mention}. Change or delete it later with "
-                                            f"`/breaklist guildhistoryedit ign:{name}`.")
+                                            f"`/breaklist guildhistory ign:{name} manage:`.")
         else:
             msg = await interaction.followup.send(content=content, files=files, allowed_mentions=NO_MENTIONS, wait=True)
         try:
@@ -3699,13 +3709,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         except Exception:
             log.exception("Could not remember the guild history message")
 
-    @app_commands.command(name="guildhistoryedit", description="List, change or delete the guild history added by hand (guild staff)")
-    @app_commands.describe(ign="Minecraft username", number="Which one (from the list). Empty = show the list",
-                           text="New text for it (one guild per line)", delete="Delete it")
-    @app_commands.check(staff_check)
-    async def guildhistoryedit(self, interaction: discord.Interaction, ign: str, number: Optional[int] = None,
-                               text: Optional[str] = None, delete: bool = False):
-        await interaction.response.defer()
+    async def _ghist_manage(self, interaction, ign, number, text, delete):
+        """list / change / delete the guild histories added by hand (called by /breaklist guildhistory manage:...)."""
         r = await lookup(interaction, ign)
         if r is None:
             return
@@ -3718,7 +3723,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                 return
             lines = [f"**#{x['n']}** · {gc.fmt_et(from_iso(x['at']))} · by {esc(x['by'])} · "
                      + ("text: " + esc("; ".join(x["text"]))[:120] if x.get("text") else "screenshot") for x in saved]
-            await interaction.followup.send("\n".join(lines) + "\nUse `number:` with `delete:True` or a new `text:`.",
+            await interaction.followup.send("\n".join(lines) + "\nUse `manage:` Delete or Replace with `number:`.",
                                             allowed_mentions=NO_MENTIONS)
             return
         item = next((x for x in saved if x["n"] == number), None)
@@ -3739,7 +3744,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             await interaction.followup.send(f"🗑️ #{number} deleted.")
             return
         if not text:
-            await interaction.followup.send("Give the new `text` (or `delete:True`). A screenshot can only be deleted: add the new one with `/breaklist guildhistory`.")
+            await interaction.followup.send("Give the new `text` (or choose Delete). A screenshot can only be deleted: add the new one with `/breaklist guildhistory` (without manage).")
             return
         lines = [x.strip() for x in re.split(r"\n|;", text) if x.strip()]
         head = await self.core.head_for(uuid, name)

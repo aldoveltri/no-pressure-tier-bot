@@ -558,6 +558,39 @@ class ApplicationsCog(commands.GroupCog, name="applications", description="Guild
             return
         self._warned = False
 
+    @app_commands.command(name="check", description="Test that the bot can read the guild thread on the Hypixel forums (guild staff)")
+    @app_commands.check(bl.staff_check)
+    async def check(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        url = self.url()
+        if not url:
+            await interaction.followup.send("`HYPIXEL_THREAD_URL` is not set on the host: put the link of the guild thread there.",
+                                            ephemeral=True)
+            return
+        lines = []
+        try:
+            status, posts, page = await fetch_thread_posts(url)
+        except Exception as e:
+            await interaction.followup.send(f"I couldn't reach the forums: `{type(e).__name__}: {str(e)[:200]}`. "
+                                            "The host may block the site.", ephemeral=True)
+            return
+        if status != 200:
+            await interaction.followup.send(f"The forums answered HTTP **{status}** (not 200). Hypixel's site blocks "
+                                            "some servers: if it is 403, the bot cannot read it from this host.", ephemeral=True)
+            return
+        if not posts:
+            await interaction.followup.send("The page loaded (HTTP 200) but I found **no posts** in it: the site layout may have "
+                                            "changed.", ephemeral=True)
+            return
+        last = await kv_get("hx_last_post")
+        newest = max(posts, key=lambda p: p["id"])
+        lines.append(f"✅ Thread read: page **{page}**, **{len(posts)}** posts. Latest reply by **{esc(newest['author'])}** "
+                     f"(post {newest['id']}).")
+        lines.append(f"Last post the bot already knows: **{last or 'none yet (it remembers the next one it sees)'}**.")
+        target = bl.chan_id("APPLICATIONS_REVIEW_CHANNEL_ID")
+        lines.append("Review channel: " + (f"<#{target}>" if target else "❌ `APPLICATIONS_REVIEW_CHANNEL_ID` is not set"))
+        await interaction.followup.send("\n".join(lines), ephemeral=True, allowed_mentions=NO_MENTIONS)
+
     @watch.before_loop
     async def _before(self):
         await self.bot.wait_until_ready()

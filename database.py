@@ -516,6 +516,16 @@ async def get_rank(elo: int, mode_id: int | None = None):
         return (await cur.fetchone())[0] + 1
 
 
+async def count_ranked(mode_id: int | None = None):
+    """How many players are on the leaderboard (not removed): the total shown in "#7 / total"."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if mode_id is None:
+            cur = await db.execute("SELECT COUNT(*) FROM players WHERE removed = 0")
+        else:
+            cur = await db.execute("SELECT COUNT(*) FROM mode_players WHERE mode_id = ? AND removed = 0", (mode_id,))
+        return (await cur.fetchone())[0]
+
+
 # ---------- leaderboards ----------
 
 def _finish(r: dict) -> dict:

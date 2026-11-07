@@ -249,7 +249,7 @@ async def poll_message(bot, pid):
     started = p["started_name"] or "?"
     png = await asyncio.to_thread(draw_poll, p, pills, yes, no, options, started, final)
     view = discord.ui.View(timeout=None)
-    for act in {"picking": ("pick", "cx"), "phase1": ("yes", "no", "cx"),
+    for act in {"picking": ("pick", "skip", "cx"), "phase1": ("yes", "no", "cx"),
                 "phase2": ("sug", "vote", "close", "cx")}.get(p["status"], ()):
         view.add_item(PollButton(act, pid))
     return None, discord.File(__import__("io").BytesIO(png), filename="tagvote.png"), view
@@ -370,8 +370,9 @@ class TagPick(discord.ui.Select):
         await update_main(interaction.client, self.pid)
 
 
-class PollButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tv:(?P<act>pick|yes|no|sug|vote|close|cx):(?P<pid>\d+)"):
-    LABELS = {"pick": ("Pick voters (staff)", discord.ButtonStyle.primary), "yes": ("Yes", discord.ButtonStyle.success),
+class PollButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tv:(?P<act>pick|skip|yes|no|sug|vote|close|cx):(?P<pid>\d+)"):
+    LABELS = {"pick": ("Pick voters (staff)", discord.ButtonStyle.primary),
+              "skip": ("Skip yes/no (staff)", discord.ButtonStyle.secondary), "yes": ("Yes", discord.ButtonStyle.success),
               "no": ("No", discord.ButtonStyle.danger), "sug": ("Suggest a tag", discord.ButtonStyle.primary),
               "vote": ("Vote", discord.ButtonStyle.success), "close": ("Close and count (staff)", discord.ButtonStyle.secondary),
               "cx": ("Cancel (staff)", discord.ButtonStyle.secondary)}
@@ -393,13 +394,20 @@ class PollButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tv:(?P<ac
             return
         uid = str(interaction.user.id)
         voters = json.loads(p["voters"])
-        if self.act in ("pick", "close", "cx") and not bl.is_guild_staff(interaction.user):
+        if self.act in ("pick", "skip", "close", "cx") and not bl.is_guild_staff(interaction.user):
             await interaction.response.send_message("Only guild staff can do this.", ephemeral=True)
             return
         if self.act == "pick":
             view = discord.ui.View(timeout=300)
             view.add_item(VoterSelect(self.pid))
             await interaction.response.send_message("Choose the active players who are online now:", view=view, ephemeral=True)
+            return
+        if self.act == "skip":
+            await q_run("UPDATE tag_polls SET status = 'phase2' WHERE id = ?", (self.pid,))
+            await interaction.response.defer()
+            ch = await update_main(bot, self.pid)
+            await ch.send("**Step 1 was skipped by the staff.** Press **Suggest a tag** on the vote above "
+                          "(as many as you like) and **Vote** for the tags you want.")
             return
         if self.act == "cx":
             await q_run("UPDATE tag_polls SET status = 'cancelled' WHERE id = ?", (self.pid,))
@@ -468,8 +476,21 @@ class TagCog(commands.GroupCog, name="tag", description="Active tag vote"):
         if not ok and not bl.is_guild_staff(interaction.user):
             await interaction.followup.send(f"Only active players and staff can start the vote: {why}.", ephemeral=True)
             return
+        for stuck in await q_all("SELECT * FROM tag_polls WHERE status IN ('picking', 'phase1', 'phase2')"):
+            gone = not (stuck["channel_id"] and stuck["message_id"])
+            if not gone:                                   # the vote message was deleted: the vote can't go on
+                try:
+                    ch0 = self.bot.get_channel(int(stuck["channel_id"])) or await self.bot.fetch_channel(int(stuck["channel_id"]))
+                    await ch0.fetch_message(int(stuck["message_id"]))
+                except discord.NotFound:
+                    gone = True
+                except discord.HTTPException:
+                    pass
+            if gone:
+                await q_run("UPDATE tag_polls SET status = 'cancelled' WHERE id = ?", (stuck["id"],))
         if await q_one("SELECT id FROM tag_polls WHERE status IN ('picking', 'phase1', 'phase2')"):
-            await interaction.followup.send("A tag vote is already open: wait for it to end (the staff can cancel it).", ephemeral=True)
+            await interaction.followup.send("A tag vote is already open: wait for it to end. Staff: `/tag cancel` closes it "
+                                            "(or press Cancel on the vote).", ephemeral=True)
             return
         name = why if ok else interaction.user.display_name
         pid = await q_run("INSERT INTO tag_polls (started_by, started_name, created_at) VALUES (?, ?, ?)",
@@ -480,6 +501,22 @@ class TagCog(commands.GroupCog, name="tag", description="Active tag vote"):
         msg = await ch.send(content=content, file=file, view=view)
         await q_run("UPDATE tag_polls SET channel_id = ?, message_id = ? WHERE id = ?", (str(ch.id), str(msg.id), pid))
         await interaction.followup.send(f"Vote started in {ch.mention}. The staff picks who votes.", ephemeral=True)
+
+    @app_commands.command(name="cancel", description="Close a tag vote that is stuck as open (guild staff)")
+    @app_commands.check(bl.staff_check)
+    async def cancel(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        rows = await q_all("SELECT id FROM tag_polls WHERE status IN ('picking', 'phase1', 'phase2')")
+        if not rows:
+            await interaction.followup.send("No tag vote is open.", ephemeral=True)
+            return
+        for r in rows:
+            await q_run("UPDATE tag_polls SET status = 'cancelled' WHERE id = ?", (r["id"],))
+            try:
+                await update_main(self.bot, r["id"])
+            except Exception:
+                pass                                  # the message may be gone: the vote is closed anyway
+        await interaction.followup.send(f"✅ {len(rows)} open tag vote(s) cancelled.", ephemeral=True)
 
     @app_commands.command(name="list", description="Recent active tag votes (guild staff)")
     @app_commands.check(bl.staff_check)

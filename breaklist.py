@@ -5,6 +5,7 @@ variables (see README), so channels and roles can change without touching the co
 """
 import asyncio
 import io
+import json
 import logging
 import math
 import os
@@ -1134,7 +1135,7 @@ def draw_missing(name, head, joined, purge, r, start, current, extra_note):
 
 # ---------- inactivity notice ----------
 
-def draw_offer(ign, head, kind, requirement, note):
+def draw_offer(ign, head, kind, requirement, note, it=None):
     """The breaklist offer: for players who were removed or have been away for a few days."""
     if kind == "kicked":
         text = ("You were removed from the guild. If you want to come back later, you can ask to be put on the "
@@ -1148,13 +1149,29 @@ def draw_offer(ign, head, kind, requirement, note):
         badge = "AWAY FOR DAYS"
     id_h = 130
     top = g.HEADER_H + 16
-    height = (top + id_h + 14 + _panel_height(text, max_lines=8) + 16 + g.FOOTER_H
+    bar_h = 86
+    extra_h = (bar_h + 14) if it else 0
+    height = (top + id_h + 14 + extra_h + _panel_height(text, max_lines=8) + 16 + g.FOOTER_H
               + ((_panel_height(note, max_lines=5) + 14) if note else 0))
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
     g._header(d, "BREAKLIST OFFER", GUILD_NAME_DISPLAY)
     _identity(img, d, top, ign, head, badge, g.ACCENT, "", id_h)
-    y = _text_panel(d, top + id_h + 14, "WHY YOU ARE SEEING THIS", text, max_lines=8)
+    y0 = top + id_h + 14
+    if it:
+        d.rounded_rectangle([g.PAD, y0, g.WIDTH - g.PAD, y0 + bar_h], radius=16, fill=g.ROW_BG)
+        bx0, bx1 = g.PAD + 28, g.WIDTH - g.PAD - 28
+        by = y0 + 52
+        d.rounded_rectangle([bx0, by - 11, bx1, by + 11], radius=11, fill=g.TRACK)
+        frac = min(1.0, it["weekly"] / max(1, it["required"]))
+        if frac > 0:
+            d.rounded_rectangle([bx0, by - 11, bx0 + max(14, int((bx1 - bx0) * frac)), by + 11], radius=11,
+                                fill=g.GREEN if frac >= 1 else g.ACCENT)
+        d.text((bx0, y0 + 22), f"PROGRESS THIS WEEK · {n(it['weekly'])} / {n(it['required'])} GEXP",
+               font=g.get_font(14, True), fill=g.MUTED, anchor="lm")
+        d.text((bx1, y0 + 22), f"{frac * 100:.0f}%", font=g.get_font(16, True), fill=g.TEXT, anchor="rm")
+        y0 += bar_h + 14
+    y = _text_panel(d, y0, "WHY YOU ARE SEEING THIS", text, max_lines=8)
     if note:
         _text_panel(d, y + 14, "NOTE FROM THE STAFF", note, max_lines=5)
     g._footer(d, height, "Not affiliated with Hypixel")
@@ -1505,6 +1522,18 @@ class Core:
             if row and row["ign"]:
                 return row["ign"]
         return uuid[:8]
+
+    async def in_server(self, discord_id):
+        """True when the Discord user is still a member of one of the bot's servers (so a mention shows a name)."""
+        for guild in self.bot.guilds:
+            if guild.get_member(int(discord_id)) is not None:
+                return True
+            try:
+                await guild.fetch_member(int(discord_id))
+                return True
+            except discord.HTTPException:
+                continue
+        return False
 
     async def linked_discord(self, uuid):
         try:
@@ -1928,6 +1957,19 @@ class Core:
                                allowed_mentions=NO_MENTIONS)
         return posted
 
+    async def req_override(self, uuid):
+        """A requirement set by hand for this player (/gexp setreq player:...), or None when it expired or isn't set."""
+        raw = await kv_get("reqfor:" + uuid)
+        if not raw:
+            return None
+        try:
+            amount, until = str(raw).split("|", 1)
+            if now_utc() < from_iso(until):
+                return int(amount)
+        except (ValueError, TypeError):
+            pass
+        return None
+
     async def ignored_now(self):
         key = gc.week_start(now_utc()).date().isoformat()
         rows = await q_all("SELECT key FROM kv WHERE key LIKE ?", (f"ignore:%:{key}",))
@@ -1949,7 +1991,11 @@ class Core:
         purge = gc.week_end(now)
         weekly = gc.weekly_sum(history, ws)
         joined = await self.joined_for(uuid)
-        required = gc.required_from(max(joined, ws)) if joined and joined > ws else gc.WEEKLY_REQ
+        special = await self.req_override(uuid)
+        if special is not None:
+            required = gc.required_from(max(joined, ws), special) if joined and joined > ws else special
+        else:
+            required = gc.required_from(max(joined, ws)) if joined and joined > ws else gc.WEEKLY_REQ
         seconds_left = max(0, gc.secs(now, purge))
         needed = max(0, required - weekly)
         per_day = math.ceil(needed / max(1, math.ceil(seconds_left / 86400))) if needed else 0
@@ -1972,6 +2018,8 @@ class Core:
         await load_flag(it["uuid"], name)
         data = await asyncio.to_thread(draw_notice, it, head)
         did = await self.linked_discord(it["uuid"])
+        if did and not await self.in_server(did):
+            did = None
         who = f"<@{did}>" if did else f"**{esc(name)}**"
         label = "Final reminder" if it["kind"] == "final" else "Reminder"
         content = f"{who} {label}: you need {n(it['needed'])} more GEXP this week."
@@ -1985,8 +2033,16 @@ class Core:
         name = await self.name_for(uuid)
         head = await self.head_for(uuid, name)
         await load_flag(uuid, name)
-        data = await asyncio.to_thread(draw_offer, name, head, kind, gc.WEEKLY_REQ, note)
+        it = None
+        if kind != "kicked":
+            try:
+                it = await self.notice_item(uuid, "offer")
+            except Exception:
+                log.exception("Could not read the GEXP of %s for the offer", uuid)
+        data = await asyncio.to_thread(draw_offer, name, head, kind, gc.WEEKLY_REQ, note, it)
         did = await self.linked_discord(uuid)
+        if did and not await self.in_server(did):
+            did = None                                     # they left the server: a mention would show "@unknown-user"
         who = f"<@{did}>" if did else f"**{esc(name)}**"
         view = discord.ui.View(timeout=None)
         view.add_item(NoticeButton("bl", uuid))
@@ -3338,10 +3394,15 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
 
     @app_commands.command(name="setdays", description="Set the days a player has already spent in the guild (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player",
-                           days="Days banked: for someone on the breaklist, their total days in guild; "
-                                "for someone in the guild, the days from their previous stays")
+                           days="Days banked, like 14, 14d 3h or 2h 2m: for someone on the breaklist, their total days "
+                                "in guild; for someone in the guild, the days from their previous stays")
     @app_commands.check(staff_check)
-    async def setdays(self, interaction: discord.Interaction, ign: str, days: app_commands.Range[float, 0, 5000]):
+    async def setdays(self, interaction: discord.Interaction, ign: str, days: str):
+        try:
+            days = parse_days(days)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
@@ -3352,15 +3413,19 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                                     interaction.user.id)
         total, state = await self.core.days_info(uuid)
         await interaction.followup.send(
-            f"✅ **{esc(name)}**: {days:g} days banked. Total days in guild now: **{int(total)}** "
-            f"(veteran at {VETERAN_DAYS}).")
+            f"✅ **{esc(name)}**: {dh_text(days)} banked. Total days in guild now: **{int(total)}** "
+            f"(veteran at {VETERAN_DAYS}). Undo it with `/breaklist removedays` (see `/breaklist days`).")
 
     @app_commands.command(name="adddays", description="Add a set of days to a player: it can be removed later (guild staff)")
-    @app_commands.describe(ign="Minecraft username of the player", days="Days to add",
+    @app_commands.describe(ign="Minecraft username of the player", days="Days to add, like 14, 14d 3h or 2h 2m",
                            note="What these days are for (optional)")
     @app_commands.check(staff_check)
-    async def adddays(self, interaction: discord.Interaction, ign: str, days: app_commands.Range[float, 0.01, 5000.0],
-                      note: Optional[str] = None):
+    async def adddays(self, interaction: discord.Interaction, ign: str, days: str, note: Optional[str] = None):
+        try:
+            days = parse_days(days, 0.0007, 5000.0)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
@@ -3370,7 +3435,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                                                interaction.user.id)
         total, _ = await self.core.days_info(uuid)
         await interaction.followup.send(
-            f"✅ Set **#{sid}** added to **{esc(name)}**: +{days:g} days. Total days in guild now: **{int(total)}**. "
+            f"✅ Set **#{sid}** added to **{esc(name)}**: +{dh_text(days)}. Total days in guild now: **{int(total)}**. "
             f"Remove this set with `/breaklist removedays ign:{name} set:{sid}`.", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="days", description="Every set of days added to a player (guild staff)")
@@ -3385,9 +3450,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         rows = await q_all("SELECT * FROM day_sets WHERE uuid = ? ORDER BY id DESC", (uuid,))
         total, _ = await self.core.days_info(uuid)
         banked = (await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,)) or {"banked": 0})["banked"]
-        def dh(d):
-            d = abs(d)
-            return f"{int(d)}d {int(round((d - int(d)) * 24)) % 24}h"
+        dh = dh_text
 
         blocks = []
         for x in rows[:12]:
@@ -3469,10 +3532,16 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
 
     @app_commands.command(name="editset", description="Change one set of days: its days or its note (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player", set="Set number (see /breaklist days)",
-                           days="New number of days of this set", note="New note")
+                           days="New days of this set, like 14, 14d 3h or 2h 2m", note="New note")
     @app_commands.check(staff_check)
     async def editset(self, interaction: discord.Interaction, ign: str, set: int,
-                      days: Optional[app_commands.Range[float, -5000, 5000]] = None, note: Optional[str] = None):
+                      days: Optional[str] = None, note: Optional[str] = None):
+        if days is not None:
+            try:
+                days = parse_days(days, -5000.0, 5000.0)
+            except ValueError as e:
+                await interaction.response.send_message(str(e), ephemeral=True)
+                return
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
@@ -3579,10 +3648,79 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if tid and tid.isdigit():
             target = self.core.bot.get_channel(int(tid))
         if target is not None:
-            await target.send(content=content, files=files, allowed_mentions=NO_MENTIONS)
-            await interaction.followup.send(f"Posted in {target.mention}.")
+            msg = await target.send(content=content, files=files, allowed_mentions=NO_MENTIONS)
+            await interaction.followup.send(f"Posted in {target.mention}. Change or delete it later with "
+                                            f"`/breaklist guildhistoryedit ign:{name}`.")
         else:
-            await interaction.followup.send(content=content, files=files, allowed_mentions=NO_MENTIONS)
+            msg = await interaction.followup.send(content=content, files=files, allowed_mentions=NO_MENTIONS, wait=True)
+        try:
+            saved = json.loads(await kv_get(f"ghist:{uuid}") or "[]")
+            num = max([x["n"] for x in saved] or [0]) + 1
+            saved.append({"n": num, "ch": msg.channel.id, "msg": msg.id, "text": lines if text else None,
+                          "by": interaction.user.display_name, "at": iso(now_utc())})
+            await kv_set(f"ghist:{uuid}", json.dumps(saved))
+        except Exception:
+            log.exception("Could not remember the guild history message")
+
+    @app_commands.command(name="guildhistoryedit", description="List, change or delete the guild history added by hand (guild staff)")
+    @app_commands.describe(ign="Minecraft username", number="Which one (from the list). Empty = show the list",
+                           text="New text for it (one guild per line)", delete="Delete it")
+    @app_commands.check(staff_check)
+    async def guildhistoryedit(self, interaction: discord.Interaction, ign: str, number: Optional[int] = None,
+                               text: Optional[str] = None, delete: bool = False):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        saved = json.loads(await kv_get(f"ghist:{uuid}") or "[]")
+        if number is None:
+            if not saved:
+                await interaction.followup.send(f"**{esc(name)}** has no guild history added by hand (only the ones added "
+                                                "after this update are listed).")
+                return
+            lines = [f"**#{x['n']}** · {gc.fmt_et(from_iso(x['at']))} · by {esc(x['by'])} · "
+                     + ("text: " + esc("; ".join(x["text"]))[:120] if x.get("text") else "screenshot") for x in saved]
+            await interaction.followup.send("\n".join(lines) + "\nUse `number:` with `delete:True` or a new `text:`.",
+                                            allowed_mentions=NO_MENTIONS)
+            return
+        item = next((x for x in saved if x["n"] == number), None)
+        if item is None:
+            await interaction.followup.send(f"There is no #{number}. Leave `number` empty to see the list.")
+            return
+        old = None
+        try:
+            chan = self.core.bot.get_channel(item["ch"]) or await self.core.bot.fetch_channel(item["ch"])
+            old = await chan.fetch_message(item["msg"])
+        except discord.HTTPException:
+            chan = None
+        if delete:
+            if old is not None:
+                await old.delete()
+            saved = [x for x in saved if x["n"] != number]
+            await kv_set(f"ghist:{uuid}", json.dumps(saved))
+            await interaction.followup.send(f"🗑️ #{number} deleted.")
+            return
+        if not text:
+            await interaction.followup.send("Give the new `text` (or `delete:True`). A screenshot can only be deleted: add the new one with `/breaklist guildhistory`.")
+            return
+        lines = [x.strip() for x in re.split(r"\n|;", text) if x.strip()]
+        head = await self.core.head_for(uuid, name)
+        await load_flag(uuid, name)
+        png = await asyncio.to_thread(draw_guild_text, name, head, lines)
+        content = f"📜 **Guild history** of **{esc(name)}** (changed by {interaction.user.display_name})"
+        if chan is None:
+            chan = interaction.channel
+        msg = await chan.send(content=content, file=discord.File(io.BytesIO(png), filename="guild_history.png"),
+                              allowed_mentions=NO_MENTIONS)
+        if old is not None:
+            try:
+                await old.delete()
+            except discord.HTTPException:
+                pass
+        item.update(ch=msg.channel.id, msg=msg.id, text=lines, by=interaction.user.display_name, at=iso(now_utc()))
+        await kv_set(f"ghist:{uuid}", json.dumps(saved))
+        await interaction.followup.send(f"✅ #{number} changed: {msg.jump_url}")
 
     async def _active_entry(self, interaction, ign):
         r = await lookup(interaction, ign)
@@ -3606,15 +3744,17 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                            expected_return="Expected return date, no time (2026/11/15). Write none to remove it",
                            owed="Total extra GEXP owed (this week + earlier debt)",
                            required="GEXP required at the breaklist (when the calculated one is wrong)",
-                           guild="Add an approved guild (kept with the ones already approved). Write none to clear them all")
+                           guild="Add an approved guild (kept with the ones already approved). Write none to clear them all",
+                           entry="Which breaklist to change: its number from /breaklist counts (default: the latest)")
     @app_commands.check(staff_check)
     async def edit(self, interaction: discord.Interaction, ign: str, reason: Optional[str] = None,
                    start: Optional[str] = None, end: Optional[str] = None,
                    gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                    days: Optional[app_commands.Range[float, 0, 5000]] = None, expected_return: Optional[str] = None,
                    owed: Optional[app_commands.Range[int, 0, 100_000_000]] = None, guild: Optional[str] = None,
-                   required: Optional[app_commands.Range[int, 0, 100_000_000]] = None):
+                   required: Optional[app_commands.Range[int, 0, 100_000_000]] = None, entry: Optional[int] = None):
         await interaction.response.defer()
+        entry_id = entry
         if all(v is None for v in (reason, start, end, gexp, days, expected_return, owed, guild, required)):
             await interaction.followup.send("Give at least one thing to change.")
             return
@@ -3622,9 +3762,13 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if r is None:
             return
         uuid, name = r
-        entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC", (uuid,))
+        if entry_id is not None:
+            entry = await q_one("SELECT * FROM bl_entries WHERE id = ? AND uuid = ?", (entry_id, uuid))
+        else:
+            entry = await q_one("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC", (uuid,))
         if entry is None:
-            await interaction.followup.send(f"**{esc(name)}** has never been on the breaklist.")
+            await interaction.followup.send(f"**{esc(name)}** has no breaklist #{entry_id}. See `/breaklist counts`."
+                                            if entry_id is not None else f"**{esc(name)}** has never been on the breaklist.")
             return
         new, err = await edit_entry(self.core, entry, reason=reason, start=start, end=end, gexp=gexp,
                                     expected_return=expected_return, days=days, by=interaction.user.id,
@@ -3643,6 +3787,9 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                 merged = ", ".join(have)
             await q_run("UPDATE bl_entries SET visiting_guild = ?, visit_kind = COALESCE(visit_kind, 'temporary') WHERE id = ?",
                         (merged, new["id"]))
+            if merged and new["status"] == "betrayed":        # the guild was approved: it was not a betrayal
+                await q_run("UPDATE bl_entries SET status = 'returned' WHERE id = ?", (new["id"],))
+                await q_run("DELETE FROM kv WHERE key = ?", (f"betrayal:{new['id']}",))
             new = await q_one("SELECT * FROM bl_entries WHERE id = ?", (new["id"],))
         if owed is not None:
             await q_run("UPDATE bl_entries SET owed = ? WHERE id = ?", (owed, new["id"]))
@@ -3878,10 +4025,32 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         self.core = core
         super().__init__()
 
-    @app_commands.command(name="setreq", description="Change the weekly GEXP requirement (guild staff)")
-    @app_commands.describe(amount="New weekly requirement, for example 55000")
+    @app_commands.command(name="setreq", description="Change the weekly GEXP requirement, for everyone or for one player (guild staff)")
+    @app_commands.describe(amount="New weekly requirement, for example 55000",
+                           player="Only for this player (empty: for everyone)",
+                           weeks="With a player: for how many weeks it applies, this one included (default 1)",
+                           reset="With a player: remove their special requirement")
     @app_commands.check(staff_check)
-    async def setreq(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1000, 1_000_000]):
+    async def setreq(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1000, 1_000_000],
+                     player: Optional[str] = None, weeks: app_commands.Range[int, 1, 12] = 1, reset: bool = False):
+        if player:
+            await interaction.response.defer()
+            r = await lookup(interaction, player)
+            if r is None:
+                return
+            uuid, name = r
+            if reset:
+                await q_run("DELETE FROM kv WHERE key = ?", ("reqfor:" + uuid,))
+                await interaction.followup.send(f"Special requirement of **{esc(name)}** removed: the normal "
+                                                f"{n(gc.WEEKLY_REQ)} GEXP applies again.", allowed_mentions=NO_MENTIONS)
+                return
+            until = gc.week_end(now_utc()) + timedelta(days=7 * (weeks - 1))
+            await kv_set("reqfor:" + uuid, f"{amount}|{iso(until)}")
+            await interaction.followup.send(
+                f"✅ **{esc(name)}** must earn **{n(amount)}** GEXP a week instead of {n(gc.WEEKLY_REQ)}, until the purge of "
+                f"{gc.fmt_et(until)} ({weeks} week{'s' if weeks != 1 else ''}). It applies to their reminders and to "
+                f"`/gexp missing`. Remove it with `/gexp setreq player:{name} reset:True`.", allowed_mentions=NO_MENTIONS)
+            return
         old = gc.WEEKLY_REQ
         gc.set_weekly_req(amount)
         await kv_set("weekly_req", amount)
@@ -4031,7 +4200,10 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
             where = ("joined before this week: the full week counts" if auto_join < gc.week_start(now)
                      else "join time taken from the guild")
             note = ((note + " ") if note else "") + f"No time given: {where} ({gc.fmt_et(auto_join)})."
-        normal = gc.required_from(join_dt)
+        special = await self.core.req_override(uuid)
+        normal = gc.required_from(join_dt, special)
+        if special is not None:
+            note = ((note + " ") if note else "") + f"Requirement set by hand for this player: {n(special)} GEXP a week."
         res = gc.settle_debt(normal, debt, current_gexp - start_gexp)
         purge = gc.week_end(join_dt)
         if save:
@@ -4073,6 +4245,69 @@ class PurgeCog(commands.GroupCog, name="purge", description="Purge evasion check
             f"Not counted: {notes or 'nobody'} (breaklist, excused, blacklisted, back in the guild, or had enough GEXP). "
             "Members who left by themselves while short of GEXP are counted too.",
             allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="list", description="Who was kicked at a purge, with their GEXP at the time (guild staff)")
+    @app_commands.describe(which="Which purge (default: the last one)")
+    @app_commands.choices(which=[app_commands.Choice(name="The last purge", value=0),
+                                 app_commands.Choice(name="The one before", value=1),
+                                 app_commands.Choice(name="Two purges ago", value=2)])
+    @app_commands.check(staff_check)
+    async def purge_list(self, interaction: discord.Interaction, which: Optional[app_commands.Choice[int]] = None):
+        import purgesum
+        await interaction.response.defer()
+        await self.core.guild_members(force=True)
+        ws = gc.week_start(now_utc()) - timedelta(days=7 * (which.value if which else 0))
+        purged, skipped, total = await purgesum.purged_members(self.core, ws)
+        await purgesum.record_strikes(purged, ws)
+        if not purged:
+            await interaction.followup.send(f"Nobody was purged by the purge of {gc.fmt_date(ws)}.")
+            return
+        lines = [f"Purge of {gc.fmt_date(ws)}: {len(purged)} kicked, we are {total} now.",
+                 "name · GEXP of the guild week / required · GEXP of the last 7 days before the kick · left", ""]
+        for p in sorted(purged, key=lambda x: x["week"]):
+            lines.append(f"{p['ign']} · {n(p['week'])} / {n(p['required'])} · {n(p['last7'])} · {gc.fmt_et(p['left'])}")
+        text = "\n".join(lines)
+        if len(text) < 1850:
+            await interaction.followup.send(f"```\n{text}\n```")
+        else:
+            await interaction.followup.send(f"Purge of {gc.fmt_date(ws)}: **{len(purged)}** kicked (the list is a file).",
+                                            file=discord.File(io.BytesIO(text.encode()), filename="purge_list.txt"))
+
+    @app_commands.command(name="strikes", description="The strikes of a player: kicked at a purge short of the GEXP (guild staff)")
+    @app_commands.describe(ign="Minecraft username")
+    @app_commands.check(staff_check)
+    async def strikes(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        rows = await q_all("SELECT * FROM strikes WHERE uuid = ? ORDER BY id DESC", (uuid,))
+        if not rows:
+            await interaction.followup.send(f"**{esc(name)}** has no strikes.", allowed_mentions=NO_MENTIONS)
+            return
+        lines = [f"{'~~' if x['removed'] else ''}**#{x['id']}** · {gc.fmt_et(from_iso(x['at']))} · guild week "
+                 f"**{n(x['week_gexp'])}** / {n(x['required'])} GEXP · last 7 days {n(x['last7'])}"
+                 f"{'~~ (removed)' if x['removed'] else ''}" for x in rows[:15]]
+        active = sum(1 for x in rows if not x["removed"])
+        await interaction.followup.send(f"**{esc(name)}** · **{active}** strike{'s' if active != 1 else ''}\n" + "\n".join(lines)
+                                        + "\nRemove one with `/purge removestrike`.", allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="removestrike", description="Remove a strike by mistake (guild staff)")
+    @app_commands.describe(ign="Minecraft username", number="Strike number (see /purge strikes)")
+    @app_commands.check(staff_check)
+    async def removestrike(self, interaction: discord.Interaction, ign: str, number: int):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        row = await q_one("SELECT id FROM strikes WHERE id = ? AND uuid = ? AND removed = 0", (number, uuid))
+        if row is None:
+            await interaction.followup.send(f"**{esc(name)}** has no active strike #{number}.", allowed_mentions=NO_MENTIONS)
+            return
+        await q_run("UPDATE strikes SET removed = 1 WHERE id = ?", (number,))
+        await interaction.followup.send(f"✅ Strike #{number} of **{esc(name)}** removed.", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="evaders", description="Members who left the guild without earning the GEXP they owed (guild staff)")
     @app_commands.describe(
@@ -4278,6 +4513,29 @@ def parse_mute_length(text):
     units = {"w": 7 * 86400, "d": 86400, "h": 3600, "m": 60}
     total = sum(int(v) * units[u] for v, u in re.findall(r"(\d+)([wdhm])", t))
     return timedelta(seconds=total) if total > 0 else None
+
+
+def parse_days(text, low=0.0, high=5000.0):
+    """'14d 3h 2m', '2h 2m', '5' or '5.5' (days) -> days as a float. Raises ValueError with a readable message."""
+    t = str(text).strip().lower().replace(",", ".")
+    if not t:
+        raise ValueError("Write the days, for example `14`, `14d 3h` or `2h 2m`.")
+    try:
+        val = float(t)
+    except ValueError:
+        parts = re.findall(r"(-?\d+(?:\.\d+)?)\s*(d|h|m)", t)
+        if not parts or re.sub(r"(-?\d+(?:\.\d+)?)\s*(d|h|m)|\s", "", t):
+            raise ValueError("I couldn't read that. Use for example `14`, `14d 3h` or `2h 2m` (d = days, h = hours, m = minutes).")
+        val = sum(float(n_) * {"d": 1.0, "h": 1 / 24, "m": 1 / 1440}[u] for n_, u in parts)
+    if not (low <= val <= high):
+        raise ValueError(f"The days must be between {low:g} and {high:g}.")
+    return val
+
+
+def dh_text(d):
+    d = abs(d)
+    total_min = int(round(d * 1440))
+    return f"{total_min // 1440}d {total_min % 1440 // 60}h {total_min % 60}m"
 
 
 def mute_length_text(row):

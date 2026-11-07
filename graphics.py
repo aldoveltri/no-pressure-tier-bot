@@ -487,7 +487,7 @@ async def build_paused_list_image(entries, total):
 # ---------- player profile (general, season or archived year) ----------
 
 def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, heads,
-                  title, scope, tier2, elo_label):
+                  title, scope, tier2, elo_label, rank_total=None):
     id_h, box_h, gap = 170, 110, 14
     height = HEADER_H + 16 + id_h + gap + box_h + 16 + FOOTER_H
     img = Image.new("RGB", (WIDTH, height), BG)
@@ -518,7 +518,7 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, 
 
     by = y0 + id_h + gap
     bw = (WIDTH - 2 * PAD - 3 * gap) // 4
-    stats = [(elo_label, str(elo)), ("RANK", f"#{rank}"),
+    stats = [(elo_label, str(elo)), ("RANK", f"#{rank}" + (f" / {rank_total}" if rank_total else "")),
              ("RECORD", f"{wins}W - {losses}L"), ("WIN RATE", winrate)]
     for i, (label, value) in enumerate(stats):
         bx = PAD + i * (bw + gap)
@@ -531,10 +531,10 @@ def _draw_profile(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits, 
 
 
 async def build_profile_image(uuid, name, tier, elo, rank, wins, losses, winrate, forfeits,
-                              title="PLAYER PROFILE", scope="", tier2=None, elo_label="ELO"):
+                              title="PLAYER PROFILE", scope="", tier2=None, elo_label="ELO", rank_total=None):
     heads = await _fetch_heads([(uuid, name)])
     return await asyncio.to_thread(_draw_profile, uuid, name, tier, elo, rank, wins, losses,
-                                   winrate, forfeits, heads, title, scope, tier2, elo_label)
+                                   winrate, forfeits, heads, title, scope, tier2, elo_label, rank_total)
 
 
 # ---------- player match history (paged, cancelled matches included) ----------

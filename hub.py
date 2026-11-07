@@ -179,6 +179,7 @@ async def gather_player(bot, uuid, name):
     d["excuses"] = (await Q1("SELECT COUNT(*) AS c FROM excuses WHERE uuid = ?", uuid) or {"c": 0})["c"]
     d["left"] = await QA("SELECT * FROM guild_left WHERE uuid = ? ORDER BY left_at DESC", uuid)
     d["debt"] = (await Q1("SELECT amount FROM debts WHERE uuid = ?", uuid) or {"amount": 0})["amount"]
+    d["strikes"] = await safe(QA("SELECT * FROM strikes WHERE uuid = ? AND removed = 0 ORDER BY id DESC", uuid), []) or []
     d["mutes"] = await QA("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", uuid)
     d["warns"] = await QA("SELECT * FROM warnings WHERE uuid = ? ORDER BY id DESC", uuid)
     d["blacklist"] = await QA("SELECT * FROM blacklist WHERE uuid = ? ORDER BY id DESC", uuid)
@@ -244,9 +245,13 @@ def player_panels(d):
     panels.append(("EXCUSES", f"{d['excuses']} week{'s' if d['excuses'] != 1 else ''}" if d["excuses"] else "Never excused",
                    "Excused now" if d["excuse_now"] else "Not excused now", g.TEXT if d["excuses"] else g.MUTED))
     left = d["left"]
-    panels.append(("PURGE", f"Left {len(left)} time{'s' if len(left) != 1 else ''}" if left else "Never left",
-                   f"Extra GEXP debt: {n(d['debt'])}" if d["debt"] else (f"Last: {gc.fmt_date(from_iso(left[0]['left_at']))}" if left else "No debt"),
-                   g.RED if d["debt"] else (g.TEXT if left else g.GREEN)))
+    strikes = d.get("strikes") or []
+    small = (f"Extra GEXP debt: {n(d['debt'])}" if d["debt"] else
+             (f"Last: {gc.fmt_date(from_iso(left[0]['left_at']))}" if left else "No debt"))
+    if strikes:
+        small = f"{len(strikes)} strike{'s' if len(strikes) != 1 else ''} · last {gc.fmt_date(from_iso(strikes[0]['at']))}, {n(strikes[0]['week_gexp'])} GEXP"
+    panels.append(("PURGE", f"Left {len(left)} time{'s' if len(left) != 1 else ''}" if left else "Never left", small,
+                   g.RED if (d["debt"] or strikes) else (g.TEXT if left else g.GREEN)))
     # punishments
     mutes, warns = d["mutes"], d["warns"]
     active_m = sum(1 for m in mutes if m["status"] == "active")
@@ -341,10 +346,17 @@ async def player_section(ctx, key, page):
             rows = await QA("SELECT week, reason FROM excuses WHERE uuid = ? ORDER BY week DESC LIMIT 4", uuid)
             lines.append("**Excused:** " + " · ".join(f"week of {day_text(r['week'])}"
                                                        + (f" ({r['reason']})" if r["reason"] else "") for r in rows))
-        if d["left"]:
-            lines.append("**Left the guild:** " + " · ".join(gc.fmt_date(from_iso(x["left_at"])) for x in d["left"][:4]))
+        if entries:
+            lines.append("**Breaklisted:** " + " · ".join(gc.fmt_et(from_iso(x["left_at"])) for x in entries[:4]))
+        bl_days = {from_iso(x["left_at"]).date() for x in entries if x.get("left_at")}
+        other_left = [x for x in d["left"] if not any(abs((from_iso(x["left_at"]).date() - b).days) <= 1 for b in bl_days)]
+        if other_left:
+            lines.append("**Left the guild:** " + " · ".join(gc.fmt_et(from_iso(x["left_at"])) for x in other_left[:4]))
         if d["debt"]:
             lines.append(f"**Extra GEXP debt:** {n(d['debt'])}")
+        if d.get("strikes"):
+            lines.append("**Strikes:** " + " · ".join(f"{gc.fmt_date(from_iso(x['at']))} ({n(x['week_gexp'])} GEXP)"
+                                                      for x in d["strikes"][:5]))
         if not entries:
             lines.insert(0, f"**{esc(name)}** has never been on the breaklist.")
             return Out(content="\n".join(lines))

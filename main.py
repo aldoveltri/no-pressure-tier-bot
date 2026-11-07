@@ -14,7 +14,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from database import (init_db, init_extras, init_seasons, init_modes, upsert_player, get_player, save_match,
-                      get_stats, count_forfeits, get_rank, get_leaderboard,
+                      get_stats, count_forfeits, get_rank, count_ranked, get_leaderboard,
                       get_history, count_history, get_all_matches, count_all_matches,
                       count_cancelled_matches, get_cancelled_matches,
                       get_link, remove_link, link_account,
@@ -548,7 +548,7 @@ class GuideView(discord.ui.View):
         await it.response.edit_message(attachments=[f], view=self)
 
 
-@bot.tree.command(name="guide", description="A complete guide to the bot and all its commands")
+@bot.tree.command(name="guide", description="How the bot works and every command members can use")
 async def guide(interaction: discord.Interaction):
     await interaction.response.defer()
     cat, page = 0, 0
@@ -1413,7 +1413,8 @@ async def profile_card(uuid, name, spec=None):
     rank = await get_rank(p["elo"], mode_id=mode_id)
     return await build_profile_image(uuid, p["ign"], p["tier"], p["elo"], rank, wins, losses, winrate, forfeits,
                                      title=f"{mode_up} PROFILE" if md else "PLAYER PROFILE",
-                                     scope=md["name"] if md else ""), None
+                                     scope=md["name"] if md else "",
+                                     rank_total=await count_ranked(mode_id=mode_id)), None
 
 
 async def profile_options():

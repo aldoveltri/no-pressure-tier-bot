@@ -50,8 +50,35 @@ async def purged_members(core, ws):
         elif earned >= required:
             skipped["met"] += 1
         else:
-            out.append({"uuid": uuid, "ign": r["ign"] or await core.name_for(uuid), "short": required - earned})
+            last7, _ = await core.window_sum(uuid, left - timedelta(days=7), left)
+            out.append({"uuid": uuid, "ign": r["ign"] or await core.name_for(uuid), "short": required - earned,
+                        "week": earned, "required": required, "last7": last7, "left": left})
     return out, skipped, len(members)
+
+
+STRIKES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS strikes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid TEXT NOT NULL, ign TEXT, purge_week TEXT NOT NULL, at TEXT NOT NULL,
+    week_gexp INTEGER, required INTEGER, last7 INTEGER, removed INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (uuid, purge_week)
+);
+"""
+
+
+async def record_strikes(purged, ws):
+    """A strike for everyone the purge removed short of the GEXP (not breaklisted, excused or blacklisted). Safe to call
+    again for the same purge: a player gets one strike per purge."""
+    added = 0
+    for p in purged:
+        have = await q_one("SELECT id FROM strikes WHERE uuid = ? AND purge_week = ?", (p["uuid"], ws.date().isoformat()))
+        if have:
+            continue
+        await bl.q_run("INSERT INTO strikes (uuid, ign, purge_week, at, week_gexp, required, last7) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (p["uuid"], p["ign"], ws.date().isoformat(), iso(p.get("left") or ws), int(p["week"]),
+                        int(p["required"]), int(p["last7"])))
+        added += 1
+    return added
 
 
 def summary_text(purged, total):
@@ -79,12 +106,21 @@ class PurgeSummary(commands.Cog):
             if not (due <= now < due + timedelta(hours=24)):
                 return
             key = f"purge_summary:{ws.date().isoformat()}"
+            skey = f"strikes:{ws.date().isoformat()}"
+            if not await kv_get(skey):                        # strikes are saved even when the summary post is off
+                members = await self.bot.np_core.guild_members(force=True)
+                if not members:
+                    return
+                purged, _s, _t = await self.build(ws)
+                await record_strikes(purged, ws)
+                await kv_set(skey, iso(now))
             if await kv_get(key) or not await alerts.enabled("purge_summary"):
                 return
             members = await self.bot.np_core.guild_members(force=True)
             if not members:
                 return                                         # try again in 10 minutes
             purged, skipped, total = await self.build(ws)
+            await record_strikes(purged, ws)
             await kv_set(key, iso(now))
             env = "PURGE_SUMMARY_CHANNEL_ID" if bl.chan_id("PURGE_SUMMARY_CHANNEL_ID") else "INACTIVITY_CHANNEL_ID"
             await self.bot.np_core.post_to(env, content=summary_text(purged, total))
@@ -98,4 +134,8 @@ class PurgeSummary(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    import aiosqlite
+    async with aiosqlite.connect(bl.DB_PATH) as db:
+        await db.executescript(STRIKES_SCHEMA)
+        await db.commit()
     await bot.add_cog(PurgeSummary(bot))

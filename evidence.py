@@ -148,6 +148,8 @@ def blacklist_embed(row, title="Guild blacklist"):
     e.add_field(name="Player", value=f"**{esc(row['ign'])}**", inline=True)
     e.add_field(name="Duration", value=row["duration"] or "Not specified", inline=True)
     e.add_field(name="Reason", value=row["reason"] or "Not specified", inline=False)
+    if row.get("link"):
+        e.add_field(name="Message", value=f"[Jump to the message]({row['link']})", inline=False)
     e.set_footer(text=f"Entry #{row['id']}")
     return e
 
@@ -254,11 +256,12 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
     @app_commands.command(name="add", description="Add a player to the guild blacklist")
     @app_commands.describe(ign="Minecraft username", reason="Why (free text)", duration="For how long (free text)",
                            image="Screenshot or video (optional)", image2="Another screenshot or video (optional)",
-                           image3="Another screenshot or video (optional)")
+                           image3="Another screenshot or video (optional)",
+                           link="Link to a Discord message with the proof (optional)")
     @app_commands.check(perm_check)
     async def add(self, interaction: discord.Interaction, ign: str, reason: str, duration: str,
                   image: Optional[discord.Attachment] = None, image2: Optional[discord.Attachment] = None,
-                  image3: Optional[discord.Attachment] = None):
+                  image3: Optional[discord.Attachment] = None, link: Optional[str] = None):
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
@@ -266,6 +269,9 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
         uuid, name = r
         media, skipped = await self.read_media(interaction, (image, image2, image3))
         row, created = await blacklist_upsert(uuid, name, reason, duration, interaction.user.id)
+        if link and link.strip():
+            await q_run("UPDATE blacklist SET link = ? WHERE id = ?", (link.strip(), row["id"]))
+            row = await q_one("SELECT * FROM blacklist WHERE id = ?", (row["id"],))
         posted = await self.announce(interaction, row, "Added to the guild blacklist" if created else "Blacklist entry updated",
                                      media)
         await interaction.followup.send(
@@ -277,11 +283,13 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
     @app_commands.describe(ign="Minecraft username", reason="New reason (leave empty to keep it)",
                            duration="New duration (leave empty to keep it)",
                            image="Screenshot or video (optional)", image2="Another screenshot or video (optional)",
-                           image3="Another screenshot or video (optional)")
+                           image3="Another screenshot or video (optional)",
+                           link="Link to a Discord message with the proof (optional)")
     @app_commands.check(perm_check)
     async def edit(self, interaction: discord.Interaction, ign: str, reason: Optional[str] = None,
                    duration: Optional[str] = None, image: Optional[discord.Attachment] = None,
-                   image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None):
+                   image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None,
+                   link: Optional[str] = None):
         await interaction.response.defer()
         r = await lookup(interaction, ign)
         if r is None:
@@ -292,10 +300,13 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
             await interaction.followup.send(f"**{esc(name)}** is not on the blacklist.", allowed_mentions=NO_MENTIONS)
             return
         media, skipped = await self.read_media(interaction, (image, image2, image3))
-        if not reason and not duration and not media:
-            await interaction.followup.send("Give a new reason, a new duration and/or images.")
+        if not reason and not duration and not media and not link:
+            await interaction.followup.send("Give a new reason, a new duration, a message link and/or images.")
             return
         row, _ = await blacklist_upsert(uuid, name, reason, duration, interaction.user.id)
+        if link and link.strip():
+            await q_run("UPDATE blacklist SET link = ? WHERE id = ?", (link.strip(), row["id"]))
+            row = await q_one("SELECT * FROM blacklist WHERE id = ?", (row["id"],))
         posted = await self.announce(interaction, row, "Blacklist entry updated", media)
         await interaction.followup.send(f"Entry of **{esc(name)}** updated" + (f" ({posted})." if posted else ".")
                                         + (f"\nNot added: {', '.join(skipped)}" if skipped else ""),
@@ -1125,7 +1136,7 @@ async def setup(bot: commands.Bot):
     async with aiosqlite.connect(bl.DB_PATH) as db:
         await db.executescript(SCHEMA)
         for table, col in (("cheat_reports", "confirmed_at"), ("cheat_reports", "confirmed_by"),
-                           ("cheat_reports", "closed_by"), ("ev_votes", "name")):
+                           ("cheat_reports", "closed_by"), ("ev_votes", "name"), ("blacklist", "link")):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
             except aiosqlite.OperationalError:

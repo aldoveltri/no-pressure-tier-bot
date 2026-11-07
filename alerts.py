@@ -14,6 +14,8 @@ ALERTS = {
     "purge_summary": ("Purge summary", "The 'X guild members were purged, putting us at Y' post after every purge"),
     "breaklist_edit": ("Breaklist edit posts", "The new card posted in the breaklist thread when a staff member edits an entry or its debt"),
     "guild_history": ("Guild history image", "The 'Guild history we know' image posted under a new breaklist notice"),
+    "blacklist_card": ("Blacklist picture", "The picture of the entry posted in the blacklist channel when someone is blacklisted"),
+    "rejoin_message": ("Rejoin message", "The welcome-back post that pings the player and says the scaled GEXP they need when /breaklist remove takes them off the breaklist"),
     "urchin": ("Urchin alerts", "The automatic post in the evidence channel when a guild member gets an Urchin tag"),
 }
 _cache = {}

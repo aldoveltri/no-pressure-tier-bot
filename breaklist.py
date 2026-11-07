@@ -1135,6 +1135,23 @@ def draw_missing(name, head, joined, purge, r, start, current, extra_note):
 
 # ---------- inactivity notice ----------
 
+def draw_blacklist_card(ign, head, reason, duration, by, title="BLACKLISTED"):
+    """The picture posted in the blacklist channel when a player is blacklisted."""
+    id_h = 130
+    top = g.HEADER_H + 16
+    dur = duration or "no duration"
+    height = (top + id_h + 14 + _panel_height(reason or "Not specified", max_lines=8) + 14
+              + _panel_height(dur, max_lines=2) + 16 + g.FOOTER_H)
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, title, GUILD_NAME_DISPLAY)
+    _identity(img, d, top, ign, head, "BLACKLIST", g.RED, "", id_h)
+    y = _text_panel(d, top + id_h + 14, "REASON", reason or "Not specified", max_lines=8)
+    y = _text_panel(d, y + 14, "DURATION", dur, max_lines=2)
+    g._footer(d, height, f"Added by {by}" if by else "")
+    return g._png(img)
+
+
 def draw_offer(ign, head, kind, requirement, note, it=None):
     """The breaklist offer: for players who were removed or have been away for a few days."""
     if kind == "kicked":
@@ -2286,7 +2303,7 @@ async def edit_entry(core, entry, *, reason=None, start=None, end=None, gexp=Non
     return await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry["id"],)), None
 
 
-async def repost_card(core, entry_id, text, title="BREAKLIST UPDATE", kind=None):
+async def repost_card(core, entry_id, text, title="BREAKLIST UPDATE", kind=None, mentions=None):
     """Posts the updated card in the thread of the entry. Returns (channel mention / None / False, card bytes)."""
     entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry_id,))
     if entry["status"] == "active":
@@ -2299,7 +2316,8 @@ async def repost_card(core, entry_id, text, title="BREAKLIST UPDATE", kind=None)
     view.add_item(BreaklistEditButton(entry["id"]))
     view.add_item(BreaklistDebtButton(entry["id"]))
     posted = await core.post_to("BREAKLIST_CHANNEL_ID", content=text, data=card, filename="breaklist.png",
-                                thread_name=entry["ign"], thread_key=f"bl_thread:{entry['id']}", view=view)
+                                thread_name=entry["ign"], thread_key=f"bl_thread:{entry['id']}", view=view,
+                                mentions=mentions)
     return posted, card
 
 
@@ -3348,9 +3366,28 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                 exp_txt = ""
         announce = (f"✅ **{esc(name)}** is back in the guild and off the breaklist ({gc.fmt_date(back)}).{exp_txt} "
                     f"Their {int(days)} days in the guild are kept.")
+        mentions = None
+        if await alerts.enabled("rejoin_message"):
+            try:                                                  # ping them and say what they must earn this week
+                special = await self.core.req_override(uuid)
+                normal = gc.required_from(back, special)
+                purge_at = gc.week_end(back)
+                did = await self.core.linked_discord(uuid)
+                if did and not await self.core.in_server(did):
+                    did = None
+                who = f"<@{did}>" if did else f"**{esc(name)}**"
+                need = f"**{n(normal)} GEXP** by the purge ({gc.fmt_et(purge_at)})"
+                if owed:
+                    need += f", plus **{n(owed)} GEXP** of extra debt from before your break"
+                announce = (f"{who} welcome back to No Pressure! 💙 You are off the breaklist ({gc.fmt_date(back)}).{exp_txt}\n"
+                            f"Your {int(days)} days in the guild are kept. Because you rejoined this week your requirement is "
+                            f"scaled to the time left: you need {need}. Check it any time with `/gexp missing`.")
+                mentions = USER_MENTIONS if did else None
+            except Exception:
+                log.exception("Could not build the rejoin message")
         posted = None
         try:
-            posted, _card = await repost_card(self.core, entry["id"], announce, "BACK IN THE GUILD")
+            posted, _card = await repost_card(self.core, entry["id"], announce, "BACK IN THE GUILD", mentions=mentions)
         except Exception:
             log.exception("Could not announce the return in the breaklist thread")
         await interaction.followup.send(

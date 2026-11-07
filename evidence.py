@@ -230,6 +230,16 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
             return None                                 # /alerts: blacklist posts are off, the entry is only saved
         embed = blacklist_embed(row, title)
         embeds = [embed]
+        media = list(media or [])
+        if await alerts.enabled("blacklist_card") and not title.lower().startswith("removed"):
+            try:                                          # the picture of the entry goes first
+                head = await self.core.head_for(row["uuid"], row["ign"])
+                by = interaction.user.display_name if interaction else ""
+                png = await asyncio.to_thread(bl.draw_blacklist_card, row["ign"], head, row["reason"], row["duration"], by,
+                                              "BLACKLIST UPDATED" if "updated" in title.lower() else "BLACKLISTED")
+                media.insert(0, ("blacklist-card.png", png))
+            except Exception:
+                log.exception("Could not draw the blacklist card")
         pics = [f"attachment://{n}" for n, _ in (media or []) if n.lower().endswith(IMG_EXT)]
         if pics:
             embed.set_image(url=pics[0])
@@ -312,7 +322,14 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
                                         + (f"\nNot added: {', '.join(skipped)}" if skipped else ""),
                                         allowed_mentions=NO_MENTIONS)
 
+    async def active_names(self, interaction: discord.Interaction, current: str):
+        rows = await q_all("SELECT DISTINCT ign FROM blacklist WHERE status = 'active' ORDER BY ign COLLATE NOCASE")
+        return [app_commands.Choice(name=r["ign"], value=r["ign"]) for r in rows
+                if current.lower() in (r["ign"] or "").lower()][:25]
+
     @app_commands.command(name="remove", description="Remove a player from the guild blacklist")
+    @app_commands.describe(ign="Minecraft username (pick it from the list: it shows who is blacklisted)")
+    @app_commands.autocomplete(ign=active_names)
     @app_commands.check(perm_check)
     async def remove(self, interaction: discord.Interaction, ign: str):
         await interaction.response.defer()
@@ -322,7 +339,10 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
         uuid, name = r
         row = await q_one("SELECT * FROM blacklist WHERE uuid = ? AND status = 'active'", (uuid,))
         if not row:
-            await interaction.followup.send(f"**{esc(name)}** is not on the blacklist.", allowed_mentions=NO_MENTIONS)
+            active = await q_all("SELECT ign FROM blacklist WHERE status = 'active' ORDER BY id")
+            await interaction.followup.send(f"**{esc(name)}** is not on the blacklist. Blacklisted now: "
+                                            + (", ".join(f"**{esc(a['ign'])}**" for a in active[:25]) or "nobody") + ".",
+                                            allowed_mentions=NO_MENTIONS)
             return
         await q_run("UPDATE blacklist SET status = 'removed', updated_at = ? WHERE id = ?", (iso(now_utc()), row["id"]))
         embed = blacklist_embed(row, "Removed from the guild blacklist")
@@ -386,8 +406,9 @@ class BlacklistCog(commands.GroupCog, name="blacklist", description="Guild black
         for r in rows[:24]:
             by = str(r["added_by"] or "")
             by = f"<@{by}>" if by.isdigit() else (by or "unknown")
-            embed.add_field(name=f"{r['ign']} · {r['duration'] or 'no duration'}",
-                            value=f"{r['reason'] or '-'}\n**Added by:** {by}", inline=False)
+            embed.add_field(name=f"{r['ign']}",
+                            value=f"**Duration:** {r['duration'] or 'no duration'}\n**Reason:** {r['reason'] or '-'}\n"
+                                  f"**Added by:** {by}", inline=False)
         if len(rows) > 24:
             embed.set_footer(text=f"Showing 24 of {len(rows)}")
         else:

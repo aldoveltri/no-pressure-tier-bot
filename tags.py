@@ -489,7 +489,7 @@ class TagCog(commands.GroupCog, name="tag", description="Active tag vote"):
             if gone:
                 await q_run("UPDATE tag_polls SET status = 'cancelled' WHERE id = ?", (stuck["id"],))
         if await q_one("SELECT id FROM tag_polls WHERE status IN ('picking', 'phase1', 'phase2')"):
-            await interaction.followup.send("A tag vote is already open: wait for it to end. Staff: `/tag cancel` closes it "
+            await interaction.followup.send("A tag vote is already open: wait for it to end. Staff: `/tag close` closes it "
                                             "(or press Cancel on the vote).", ephemeral=True)
             return
         name = why if ok else interaction.user.display_name
@@ -497,14 +497,21 @@ class TagCog(commands.GroupCog, name="tag", description="Active tag vote"):
                           (str(interaction.user.id), name, iso(now_utc())))
         cid = bl.chan_id("TAG_CHANNEL_ID")
         ch = (self.bot.get_channel(cid) or await self.bot.fetch_channel(cid)) if cid else interaction.channel
-        content, file, view = await poll_message(self.bot, pid)
-        msg = await ch.send(content=content, file=file, view=view)
+        try:
+            content, file, view = await poll_message(self.bot, pid)
+            msg = await ch.send(content=content, file=file, view=view)
+        except Exception as ex:                            # no access to the channel, or the card failed: don't leave a ghost vote
+            await q_run("UPDATE tag_polls SET status = 'cancelled' WHERE id = ?", (pid,))
+            log.exception("Could not post the tag vote")
+            await interaction.followup.send(f"I couldn't post the vote (`{type(ex).__name__}`): check `TAG_CHANNEL_ID` and that the "
+                                            "bot can see and write in that channel. Nothing was left open.", ephemeral=True)
+            return
         await q_run("UPDATE tag_polls SET channel_id = ?, message_id = ? WHERE id = ?", (str(ch.id), str(msg.id), pid))
         await interaction.followup.send(f"Vote started in {ch.mention}. The staff picks who votes.", ephemeral=True)
 
-    @app_commands.command(name="cancel", description="Close a tag vote that is stuck as open (guild staff)")
+    @app_commands.command(name="close", description="Close the open tag vote, even if it is stuck (guild staff)")
     @app_commands.check(bl.staff_check)
-    async def cancel(self, interaction: discord.Interaction):
+    async def close(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         rows = await q_all("SELECT id FROM tag_polls WHERE status IN ('picking', 'phase1', 'phase2')")
         if not rows:
@@ -516,7 +523,7 @@ class TagCog(commands.GroupCog, name="tag", description="Active tag vote"):
                 await update_main(self.bot, r["id"])
             except Exception:
                 pass                                  # the message may be gone: the vote is closed anyway
-        await interaction.followup.send(f"✅ {len(rows)} open tag vote(s) cancelled.", ephemeral=True)
+        await interaction.followup.send(f"✅ {len(rows)} open tag vote(s) closed.", ephemeral=True)
 
     @app_commands.command(name="list", description="Recent active tag votes (guild staff)")
     @app_commands.check(bl.staff_check)

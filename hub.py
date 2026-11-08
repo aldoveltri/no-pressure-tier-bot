@@ -178,6 +178,11 @@ async def gather_player(bot, uuid, name):
     d["excuse_now"] = await Q1("SELECT week FROM excuses WHERE uuid = ? AND week >= ? LIMIT 1", uuid, ws.date().isoformat())
     d["excuses"] = (await Q1("SELECT COUNT(*) AS c FROM excuses WHERE uuid = ?", uuid) or {"c": 0})["c"]
     d["left"] = await QA("SELECT * FROM guild_left WHERE uuid = ? ORDER BY left_at DESC", uuid)
+    # a breaklist is not "leaving the guild": hide the left records that coincide (same day +-1) with a breaklist
+    _bl_days = {from_iso(x["left_at"]).date() for x in (await QA("SELECT left_at FROM bl_entries WHERE uuid = ?", uuid))
+                if x.get("left_at")}
+    d["left"] = [x for x in d["left"]
+                 if not any(abs((from_iso(x["left_at"]).date() - b).days) <= 1 for b in _bl_days)]
     d["debt"] = (await Q1("SELECT amount FROM debts WHERE uuid = ?", uuid) or {"amount": 0})["amount"]
     d["strikes"] = await safe(QA("SELECT * FROM strikes WHERE uuid = ? AND removed = 0 ORDER BY id DESC", uuid), []) or []
     d["mutes"] = await QA("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", uuid)

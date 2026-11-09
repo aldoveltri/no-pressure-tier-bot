@@ -4280,6 +4280,9 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         req = await self.core.req_override(uuid) or gc.WEEKLY_REQ
         rows = await q_all("SELECT uuid, SUM(gexp) AS t FROM gexp_history WHERE day >= ? GROUP BY uuid ORDER BY t DESC",
                            (ws.astimezone(gc.ET).date().isoformat(),))
+        members = await self.core.guild_members()
+        if members:                                    # only who is in the guild now (not who left or was kicked)
+            rows = [x for x in rows if x["uuid"] in members]
         pos = next((i for i, x in enumerate(rows, 1) if x["uuid"] == uuid), None)
         end = gc.week_end(now)
         heads = await g._fetch_heads([(uuid, name)])

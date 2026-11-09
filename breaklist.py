@@ -4295,7 +4295,9 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
             day -= timedelta(days=1)
         card = await asyncio.to_thread(draw_gexp_me, name, heads.get(uuid), total, req, pos, len(rows), end,
                                        (end - now).total_seconds(), daily)
-        await interaction.followup.send(file=send_file(card, "my_gexp.png"))
+        text = (f"**{esc(name)}** · GEXP this week: `{n(total)}/{n(req)} ({total * 100 / max(1, req):.2f}%)`\n"
+                + "\n".join(f"`{d}` {n(v)}" for d, v in daily))
+        await interaction.followup.send(content=text, file=send_file(card, "my_gexp.png"), allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")
     @app_commands.describe(

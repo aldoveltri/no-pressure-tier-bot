@@ -37,6 +37,8 @@ START_PAGES = [
            "from it, the bot sends you a reminder with buttons: you can ask for a breaklist or an excuse, or tell "
            "the staff that you plan to reach it. Your GEXP this week is on your /profile."),
         _c("/purgetime [when]", "The last and the next purge, as times that show in your own time zone."),
+        _c("/gexp me [ign]", "Your GEXP this guild week so far, what is left to reach the requirement and your position."),
+        _c("/gtop", "The top 10 GEXP of the guild this week, even if the week is not over yet."),
         _c("/road", "How much GEXP the guild needs to pass the guilds above us."),
         _c("/days leaderboard", "Members ordered by total days in the guild."),
         _c("/country view [player]", "The country of a player, with their 1v1s and days in the guild."),

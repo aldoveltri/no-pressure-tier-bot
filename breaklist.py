@@ -66,7 +66,10 @@ REMINDER = ("Stay guildless while you are on the breaklist. Joining another guil
 
 def chan_id(env_name: str):
     raw = _env(env_name)
-    return int(raw) if raw.isdigit() else None
+    if raw.isdigit():
+        return int(raw)
+    found = re.findall(r"\d{15,22}", raw or "")      # a pasted link (.../channels/guild/channel) or a <#mention>
+    return int(found[-1]) if found else None
 
 
 def n(value) -> str:
@@ -691,7 +694,7 @@ def draw_purge(rows, heads, title, subtitle, page, pages):
 
 # ---------- breaklist history of one player ----------
 
-def draw_history(name, head, entries, total, page, pages):
+def draw_history(name, head, entries, total, page, pages, total_days=None):
     row_h = 104
     top = g.HEADER_H + 16
     id_h = 110
@@ -707,18 +710,23 @@ def draw_history(name, head, entries, total, page, pages):
     d.text((g.WIDTH - g.PAD - 30, top + 40), str(total), font=g.get_font(44, True), fill=g.ACCENT, anchor="rm")
     d.text((g.WIDTH - g.PAD - 30, top + 82), "TIMES ON BREAKLIST", font=g.get_font(14, True),
            fill=g.MUTED, anchor="rm")
+    if total_days is not None:
+        d.text((g.WIDTH - g.PAD - 330, top + 40), dh_text(total_days), font=g.get_font(30, True), fill=g.TEXT, anchor="rm")
+        d.text((g.WIDTH - g.PAD - 330, top + 82), "TOTAL DAYS IN GUILD", font=g.get_font(14, True), fill=g.MUTED, anchor="rm")
 
     y = top + id_h + 14
     for e in entries:
         left = from_iso(e["left_at"])
-        back = from_iso(e.get("returned_at"))
-        length = gc.fmt_duration(((back or now_utc()) - left).total_seconds())
         active = e["status"] == "active"
+        back = from_iso(e["_back"]) if "_back" in e else from_iso(e.get("returned_at"))
+        if active:
+            back = None
+        length = (gc.fmt_duration(((back or now_utc()) - left).total_seconds()) if (back or active) else "unknown")
         color = g.ACCENT if active else g.MUTED
         d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + row_h], radius=14, fill=g.ROW_BG)
         d.rounded_rectangle([g.PAD, y, g.PAD + 8, y + row_h], radius=4, fill=color)
         x = g.PAD + 28
-        end_txt = gc.fmt_date(back) if back else "now"
+        end_txt = gc.fmt_date(back) if back else ("now" if active else "?")
         d.text((x, y + 24), f"{gc.fmt_date(left)} to {end_txt}", font=g.get_font(20, True), fill=g.TEXT, anchor="lm")
         d.text((x + 330, y + 24), f"Break length: {length}" + ("  (ongoing)" if active else ""),
                font=g.get_font(16, True), fill=g.SOFT, anchor="lm")
@@ -729,7 +737,7 @@ def draw_history(name, head, entries, total, page, pages):
         d.text((g.WIDTH - g.PAD - 24, y + 36), n(owed), font=g.get_font(26, True),
                fill=g.RED if owed > 0 else g.GREEN, anchor="rm")
         d.text((g.WIDTH - g.PAD - 24, y + 66), "GEXP OWED", font=g.get_font(13, True), fill=g.MUTED, anchor="rm")
-        d.text((g.WIDTH - g.PAD - 24, y + 86), f"{int(e['days_total'])} days in guild",
+        d.text((g.WIDTH - g.PAD - 24, y + 86), f"{dh_text(e['_stay']) if '_stay' in e else str(int(e['days_total'])) + ' days'} in guild",
                font=g.get_font(13), fill=g.MUTED, anchor="rm")
         y += row_h + 10
     g._footer(d, height, f"Page {page}/{pages}")
@@ -3037,9 +3045,9 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.command(name="add", description="Add a player to the breaklist and post the notice (guild staff)")
     @app_commands.describe(
         ign="Minecraft username of the player",
-        reason="Why the player is being breaklisted (everyone can read it)",
         start="When they joined the guild (ET or MT, see /timezone): 2026/10/03 or 2026/10/03 6:00 PM (the year is optional: 10/03 6:00 PM). Default: from Hypixel",
         end="When they were breaklisted (ET or MT, see /timezone). Default: now",
+        reason="Why the player is being breaklisted (everyone can read it). Default: Inactive",
         gexp="GEXP earned this week before the breaklist. REQUIRED when the bot has no saved GEXP for them (new member)",
         days="Total days the player has spent in the guild (use it for players breaklisted before the bot)",
         debt="Extra GEXP debt from previous weeks. Default: the saved debt",
@@ -3051,8 +3059,8 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.choices(purpose=[app_commands.Choice(name="Temporary: can't meet our GEXP", value="temporary"),
                                    app_commands.Choice(name="Trying guilds to pick one", value="trying")])
     @app_commands.check(staff_check)
-    async def add(self, interaction: discord.Interaction, ign: str, reason: Optional[str] = None,
-                  start: Optional[str] = None, end: Optional[str] = None,
+    async def add(self, interaction: discord.Interaction, ign: str, start: Optional[str] = None,
+                  end: Optional[str] = None, reason: Optional[str] = None,
                   gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                   days: Optional[app_commands.Range[float, 0, 5000]] = None,
                   debt: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
@@ -3060,6 +3068,7 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                   expected_return: Optional[str] = None, image1: Optional[discord.Attachment] = None,
                   image2: Optional[discord.Attachment] = None, image3: Optional[discord.Attachment] = None):
         await interaction.response.defer(ephemeral=True)
+        reason = reason or "Inactive"
         r = await lookup(interaction, ign)
         if r is None:
             return
@@ -3243,64 +3252,68 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
     @app_commands.command(name="addold", description="Record an OLD breaklist of a player, already finished (guild staff)")
     @app_commands.describe(
         ign="Minecraft username of the player",
-        end="When they were breaklisted (ET or MT, see /timezone): 2026/07/28 5:28 PM, year optional",
-        reason="Why they were breaklisted",
-        gexp="GEXP earned that week before the breaklist",
+        start="The day they joined or rejoined the guild (ET or MT, see /timezone): 2026/07/04 5:32 AM, year optional",
+        end="The day they were breaklisted (same format)",
+        reason="Why they were breaklisted (default: Inactive)",
+        gexp="GEXP earned that week before the breaklist. Leave empty: no extra GEXP owed",
         required="GEXP required at the breaklist (default: calculated from the dates)",
-        start="When they joined the guild that time (same format). Default: their latest join date",
-        returned="When they came back (default: the end date)",
-        days="Days of that stay, added to their total (default: from start to end; 0 = add nothing)")
+        requirement="The weekly GEXP requirement at the time of that breaklist (default: the current one)",
+        days="Days of that stay, like 14, 14d 3h or 2h 2m (default: from start to end; 0 = add nothing)")
     @app_commands.check(staff_check)
-    async def add_old(self, interaction: discord.Interaction, ign: str, end: str, reason: Optional[str] = None,
-                      gexp: app_commands.Range[int, 0, 100_000_000] = 0,
+    async def add_old(self, interaction: discord.Interaction, ign: str, start: str, end: str, reason: Optional[str] = None,
+                      gexp: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
                       required: Optional[app_commands.Range[int, 0, 100_000_000]] = None,
-                      start: Optional[str] = None,
-                      returned: Optional[str] = None, days: Optional[app_commands.Range[float, 0, 5000]] = None):
-        await interaction.response.defer(ephemeral=True)
+                      requirement: Optional[app_commands.Range[int, 1, 10_000_000]] = None,
+                      days: Optional[str] = None):
+        await interaction.response.defer()
+        if days is not None:
+            try:
+                days = parse_days(days, 0.0, 5000.0)
+            except ValueError as e:
+                await interaction.followup.send(str(e))
+                return
         r = await lookup(interaction, ign)
         if r is None:
             return
         uuid, name = r
         parsed = {}
-        for key, text in (("start", start), ("end", end), ("returned", returned)):
-            if text:
-                parsed[key] = gc.parse_et(text)
-                if parsed[key] is None:
-                    await interaction.followup.send(f"I couldn't read the {key} date. Use `2026/07/28 5:28 PM` or "
-                                                    "`07/28 5:28 PM` (only one AM/PM, after the time).")
-                    return
+        for key, text in (("start", start), ("end", end)):
+            parsed[key] = gc.parse_et(text)
+            if parsed[key] is None:
+                await interaction.followup.send(f"I couldn't read the {key} date. Use `2026/07/28 5:28 PM` or "
+                                                "`07/28 5:28 PM` (only one AM/PM, after the time).")
+                return
         left = parsed["end"]
-        joined = parsed.get("start")
-        if joined is None:
-            try:
-                jf = await self.core.joined_for(uuid)
-            except Exception:
-                jf = None
-            joined = jf if jf and jf < left else None
-        back = parsed.get("returned") or left
-        if joined and left <= joined:
+        joined = parsed["start"]
+        back = left
+        if left <= joined:
             await interaction.followup.send("The end date must be after the start date.")
             return
+        reason = reason or "Inactive"
         ws = gc.week_start(left)
-        calc_req = gc.required_elapsed(max(joined, ws) if joined else ws, left)
+        calc_req = gc.required_elapsed(max(joined, ws), left, requirement)
         req = calc_req if required is None else required
+        owed_gexp = 0 if gexp is None else max(0, req - gexp)
+        gexp = gexp or 0
         if days is None:
-            days = max(0.0, (left - joined).total_seconds() / 86400) if joined else 0.0
+            days = max(0.0, (left - joined).total_seconds() / 86400)
         summary = (f"**Old breaklist of {esc(name)}**\n"
-                   f"• Joined the guild: {gc.fmt_et(joined) if joined else 'unknown'}\n"
-                   f"• Breaklisted: {gc.fmt_et(left)}\n• Came back: {gc.fmt_et(back)}\n"
-                   f"• GEXP earned: {n(gexp)} · required: {n(req)}{'' if required is None else ' (typed)'}\n"
-                   f"• Days added to their total: **{days:g}**\n• Reason: {esc(reason or '-')}\n"
+                   f"• Joined the guild: {gc.fmt_et(joined)}\n"
+                   f"• Breaklisted: {gc.fmt_et(left)}\n"
+                   f"• GEXP earned: {n(gexp)} · required: {n(req)}{'' if required is None else ' (typed)'}"
+                   f"{'' if requirement is None else f' · weekly requirement then: {n(requirement)}'}\n"
+                   f"• GEXP owed: {n(owed_gexp)}\n"
+                   f"• Days added to their total: **{dh_text(days)}**\n• Reason: {esc(reason)}\n"
                    "Press **Confirm** to save it.")
         view = ConfirmView(interaction.user.id)
-        await interaction.followup.send(summary, view=view, ephemeral=True, allowed_mentions=NO_MENTIONS)
+        await interaction.followup.send(summary, view=view, allowed_mentions=NO_MENTIONS)
         if not await view.wait_answer():
             return
         await q_run(
             "INSERT INTO bl_entries (uuid, ign, added_at, added_by, joined_at, left_at, days_total, gexp, required, owed, "
             "reason, status, returned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'returned', ?)",
             (uuid, name, iso(left), str(interaction.user.id), iso(joined) if joined else None, iso(left), days, gexp,
-             req, max(0, req - gexp), reason or None, iso(back)))
+             req, owed_gexp, reason, iso(back)))
         entry_id = (await q_one("SELECT MAX(id) AS i FROM bl_entries WHERE uuid = ?", (uuid,)))["i"]
         count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ? AND COALESCE(no_count, 0) = 0", (uuid,)))["c"]
         total_txt = ""
@@ -3308,10 +3321,10 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
             sid, _ = await self.core.add_day_set(uuid, name, days, f"old breaklist {gc.fmt_date(left)}", interaction.user.id)
             await q_run("UPDATE day_sets SET entry_id = ? WHERE id = ?", (entry_id, sid))
             total, _ = await self.core.days_info(uuid)
-            total_txt = (f" Their **{days:g} days** of that stay were added: total days in the guild now **{int(total)}** "
+            total_txt = (f" Their **{dh_text(days)}** of that stay were added: total days in the guild now **{int(total)}** "
                          f"(remove the set with `/breaklist removedays`: the old breaklist goes away with it).")
         await interaction.edit_original_response(
-            content=f"✅ Old breaklist of **{esc(name)}** saved ({gc.fmt_date(left)} → {gc.fmt_date(back)}). "
+            content=f"✅ Old breaklist of **{esc(name)}** saved ({gc.fmt_date(joined)} → {gc.fmt_date(left)}). "
                     f"They have now been breaklisted **{count}** times.{total_txt} Debt was not changed. "
                     "See it with `/breaklist history`.", view=None)
 
@@ -3569,10 +3582,13 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
 
     @app_commands.command(name="editset", description="Change one set of days: its days or its note (guild staff)")
     @app_commands.describe(ign="Minecraft username of the player", set="Set number (see /breaklist days)",
-                           days="New days of this set, like 14, 14d 3h or 2h 2m", note="New note")
+                           days="New days of this set, like 14, 14d 3h or 2h 2m", note="New note",
+                           date="New date of this set (ET or MT, see /timezone): 2026/07/28 5:28 PM",
+                           owed="New GEXP owed of the breaklist this set belongs to (old breaklists)")
     @app_commands.check(staff_check)
     async def editset(self, interaction: discord.Interaction, ign: str, set: int,
-                      days: Optional[str] = None, note: Optional[str] = None):
+                      days: Optional[str] = None, note: Optional[str] = None, date: Optional[str] = None,
+                      owed: Optional[app_commands.Range[int, 0, 100_000_000]] = None):
         if days is not None:
             try:
                 days = parse_days(days, -5000.0, 5000.0)
@@ -3588,9 +3604,23 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if row is None:
             await interaction.followup.send(f"**{esc(name)}** has no active set #{set}. See `/breaklist days`.")
             return
-        if days is None and note is None:
-            await interaction.followup.send("Give the new `days` and/or a new `note`.")
+        if days is None and note is None and date is None and owed is None:
+            await interaction.followup.send("Give at least one thing to change: `days`, `note`, `date` or `owed`.")
             return
+        new_date = None
+        if date is not None:
+            new_date = gc.parse_et(date)
+            if new_date is None:
+                await interaction.followup.send("I couldn't read the date. Use `2026/07/28 5:28 PM` or `07/28 5:28 PM`.")
+                return
+        if owed is not None:
+            if not row["entry_id"]:
+                await interaction.followup.send(f"Set #{set} is not linked to a breaklist, so it has no GEXP owed to change. "
+                                                "Use `/breaklist edit` for the breaklist itself.")
+                return
+            await q_run("UPDATE bl_entries SET owed = ? WHERE id = ?", (owed, row["entry_id"]))
+        if new_date is not None:
+            await q_run("UPDATE day_sets SET added_at = ? WHERE id = ?", (iso(new_date), set))
         if days is not None:
             prev = await q_one("SELECT banked FROM player_days WHERE uuid = ?", (uuid,))
             new = max(0.0, (prev["banked"] if prev else 0.0) + days - row["days"])
@@ -3600,7 +3630,9 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
         if note is not None:
             await q_run("UPDATE day_sets SET note = ? WHERE id = ?", (note, set))
         total, _ = await self.core.days_info(uuid)
-        await interaction.followup.send(f"✅ Set **#{set}** of **{esc(name)}** changed. Total days in guild now: "
+        await interaction.followup.send(f"✅ Set **#{set}** of **{esc(name)}** changed"
+                                        f"{f' · GEXP owed: {n(owed)}' if owed is not None else ''}"
+                                        f"{f' · date: {gc.fmt_et(new_date)}' if new_date else ''}. Total days in guild now: "
                                         f"**{int(total)}**.", allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="removedays", description="Remove one set of days from a player (guild staff)")
@@ -4167,6 +4199,41 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         elif posted is False:
             await interaction.followup.send("I couldn't post in the inactivity channel (check its id and my permissions).")
 
+    @app_commands.command(name="me", description="Your GEXP this guild week so far, and what is left to reach the requirement")
+    @app_commands.describe(ign="Minecraft username (empty: your linked account)")
+    async def me(self, interaction: discord.Interaction, ign: Optional[str] = None):
+        await interaction.response.defer()
+        if ign:
+            r = await lookup(interaction, ign)
+            if r is None:
+                return
+            uuid, name = r
+        else:
+            row = await q_one("SELECT uuid, ign FROM links WHERE discord_id = ?", (str(interaction.user.id),))
+            if row is None:
+                await interaction.followup.send("Your Discord is not linked to a Minecraft account. Write your username "
+                                                "in `ign`, for example `/gexp me ign:YourName`.")
+                return
+            uuid, name = row["uuid"], row["ign"]
+        now = now_utc()
+        ws = gc.week_start(now)
+        total, count = await self.core.window_sum(uuid, ws, now)
+        if not count:
+            await interaction.followup.send(f"I have no GEXP saved this week for **{esc(name)}** "
+                                            "(not in the guild, or no data yet).", allowed_mentions=NO_MENTIONS)
+            return
+        req = await self.core.req_override(uuid) or gc.WEEKLY_REQ
+        rows = await q_all("SELECT uuid, SUM(gexp) AS t FROM gexp_history WHERE day >= ? GROUP BY uuid ORDER BY t DESC",
+                           (ws.astimezone(gc.ET).date().isoformat(),))
+        pos = next((i for i, x in enumerate(rows, 1) if x["uuid"] == uuid), None)
+        end = gc.week_end(now)
+        left = max(0, req - total)
+        text = (f"**{esc(name)}** · this guild week: **{n(total)}** / {n(req)} GEXP ({total * 100 // req}%)\n"
+                + (f"✅ Requirement reached." if not left else f"Still to earn: **{n(left)}** GEXP.")
+                + (f"\nPosition in the guild this week: **#{pos}** of {len(rows)}." if pos else "")
+                + f"\nThe week ends at the purge: {gc.fmt_et(end)}.")
+        await interaction.followup.send(text, allowed_mentions=NO_MENTIONS)
+
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")
     @app_commands.describe(
         ign="Minecraft username of the player (empty: only calculate what someone joining at `joined` would need)",
@@ -4328,12 +4395,60 @@ class PurgeCog(commands.GroupCog, name="purge", description="Purge evasion check
         if not rows:
             await interaction.followup.send(f"**{esc(name)}** has no strikes.", allowed_mentions=NO_MENTIONS)
             return
-        lines = [f"{'~~' if x['removed'] else ''}**#{x['id']}** · {gc.fmt_et(from_iso(x['at']))} · guild week "
-                 f"**{n(x['week_gexp'])}** / {n(x['required'])} GEXP · last 7 days {n(x['last7'])}"
-                 f"{'~~ (removed)' if x['removed'] else ''}" for x in rows[:15]]
+        lines = [f"{'~~' if x['removed'] else ''}**#{x['id']}** · {gc.fmt_et(from_iso(x['at']))} · "
+                 + (f"guild week **{n(x['week_gexp'])}** / {n(x['required'])} GEXP · last 7 days {n(x['last7'])}"
+                    if x["week_gexp"] is not None else esc(x["reason"] or "By hand"))
+                 + f"{'~~ (removed)' if x['removed'] else ''}" for x in rows[:15]]
         active = sum(1 for x in rows if not x["removed"])
         await interaction.followup.send(f"**{esc(name)}** · **{active}** strike{'s' if active != 1 else ''}\n" + "\n".join(lines)
                                         + "\nRemove one with `/purge removestrike`.", allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="addstrike", description="Give a strike by hand, with the date you want (guild staff)")
+    @app_commands.describe(ign="Minecraft username", date="When the strike was given (ET or MT, see /timezone). Default: now",
+                           reason="Why (shown in /purge strikes)")
+    @app_commands.check(staff_check)
+    async def addstrike(self, interaction: discord.Interaction, ign: str, date: Optional[str] = None,
+                        reason: Optional[str] = None):
+        await interaction.response.defer()
+        when = now_utc()
+        if date:
+            when = gc.parse_et(date)
+            if when is None:
+                await interaction.followup.send("I couldn't read the date. Use `2026/11/03 5:28 PM` or `11/03 5:28 PM`.")
+                return
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        await q_run("INSERT INTO strikes (uuid, ign, purge_week, at, week_gexp, required, last7, reason) "
+                    "VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)",
+                    (uuid, name, f"manual-{int(time.time() * 1000)}", iso(when), reason or "Added by hand"))
+        row = await q_one("SELECT MAX(id) AS i FROM strikes WHERE uuid = ?", (uuid,))
+        active = (await q_one("SELECT COUNT(*) AS c FROM strikes WHERE uuid = ? AND removed = 0", (uuid,)))["c"]
+        await interaction.followup.send(f"✅ Strike **#{row['i']}** given to **{esc(name)}** on {gc.fmt_et(when)}. "
+                                        f"They have **{active}** now. Change its date with `/purge strikedate`.",
+                                        allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="strikedate", description="Change the date of a strike (guild staff)")
+    @app_commands.describe(ign="Minecraft username", number="Strike number (see /purge strikes)",
+                           date="New date (ET or MT, see /timezone): 2026/11/03 5:28 PM")
+    @app_commands.check(staff_check)
+    async def strikedate(self, interaction: discord.Interaction, ign: str, number: int, date: str):
+        await interaction.response.defer()
+        when = gc.parse_et(date)
+        if when is None:
+            await interaction.followup.send("I couldn't read the date. Use `2026/11/03 5:28 PM` or `11/03 5:28 PM`.")
+            return
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        if await q_one("SELECT id FROM strikes WHERE id = ? AND uuid = ?", (number, uuid)) is None:
+            await interaction.followup.send(f"**{esc(name)}** has no strike #{number}.", allowed_mentions=NO_MENTIONS)
+            return
+        await q_run("UPDATE strikes SET at = ? WHERE id = ?", (iso(when), number))
+        await interaction.followup.send(f"✅ Strike #{number} of **{esc(name)}** is now dated {gc.fmt_et(when)}.",
+                                        allowed_mentions=NO_MENTIONS)
 
     @app_commands.command(name="removestrike", description="Remove a strike by mistake (guild staff)")
     @app_commands.describe(ign="Minecraft username", number="Strike number (see /purge strikes)")

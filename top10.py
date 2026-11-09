@@ -279,23 +279,39 @@ class TopGexp(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="topgexp", description="Top 10 GEXP of the week: text to copy and an image (guild staff)")
-    @app_commands.describe(week="Which week (default: the last one, already purged)",
+    @app_commands.describe(week="Which week (default: this week so far)",
                            page="Start from this page (the buttons move between pages)")
-    @app_commands.choices(week=[app_commands.Choice(name="Last week", value="last"),
-                                app_commands.Choice(name="This week so far", value="this")])
+    @app_commands.choices(week=[app_commands.Choice(name="This week so far", value="this"),
+                                app_commands.Choice(name="Last week", value="last")])
     @app_commands.check(staff_check)
-    async def topgexp(self, interaction: discord.Interaction, week: Optional[str] = "last",
+    async def topgexp(self, interaction: discord.Interaction, week: Optional[str] = "this",
                       page: app_commands.Range[int, 1, 20] = 1):
         await interaction.response.defer()
         core = self.bot.np_core
-        res = await build_page(core, week or "last", page)
+        res = await build_page(core, week or "this", page)
         if res is None:
             await interaction.followup.send("I have no saved GEXP for that week.")
             return
         text, card, page, pages = res
         await interaction.followup.send(content=text, file=send_file(card, "top10.png"),
-                                        view=TopView(core, week or "last", page, pages),
+                                        view=TopView(core, week or "this", page, pages),
                                         allowed_mentions=discord.AllowedMentions.none())
+
+
+    @app_commands.command(name="gtop", description="The top 10 GEXP of the guild this week, even if it is not over yet")
+    async def gtop(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        core = self.bot.np_core
+        rows, a, b, page, pages = await top_rows(core, "this", 1)
+        if not rows:
+            await interaction.followup.send("I have no saved GEXP for this week yet.")
+            return
+        for r in rows:
+            await load_flag(r["uuid"], r["ign"])
+        heads = await g._fetch_heads([(r["uuid"], r["ign"]) for r in rows])
+        sub = f"{bl.GUILD_NAME_DISPLAY} · this week so far · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
+        card = await asyncio.to_thread(draw_top10, rows, heads, sub, 1, None)
+        await interaction.followup.send(file=send_file(card, "top10.png"))
 
 
 async def setup(bot: commands.Bot):

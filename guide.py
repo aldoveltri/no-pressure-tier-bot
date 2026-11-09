@@ -67,6 +67,50 @@ START_PAGES = [
     ]},
 ]
 
+def _elo_pages():
+    """The elo tables and the tiers, from the same numbers the bot uses (elo.py and config.py)."""
+    from elo import WIN, LOSS, WIN5, LOSS5
+    def f3(v):
+        return " / ".join(f"{x:+d}" for x in v)
+    def f5(v):
+        return "/".join(f"{x:+d}" for x in v)
+    tiers = []
+    for i, (name, minimum) in enumerate(TIER_RANGES):
+        tiers.append(f"{name} {minimum}+" if i == 0 else f"{name} {minimum}-{TIER_RANGES[i - 1][1] - 1}")
+    keys = [("100+ higher", "molto_alto"), ("35 to 99 higher", "alto"), ("within 34", "normale"),
+            ("35 to 99 lower", "basso"), ("100+ lower", "molto_basso")]
+    names3 = ", ".join(["Normal"] + [m["name"] for m in MODES if m["system"] == "ft3"])
+    pages = [{"title": "Elo & tiers", "blocks": [
+        _p(f"{names3}: every match is first to 3. The points depend on the score and on the elo difference with "
+           "your opponent: beating a stronger player gives more points, losing to a weaker one costs more. "
+           "Elo never goes below 0."),
+        {"type": "table", "cols": ["Opponent's elo vs yours", "You win (3-0 / 3-1 / 3-2)", "You lose (3-0 / 3-1 / 3-2)"],
+         "widths": [0.30, 0.35, 0.35], "colors": ["text", "green", "red"],
+         "rows": [[t, f3(WIN[k]), f3(LOSS[k])] for t, k in keys]},
+        _h("Tiers"),
+        _p("Your tier is decided by your elo (the same tiers in every mode):"),
+        _p("   ·   ".join(tiers)),
+    ]}]
+    if any(m["system"] == "ft5" for m in MODES):
+        names5 = ", ".join(m["name"] for m in MODES if m["system"] == "ft5")
+        pages.append({"title": "Classic 1v1 elo (FT5)", "blocks": [
+            _p(f"{names5}: every match is first to 5. The points depend on the score (the games won by the loser: "
+               "0, 1, 2, 3 or 4) and on the elo difference with your opponent."),
+            {"type": "table", "cols": ["Opponent's elo vs yours", "You win (5-0/5-1/5-2/5-3/5-4)",
+                                       "You lose (0-5/1-5/2-5/3-5/4-5)"],
+             "widths": [0.26, 0.38, 0.36], "colors": ["text", "green", "red"],
+             "rows": [[t, f5(WIN5[k]), f5(LOSS5[k])] for t, k in keys]},
+            _p("Elo never goes below 0."),
+        ]})
+    return pages
+
+
+try:
+    START_PAGES[4:4] = _elo_pages()          # right after "1v1 tier tests"
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).exception("The elo pages of /guide could not be built: %s", _e)
+
 TESTER_PAGES = [
     {"title": "Logging matches", "blocks": [
         _p("For the Tier Tester role. You can set tiers and elo and log, fix or cancel matches. You cannot end "

@@ -161,7 +161,7 @@ async def extras_text(core, week, top_ids):
     return "\n".join(out)
 
 
-def draw_top10(rows, heads, subtitle, start=1, mark=None):
+def draw_top10(rows, heads, subtitle, start=1, mark=None, simple=False):
     row_h = 84
     top = g.HEADER_H + 20
     height = top + len(rows) * row_h + g.FOOTER_H
@@ -178,14 +178,16 @@ def draw_top10(rows, heads, subtitle, start=1, mark=None):
         d.text((g.PAD + 54, cy), f"#{start + i}", font=g.get_font(26 if start + i < 100 else 20, True), fill=color, anchor="mm")
         hx = g.PAD + 100
         g._paste_head(img, d, heads.get(r["uuid"]), hx, cy - g.HEAD // 2, g.HEAD)
-        _name_flag(img, d, hx + g.HEAD + 14, cy - 11, r["ign"], g.get_font(26, True))
-        d.text((hx + g.HEAD + 14, cy + 19), promotion_text(r["rank"]) if start + i <= 10 else (r["rank"] or ""),
-               font=g.get_font(15), fill=g.MUTED, anchor="lm")
+        _name_flag(img, d, hx + g.HEAD + 14, cy if simple else cy - 11, r["ign"], g.get_font(26, True))
+        if not simple:
+            d.text((hx + g.HEAD + 14, cy + 19), promotion_text(r["rank"]) if start + i <= 10 else (r["rank"] or ""),
+                   font=g.get_font(15), fill=g.MUTED, anchor="lm")
         d.text((g.WIDTH - g.PAD - 24, cy), n(r["gexp"]), font=g.get_font(28, True), fill=g.TEXT, anchor="rm")
     counts = {}
     for r in rows:
         counts[r["rank"] or "?"] = counts.get(r["rank"] or "?", 0) + 1
-    g._footer(d, height, "Ranks on Hypixel: " + " · ".join(f"{k} {v}" for k, v in counts.items()))
+    g._footer(d, height, "This week so far" if simple else
+              "Ranks on Hypixel: " + " · ".join(f"{k} {v}" for k, v in counts.items()))
     return g._png(img)
 
 
@@ -310,7 +312,7 @@ class TopGexp(commands.Cog):
             await load_flag(r["uuid"], r["ign"])
         heads = await g._fetch_heads([(r["uuid"], r["ign"]) for r in rows])
         sub = f"{bl.GUILD_NAME_DISPLAY} · this week so far · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
-        card = await asyncio.to_thread(draw_top10, rows, heads, sub, 1, None)
+        card = await asyncio.to_thread(draw_top10, rows, heads, sub, 1, None, True)
         await interaction.followup.send(file=send_file(card, "top10.png"))
 
 

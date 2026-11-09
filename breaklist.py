@@ -1084,7 +1084,7 @@ def draw_gexp_me(name, head, total, req, pos, count, end, secs_left, daily=()):
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
     g._header(d, "MY GEXP", f"{GUILD_NAME_DISPLAY} · this guild week so far")
-    _identity(img, d, top, name, head, status, color, f"Purge {gc.fmt_et(end)}", id_h)
+    _identity(img, d, top, name, head, status, color, None, id_h)
     y = top + id_h + gap
     d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + bar_h], radius=16, fill=g.ROW_BG)
     bx0, bx1 = g.PAD + 28, g.WIDTH - g.PAD - 28
@@ -1094,7 +1094,7 @@ def draw_gexp_me(name, head, total, req, pos, count, end, secs_left, daily=()):
     if frac > 0:
         d.rounded_rectangle([bx0, by - 11, bx0 + max(14, int((bx1 - bx0) * frac)), by + 11], radius=11,
                             fill=g.GREEN if done else g.ACCENT)
-    d.text((bx0, y + 22), "PROGRESS THIS WEEK", font=g.get_font(14, True), fill=g.MUTED, anchor="lm")
+    d.text((bx0, y + 22), f"PROGRESS THIS WEEK  ·  NEXT PURGE {gc.fmt_et(end)}", font=g.get_font(14, True), fill=g.MUTED, anchor="lm")
     d.text((bx1, y + 22), f"{total * 100 // max(1, req)}%", font=g.get_font(16, True), fill=g.TEXT, anchor="rm")
     y += bar_h + gap
     bw = (g.WIDTH - 2 * g.PAD - 2 * gap) // 3

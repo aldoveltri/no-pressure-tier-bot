@@ -191,7 +191,7 @@ def draw_top10(rows, heads, subtitle, start=1, mark=None, simple=False):
     return g._png(img)
 
 
-async def build_page(core, week, page, mark=None):
+async def build_page(core, week, page, mark=None, simple=False):
     """(text, png, page, pages) of one page of the top, or None when there is no data."""
     rows, a, b, page, pages = await top_rows(core, week, page)
     if not rows:
@@ -200,9 +200,11 @@ async def build_page(core, week, page, mark=None):
         await load_flag(r["uuid"], r["ign"])
     heads = await g._fetch_heads([(r["uuid"], r["ign"]) for r in rows])
     start = (page - 1) * 10 + 1
-    sub = (f"{bl.GUILD_NAME_DISPLAY} · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
+    sub = (f"{bl.GUILD_NAME_DISPLAY} · {'this week so far · ' if simple else ''}{a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
            + (f" · page {page}/{pages}" if pages > 1 else ""))
-    card = await asyncio.to_thread(draw_top10, rows, heads, sub, start, mark)
+    card = await asyncio.to_thread(draw_top10, rows, heads, sub, start, mark, simple)
+    if simple:
+        return "", card, page, pages
     top_ids = [r["uuid"] for r in (await ranking(core, week))[0][:10]]
     streaks = await streaks_of(week, top_ids, [r["uuid"] for r in rows if r["uuid"] in top_ids])
     text = top_text(rows, start, streaks)
@@ -230,20 +232,20 @@ class SearchModal(discord.ui.Modal, title="Find a player in the top"):
         pos, uuid, name, gexp = found
         self.view.page, self.view.mark = (pos - 1) // 10 + 1, uuid
         await interaction.response.defer()
-        res = await build_page(self.view.core, self.view.week, self.view.page, uuid)
+        res = await build_page(self.view.core, self.view.week, self.view.page, uuid, self.view.simple)
         text, card, page, pages = res
         await interaction.edit_original_response(
             content=f"🔍 **{esc(name)}** is **#{pos}** with **{n(gexp)}** GEXP.\n" + text, attachments=[send_file(card, "top10.png")],
-            view=TopView(self.view.core, self.view.week, page, pages, uuid),
+            view=TopView(self.view.core, self.view.week, page, pages, uuid, self.view.simple),
             allowed_mentions=discord.AllowedMentions.none())
 
 
 class TopView(discord.ui.View):
     """Previous / Next buttons under /topgexp."""
 
-    def __init__(self, core, week, page, pages, mark=None):
+    def __init__(self, core, week, page, pages, mark=None, simple=False):
         super().__init__(timeout=900)
-        self.core, self.week, self.page, self.pages, self.mark = core, week, page, pages, mark
+        self.core, self.week, self.page, self.pages, self.mark, self.simple = core, week, page, pages, mark, simple
         self.prev = discord.ui.Button(label="◀ Previous", style=discord.ButtonStyle.primary, disabled=page <= 1)
         self.nxt = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.primary, disabled=page >= pages)
         self.prev.callback, self.nxt.callback = self.on_prev, self.on_next
@@ -258,13 +260,13 @@ class TopView(discord.ui.View):
 
     async def show(self, interaction):
         await interaction.response.defer()
-        res = await build_page(self.core, self.week, self.page, self.mark)
+        res = await build_page(self.core, self.week, self.page, self.mark, self.simple)
         if res is None:
             await interaction.edit_original_response(content="Nothing to show.", attachments=[], view=None)
             return
         text, card, page, pages = res
-        await interaction.edit_original_response(content=text, attachments=[send_file(card, "top10.png")],
-                                                 view=TopView(self.core, self.week, page, pages, self.mark),
+        await interaction.edit_original_response(content=text or None, attachments=[send_file(card, "top10.png")],
+                                                 view=TopView(self.core, self.week, page, pages, self.mark, self.simple),
                                                  allowed_mentions=discord.AllowedMentions.none())
 
     async def on_prev(self, interaction):
@@ -303,17 +305,13 @@ class TopGexp(commands.Cog):
     @app_commands.command(name="gtop", description="The top 10 GEXP of the guild this week, even if it is not over yet")
     async def gtop(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        core = self.bot.np_core
-        rows, a, b, page, pages = await top_rows(core, "this", 1)
-        if not rows:
+        res = await build_page(self.bot.np_core, "this", 1, None, True)
+        if res is None:
             await interaction.followup.send("I have no saved GEXP for this week yet.")
             return
-        for r in rows:
-            await load_flag(r["uuid"], r["ign"])
-        heads = await g._fetch_heads([(r["uuid"], r["ign"]) for r in rows])
-        sub = f"{bl.GUILD_NAME_DISPLAY} · this week so far · {a[5:].replace('-', '/')} to {b[5:].replace('-', '/')}"
-        card = await asyncio.to_thread(draw_top10, rows, heads, sub, 1, None, True)
-        await interaction.followup.send(file=send_file(card, "top10.png"))
+        text, card, page, pages = res
+        await interaction.followup.send(file=send_file(card, "top10.png"),
+                                        view=TopView(self.bot.np_core, "this", page, pages, None, True))
 
 
 async def setup(bot: commands.Bot):

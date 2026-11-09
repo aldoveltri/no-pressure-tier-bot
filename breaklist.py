@@ -1074,12 +1074,13 @@ def draw_eligibility(name, head, days, total, owed, source, subtitle="last 7 day
 
 # ---------- /gexp missing ----------
 
-def draw_gexp_me(name, head, total, req, pos, count, end, secs_left):
+def draw_gexp_me(name, head, total, req, pos, count, end, secs_left, daily=()):
     id_h, box_h, gap, bar_h = 130, 110, 14, 86
     top = g.HEADER_H + 16
     done = total >= req
     status, color = ("REQUIREMENT MET", g.GREEN) if done else ("KEEP GOING", g.ACCENT)
-    height = top + id_h + gap + bar_h + gap + 2 * (box_h + gap) + g.FOOTER_H
+    day_h = 34 + len(daily) * 40 + 10 if daily else 0
+    height = top + id_h + gap + bar_h + gap + 2 * (box_h + gap) + (day_h + gap if daily else 0) + g.FOOTER_H
     img = Image.new("RGB", (g.WIDTH, height), g.BG)
     d = ImageDraw.Draw(img)
     g._header(d, "MY GEXP", f"{GUILD_NAME_DISPLAY} · this guild week so far")
@@ -1108,6 +1109,22 @@ def draw_gexp_me(name, head, total, req, pos, count, end, secs_left):
     _box(d, g.PAD + bw + gap, y, bw, box_h, "TIME LEFT", gc.fmt_duration(max(0, secs_left)), sub="until the purge")
     _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "PER DAY NEEDED", n(-(-left // days_left)) if left else "0",
          sub=f"over {days_left} day{'s' if days_left != 1 else ''}")
+    y += box_h + gap
+    if daily:
+        d.rounded_rectangle([g.PAD, y, g.WIDTH - g.PAD, y + day_h], radius=16, fill=g.ROW_BG)
+        d.text((g.PAD + 28, y + 22), "DAY BY DAY (A NEW DAY STARTS AT 12:00 AM ET)", font=g.get_font(14, True),
+               fill=g.MUTED, anchor="lm")
+        top_v = max([v for _, v in daily] + [1])
+        bx0, bx1 = g.PAD + 190, g.WIDTH - g.PAD - 150
+        for i, (day, v) in enumerate(daily):
+            ry = y + 34 + i * 40 + 20
+            d.text((g.PAD + 28, ry), day, font=g.get_font(17, True), fill=g.SOFT, anchor="lm")
+            d.rounded_rectangle([bx0, ry - 8, bx1, ry + 8], radius=8, fill=g.TRACK)
+            w = int((bx1 - bx0) * v / top_v)
+            if w > 0:
+                d.rounded_rectangle([bx0, ry - 8, bx0 + max(10, w), ry + 8], radius=8, fill=g.ACCENT)
+            d.text((g.WIDTH - g.PAD - 28, ry), n(v), font=g.get_font(19, True),
+                   fill=g.TEXT if v else g.MUTED, anchor="rm")
     g._footer(d, height, f"Times in {gc.TZ_NAME}")
     return g._png(img)
 
@@ -4266,8 +4283,18 @@ class GexpTools(commands.GroupCog, name="gexp", description="GEXP requirement to
         pos = next((i for i, x in enumerate(rows, 1) if x["uuid"] == uuid), None)
         end = gc.week_end(now)
         heads = await g._fetch_heads([(uuid, name)])
+        today = now.astimezone(gc.ET).date()
+        first_day = max(ws.astimezone(gc.ET).date(), today - timedelta(days=6))
+        have = {r["day"]: r["gexp"] for r in await q_all(
+            "SELECT day, SUM(gexp) AS gexp FROM gexp_history WHERE uuid = ? AND day >= ? GROUP BY day",
+            (uuid, first_day.isoformat()))}
+        daily = []
+        day = today
+        while day >= first_day:
+            daily.append((f"{day.strftime('%a')} {day.month:02d}/{day.day:02d}", int(have.get(day.isoformat(), 0))))
+            day -= timedelta(days=1)
         card = await asyncio.to_thread(draw_gexp_me, name, heads.get(uuid), total, req, pos, len(rows), end,
-                                       (end - now).total_seconds())
+                                       (end - now).total_seconds(), daily)
         await interaction.followup.send(file=send_file(card, "my_gexp.png"))
 
     @app_commands.command(name="missing", description="How much GEXP a player must earn this week, extra debt included (guild staff)")

@@ -566,8 +566,8 @@ def draw_breaklist_card(e, head, title, count):
         if ret:
             rd = datetime.fromisoformat(ret).replace(tzinfo=gc.ET)
             left_days = (rd.date() - now_utc().astimezone(gc.ET).date()).days
-            when = "today" if left_days == 0 else (f"in {left_days} days" if left_days > 0 else f"{-left_days} days ago")
-            items.append(("EXPECTED RETURN", gc.fmt_date(rd), None, when, g.MUTED, 26))
+            when = "today" if left_days == 0 else (f"in {left_days} days" if left_days > 0 else f"{-left_days} day{'s' if left_days != -1 else ''} overdue")
+            items.append(("EXPECTED RETURN", rd.strftime("%m/%d/%Y"), None, when, g.MUTED, 26))   # a plain date: no time zone shift
         wk = (g.WIDTH - 2 * g.PAD - gap * (len(items) - 1)) // len(items)
         for i, (lab, val, col, sub_t, sub_c, sz) in enumerate(items):
             _box(d, g.PAD + i * (wk + gap), y, wk, box_h, lab, val, col, size=sz, sub=sub_t, sub_color=sub_c)

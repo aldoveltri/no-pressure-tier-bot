@@ -1428,7 +1428,8 @@ def draw_road(ours, targets, series, title):
         d.rounded_rectangle([lx, ly - 7, lx + 14, ly + 7], radius=3, fill=color(i))
         d.text((lx + 22, ly), label, font=g.get_font(14), fill=g.SOFT, anchor="lm")
         lx += w + 6
-    g._footer(d, height, "GEXP = total guild experience")
+    win = ours.get("window_days") if isinstance(ours, dict) else None
+    g._footer(d, height, "GEXP = total guild experience" + (f" · ETA from the average of the last {win} days" if win else ""))
     return g._png(img)
 
 
@@ -2296,7 +2297,9 @@ class Core:
         text = "\n".join(f"{n(t['gap'])} gexp from #{t['rank']} guild" for t in targets)
         if missing:
             text += "\n(Not found on Hypixel: " + ", ".join(missing) + ")"
-        return {"ours": {"name": our_name, "exp": our_exp, "rank": rank}, "targets": targets,
+        _d = sorted(by_guild.get(our_name, {}))
+        window = min(30, (datetime.fromisoformat(_d[-1]) - datetime.fromisoformat(_d[max(0, len(_d) - 31)])).days) if len(_d) >= 2 else 0
+        return {"ours": {"name": our_name, "exp": our_exp, "rank": rank, "window_days": window}, "targets": targets,
                 "series": series, "title": title, "text": text}, None
 
     async def road_card(self, data):
@@ -3809,12 +3812,31 @@ class Breaklist(commands.GroupCog, name="breaklist", description="Guild breaklis
                            number="With manage: which one (from the list)")
     @app_commands.choices(manage=[app_commands.Choice(name="Show the list", value="list"),
                                   app_commands.Choice(name="Replace the text of one", value="replace"),
-                                  app_commands.Choice(name="Delete one", value="delete")])
+                                  app_commands.Choice(name="Delete one", value="delete"),
+                                  app_commands.Choice(name="Delete all (reset)", value="reset")])
     @app_commands.check(staff_check)
     async def guildhistory(self, interaction: discord.Interaction, ign: str, image: Optional[discord.Attachment] = None,
                            image2: Optional[discord.Attachment] = None, text: Optional[str] = None,
                            manage: Optional[app_commands.Choice[str]] = None, number: Optional[int] = None):
         await interaction.response.defer()
+        if manage is not None and manage.value == "reset":
+            r = await lookup(interaction, ign)
+            if r is None:
+                return
+            uuid, name = r
+            saved = json.loads(await kv_get(f"ghist:{uuid}") or "[]")
+            gone = 0
+            for x in saved:
+                try:
+                    chan = self.core.bot.get_channel(x["ch"]) or await self.core.bot.fetch_channel(x["ch"])
+                    await (await chan.fetch_message(x["msg"])).delete()
+                    gone += 1
+                except discord.HTTPException:
+                    pass                                   # already deleted: nothing to remove
+            await kv_set(f"ghist:{uuid}", "[]")
+            await interaction.followup.send(f"🗑️ Guild history of **{esc(name)}** reset: {len(saved)} removed from the list "
+                                            f"({gone} messages deleted). Add the new one with `/breaklist guildhistory`.")
+            return
         if manage is not None:
             await self._ghist_manage(interaction, ign, None if manage.value == "list" else number, text,
                                      manage.value == "delete")

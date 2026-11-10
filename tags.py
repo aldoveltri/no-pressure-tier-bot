@@ -249,7 +249,7 @@ async def poll_message(bot, pid):
     started = p["started_name"] or "?"
     png = await asyncio.to_thread(draw_poll, p, pills, yes, no, options, started, final)
     view = discord.ui.View(timeout=None)
-    for act in {"picking": ("pick", "skip", "cx"), "phase1": ("yes", "no", "cx"),
+    for act in {"picking": ("pick", "skip", "cx"), "phase1": ("yes", "no", "skip", "cx"),
                 "phase2": ("sug", "vote", "close", "cx")}.get(p["status"], ()):
         view.add_item(PollButton(act, pid))
     return None, discord.File(__import__("io").BytesIO(png), filename="tagvote.png"), view

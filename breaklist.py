@@ -1129,6 +1129,31 @@ def draw_gexp_me(name, head, total, req, pos, count, end, secs_left, daily=()):
     return g._png(img)
 
 
+DEPARTURE_STATUS = {"suspect": ("PURGE EVADED", (230, 80, 90)), "met": ("HAD THE GEXP", (60, 200, 120)),
+                    "breaklist": ("BREAKLISTED", (240, 190, 40)), "excused": ("EXCUSED", (240, 190, 40))}
+
+
+def draw_departure(e, head):
+    """The picture for someone who left the guild: the GEXP of that week up to the moment they left."""
+    id_h, box_h, gap = 130, 110, 14
+    top = g.HEADER_H + 16
+    label, color = DEPARTURE_STATUS[e["status"]]
+    height = top + id_h + gap + box_h + g.FOOTER_H + 16
+    img = Image.new("RGB", (g.WIDTH, height), g.BG)
+    d = ImageDraw.Draw(img)
+    g._header(d, "LEFT THE GUILD", f"{GUILD_NAME_DISPLAY} · GEXP of the week until they left")
+    _identity(img, d, top, e["ign"], head, label, color, None, id_h)
+    y = top + id_h + gap
+    bw = (g.WIDTH - 2 * g.PAD - 2 * gap) // 3
+    _box(d, g.PAD, y, bw, box_h, "EARNED", n(e["earned"]), g.GREEN if e["short"] == 0 else g.TEXT)
+    _box(d, g.PAD + bw + gap, y, bw, box_h, "NEEDED BY THEN", n(e["required"]),
+         sub=f"in {gc.fmt_duration(e['stay'])}")
+    _box(d, g.PAD + 2 * (bw + gap), y, bw, box_h, "SHORT", f"-{n(e['short'])}" if e["short"] else "0",
+         g.RED if e["short"] else g.GREEN)
+    g._footer(d, height, f"Left {gc.fmt_et(e['left'])}")
+    return g._png(img)
+
+
 def draw_missing(name, head, joined, purge, r, start, current, extra_note):
     id_h, box_h, gap = 130, 110, 14
     top = g.HEADER_H + 16
@@ -1454,8 +1479,32 @@ class Core:
                     await db.execute(
                         "INSERT INTO gexp_history (uuid, day, gexp) VALUES (?, ?, ?) "
                         "ON CONFLICT(uuid, day) DO UPDATE SET gexp = excluded.gexp", (uuid, day, int(value)))
+            self._new_departures = []
             await self._track_departures(db, before, set(members), stamp)
             await db.commit()
+        try:
+            await self.announce_departures(list(self._new_departures))
+        except Exception:
+            log.exception("Could not announce who left the guild")
+
+    async def announce_departures(self, uuids):
+        """A post with a picture in the guild-bridge channel for each player that just left or was removed."""
+        if not uuids or not await alerts.enabled("leave_message") or chan_id("GUILD_BRIDGE_CHANNEL_ID") is None:
+            return
+        for uuid in uuids[:12]:
+            rows = await self.purge_rows(uuid=uuid)
+            if not rows:
+                continue
+            e = rows[0]
+            await load_flag(uuid, e["ign"])
+            heads = await g._fetch_heads([(uuid, e["ign"])])
+            card = await asyncio.to_thread(draw_departure, e, heads.get(uuid))
+            label = {"suspect": "purge evasion", "met": "had the GEXP", "breaklist": "breaklisted",
+                     "excused": "excused"}[e["status"]]
+            await self.post_to("GUILD_BRIDGE_CHANNEL_ID", content=f"**{esc(e['ign'])}** left the guild ({label}).",
+                               data=card, filename="left.png")
+        if len(uuids) > 12:
+            await self.post_to("GUILD_BRIDGE_CHANNEL_ID", content=f"…and {len(uuids) - 12} more left the guild.")
 
     async def _track_departures(self, db, before, current, stamp):
         """Members that were in the guild at the last snapshot and are not now have left: remember when
@@ -1464,6 +1513,7 @@ class Core:
             cur = await db.execute("SELECT value FROM kv WHERE key = 'left_tracking'")
             started = await cur.fetchone()
             gone = before - current
+            self._new_departures = []
             if gone and not started:
                 # first run of this feature: whoever is already missing left at an unknown time, do not guess
                 await db.execute("UPDATE guild_seen SET in_guild = 0 WHERE uuid IN (%s)" % ",".join("?" * len(gone)),
@@ -1479,6 +1529,7 @@ class Core:
                         "INSERT INTO guild_left (uuid, joined_at, left_at, detected_at) VALUES (?, ?, ?, ?)",
                         (uuid, row[0] if row else None, (row[1] if row and row[1] else stamp), stamp))
                     await db.execute("UPDATE guild_seen SET in_guild = 0 WHERE uuid = ?", (uuid,))
+                    self._new_departures.append(uuid)
         await db.execute("INSERT OR IGNORE INTO kv (key, value) VALUES ('left_tracking', ?)", (stamp,))
         if current:
             await db.execute("UPDATE guild_left SET rejoined_at = ? WHERE rejoined_at IS NULL AND uuid IN (%s)"
@@ -2019,6 +2070,8 @@ class Core:
         view = discord.ui.View(timeout=None)
         view.add_item(RequestButton("ok", rid))
         view.add_item(RequestButton("no", rid))
+        if kind == "excuse":
+            view.add_item(RequestButton("bl", rid))          # many players mix up an excusal and the breaklist
         view.add_item(RequestButton("cx", rid))
         role = _env("REQUESTS_PING_ROLE_ID")
         content = f"<@&{role}>" if role.isdigit() else None
@@ -2916,11 +2969,11 @@ def _weeks_from(text):
     return max(1, min(w, 8))
 
 
-class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:(?P<act>ok|no|cx):(?P<rid>\d+)"):
+class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:(?P<act>ok|no|cx|bl):(?P<rid>\d+)"):
     """Accept / Decline (staff only) and Cancel (the requester or the staff) under a request."""
-    LABELS = {"ok": "Accept", "no": "Decline", "cx": "Cancel request"}
+    LABELS = {"ok": "Accept", "no": "Decline", "cx": "Cancel request", "bl": "Breaklist them instead"}
     STYLES = {"ok": discord.ButtonStyle.success, "no": discord.ButtonStyle.danger,
-              "cx": discord.ButtonStyle.secondary}
+              "cx": discord.ButtonStyle.secondary, "bl": discord.ButtonStyle.primary}
 
     def __init__(self, act: str, rid: int):
         super().__init__(discord.ui.Button(label=self.LABELS[act], style=self.STYLES[act],
@@ -2961,8 +3014,9 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:
         await interaction.response.defer()
         name = row["ign"] or await core.name_for(row["uuid"])
         staff = interaction.user
-        if self.act == "ok":
-            if row["kind"] == "breaklist":
+        as_breaklist = row["kind"] == "breaklist" or self.act == "bl"
+        if self.act in ("ok", "bl"):
+            if as_breaklist:
                 reason = row["reason"] or "Requested by the player"
                 if row["duration"]:
                     reason = f"{reason} (away: {row['duration']})"
@@ -2993,7 +3047,11 @@ class RequestButton(discord.ui.DynamicItem[discord.ui.Button], template=r"np:rq:
         # the player cannot see the staff request channel: the answer goes to the inactivity notices
         text = (f"<@{row['requester_id']}> your {row['kind']} request for **{esc(name)}** was {word} "
                 f"by {esc(staff.display_name)}.")
-        if status == "accepted" and row["kind"] == "breaklist":
+        if status == "accepted" and self.act == "bl":
+            text = (f"<@{row['requester_id']}> you asked to be excused, but **{esc(name)}** was put on the "
+                    f"**breaklist** instead, by {esc(staff.display_name)} (an excusal is for a short time while you "
+                    "stay in the guild; the breaklist is for leaving it for a while).")
+        if status == "accepted" and as_breaklist:
             text += "\n\n" + await welcome_text()
         posted = await core.post_to("INACTIVITY_CHANNEL_ID", content=text, mentions=USER_MENTIONS,
                                     thread_name="Requests", thread_key="inactivity_requests_thread")

@@ -15,6 +15,7 @@ ALERTS = {
     "breaklist_edit": ("Breaklist edit posts", "The new card posted in the breaklist thread when a staff member edits an entry or its debt"),
     "guild_history": ("Guild history image", "The 'Guild history we know' image posted under a new breaklist notice"),
     "blacklist_card": ("Blacklist picture", "The picture of the entry posted in the blacklist channel when someone is blacklisted"),
+    "leave_message": ("Leave announcement", "The post with a picture in the guild-bridge channel when someone leaves or is removed from the guild (their week's GEXP, if they evaded the purge, country)"),
     "rejoin_message": ("Rejoin message", "The welcome-back post that pings the player and says the scaled GEXP they need when /breaklist remove takes them off the breaklist"),
     "urchin": ("Urchin alerts", "The automatic post in the evidence channel when a guild member gets an Urchin tag"),
 }

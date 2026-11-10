@@ -1757,6 +1757,9 @@ class Core:
         banked = row["banked"] if row else 0.0
         if await q_one("SELECT id FROM bl_entries WHERE uuid = ? AND status = 'active'", (uuid,)):
             return banked, "breaklist"
+        members = await self.guild_members()
+        if members and uuid not in members:               # not in the guild now: no stay is running, only the saved days
+            return banked, "left"
         joined = await self.joined_for(uuid)
         if joined:
             anchor = await kv_get("daysanchor:" + uuid)        # /breaklist update: the stay up to then is already banked
@@ -1971,6 +1974,14 @@ class Core:
         if expected_return:
             await q_run("UPDATE bl_entries SET expected_return = ? WHERE id = ?", (expected_return, entry_id))
         entry = await q_one("SELECT * FROM bl_entries WHERE id = ?", (entry_id,))
+        try:
+            # the player left the guild because of this breaklist: it is not a "left" and not a purge strike
+            await q_run("DELETE FROM guild_left WHERE uuid = ? AND rejoined_at IS NULL AND left_at >= ?",
+                        (uuid, iso(min(end, now_utc()) - timedelta(days=10))))
+            await q_run("DELETE FROM strikes WHERE uuid = ? AND removed = 0 AND at >= ?",
+                        (uuid, iso(min(end, now_utc()) - timedelta(days=10))))
+        except Exception:
+            log.exception("Could not clean the departure of %s after the breaklist", name)
         count = (await q_one("SELECT COUNT(*) AS c FROM bl_entries WHERE uuid = ? AND COALESCE(no_count, 0) = 0", (uuid,)))["c"]
         return {"entry": entry, "count": count}
 

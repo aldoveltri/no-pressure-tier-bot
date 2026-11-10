@@ -181,8 +181,11 @@ async def gather_player(bot, uuid, name):
     # a breaklist is not "leaving the guild": hide the left records that coincide (same day +-1) with a breaklist
     _bl_days = {from_iso(x["left_at"]).date() for x in (await QA("SELECT left_at FROM bl_entries WHERE uuid = ?", uuid))
                 if x.get("left_at")}
+    _bl_added = {from_iso(x["added_at"]).date() for x in (await QA("SELECT added_at FROM bl_entries WHERE uuid = ?", uuid))
+                 if x.get("added_at")}
     d["left"] = [x for x in d["left"]
-                 if not any(abs((from_iso(x["left_at"]).date() - b).days) <= 1 for b in _bl_days)]
+                 if not any(abs((from_iso(x["left_at"]).date() - b).days) <= 1 for b in _bl_days)
+                 and not any(0 <= (a - from_iso(x["left_at"]).date()).days <= 3 for a in _bl_added)]   # breaklisted right after
     d["debt"] = (await Q1("SELECT amount FROM debts WHERE uuid = ?", uuid) or {"amount": 0})["amount"]
     d["strikes"] = await safe(QA("SELECT * FROM strikes WHERE uuid = ? AND removed = 0 ORDER BY id DESC", uuid), []) or []
     d["mutes"] = await QA("SELECT * FROM mutes WHERE uuid = ? ORDER BY id DESC", uuid)
@@ -192,7 +195,35 @@ async def gather_player(bot, uuid, name):
     d["wait"] = await Q1("SELECT status FROM waitlist WHERE uuid = ?", uuid)
     d["login"] = await Q1("SELECT login_at FROM logins WHERE uuid = ? ORDER BY login_at DESC LIMIT 1", uuid)
     d["veteran_days"] = bl.VETERAN_DAYS
+    d["req"] = gc.WEEKLY_REQ
+    try:                                    # a requirement set by hand for this player (/gexp setreq player:...)
+        raw = await bl.kv_get("reqfor:" + uuid)
+        amount, until = str(raw).split("|", 1) if raw else (None, None)
+        if amount and now_utc() < from_iso(until):
+            d["req"] = int(amount)
+    except Exception:
+        pass
     return d
+
+
+async def history_fix(entries):
+    """Adds to each breaklist entry the real break length (until the next join when the return date is unknown)
+    and the days of that stay (its own set of days)."""
+    asc = sorted((dict(x) for x in entries), key=lambda x: x["left_at"])
+    for i, e in enumerate(asc):
+        left = from_iso(e["left_at"])
+        back = from_iso(e.get("returned_at"))
+        if back is None or (back - left).total_seconds() < 120:
+            back = None
+            for nxt in asc[i + 1:]:
+                j = from_iso(nxt.get("joined_at"))
+                if j and j > left:
+                    back = j
+                    break
+        e["_back"] = iso(back) if back else None
+        row = await Q1("SELECT COALESCE(SUM(days), 0) AS d, COUNT(*) AS c FROM day_sets WHERE entry_id = ? AND removed = 0", e["id"])
+        e["_stay"] = float(row["d"]) if row and row["c"] else float(e.get("days_total") or 0)
+    return list(reversed(asc)) if entries and entries[0]["left_at"] >= entries[-1]["left_at"] else asc
 
 
 def player_panels(d):
@@ -219,11 +250,11 @@ def player_panels(d):
     elif state == "breaklist":
         panels.append(("GUILD", "On the breaklist", f"{int(days)} days saved · not in the guild now", GOLD))
     else:
-        panels.append(("GUILD", "Not in the guild", f"{int(days)} days saved" if days else "No data", g.MUTED))
+        panels.append(("GUILD", "Not in the guild", f"{int(days)} days saved" if (days or state == "left") else "No data", g.MUTED))
     # gexp
     total_w, count_w = d["week"]
     if d["in_guild"] or count_w:
-        req = gc.WEEKLY_REQ
+        req = d.get("req") or gc.WEEKLY_REQ
         pct = total_w * 100 // req if req else 0
         panels.append(("GEXP THIS WEEK", f"{n(total_w)} / {n(req)}",
                        f"{pct}% of the requirement" + (" · excused this week" if d["excuse_now"] else ""),
@@ -254,7 +285,7 @@ def player_panels(d):
     small = (f"Extra GEXP debt: {n(d['debt'])}" if d["debt"] else
              (f"Last: {gc.fmt_date(from_iso(left[0]['left_at']))}" if left else "No debt"))
     if strikes:
-        small = f"{len(strikes)} strike{'s' if len(strikes) != 1 else ''} · last {gc.fmt_date(from_iso(strikes[0]['at']))}, {n(strikes[0]['week_gexp'])} GEXP"
+        small = f"{len(strikes)} strike{'s' if len(strikes) != 1 else ''} · last {gc.fmt_date(from_iso(strikes[0]['at']))}" + (f", {n(strikes[0]['week_gexp'])} GEXP" if strikes[0]["week_gexp"] is not None else "")
     panels.append(("PURGE", f"Left {len(left)} time{'s' if len(left) != 1 else ''}" if left else "Never left", small,
                    g.RED if (d["debt"] or strikes) else (g.TEXT if left else g.GREEN)))
     # punishments
@@ -360,7 +391,7 @@ async def player_section(ctx, key, page):
         if d["debt"]:
             lines.append(f"**Extra GEXP debt:** {n(d['debt'])}")
         if d.get("strikes"):
-            lines.append("**Strikes:** " + " · ".join(f"{gc.fmt_date(from_iso(x['at']))} ({n(x['week_gexp'])} GEXP)"
+            lines.append("**Strikes:** " + " · ".join(f"{gc.fmt_date(from_iso(x['at']))}" + (f" ({n(x['week_gexp'])} GEXP)" if x["week_gexp"] is not None else "")
                                                       for x in d["strikes"][:5]))
         if not entries:
             lines.insert(0, f"**{esc(name)}** has never been on the breaklist.")
@@ -370,8 +401,9 @@ async def player_section(ctx, key, page):
         page = max(1, min(page, pages))
         head = await core.head_for(uuid, name)
         await load_flag(uuid, name)
+        entries = await history_fix(entries)
         png = await asyncio.to_thread(bl.draw_history, name, head, entries[(page - 1) * per: page * per],
-                                      len(entries), page, pages)
+                                      len(entries), page, pages, d["days"][0] if d.get("days") else None)
         return Out(content="\n".join(lines) or None, png=png, name="breaklist.png", pages=pages, page=page)
     if key == "punish":
         embed = await bl.punishment_embed(uuid, name)

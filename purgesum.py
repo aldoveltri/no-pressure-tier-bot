@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS strikes (
     UNIQUE (uuid, purge_week)
 );
 """
+STRIKES_ALTER = "ALTER TABLE strikes ADD COLUMN reason TEXT"
 
 
 async def record_strikes(purged, ws):
@@ -137,5 +138,20 @@ async def setup(bot: commands.Bot):
     import aiosqlite
     async with aiosqlite.connect(bl.DB_PATH) as db:
         await db.executescript(STRIKES_SCHEMA)
+        try:
+            await db.execute(STRIKES_ALTER)
+        except Exception:
+            pass                                   # the column is already there
         await db.commit()
+        try:
+            # a strike given and then a breaklist added right after for the same player: it was a breaklist, not an evasion
+            from datetime import timedelta
+            rows = await (await db.execute(
+                "SELECT s.id, s.at, b.added_at FROM strikes s JOIN bl_entries b ON b.uuid = s.uuid WHERE s.removed = 0")).fetchall()
+            for sid, at, added in rows:
+                if at and added and bl.from_iso(at) <= bl.from_iso(added) <= bl.from_iso(at) + timedelta(days=3):
+                    await db.execute("UPDATE strikes SET removed = 1 WHERE id = ?", (sid,))
+            await db.commit()
+        except Exception:
+            bl.log.exception("Could not clean the strikes that were a breaklist")
     await bot.add_cog(PurgeSummary(bot))

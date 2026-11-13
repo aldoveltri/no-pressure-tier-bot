@@ -706,13 +706,13 @@ def draw_history(name, head, entries, total, page, pages, total_days=None):
     d.rounded_rectangle([g.PAD, top, g.WIDTH - g.PAD, top + id_h], radius=16, fill=g.ROW_BG)
     d.rounded_rectangle([g.PAD, top, g.PAD + 8, top + id_h], radius=4, fill=g.ACCENT)
     g._paste_head(img, d, head, g.PAD + 34, top + 15, 80, radius=12)
-    _name_flag(img, d, g.PAD + 34 + 80 + 22, top + 55, name, g.get_font(36, True))
+    _name_flag(img, d, g.PAD + 34 + 80 + 22, top + 42 if total_days is not None else top + 55, name, g.get_font(36, True))
     d.text((g.WIDTH - g.PAD - 30, top + 40), str(total), font=g.get_font(44, True), fill=g.ACCENT, anchor="rm")
     d.text((g.WIDTH - g.PAD - 30, top + 82), "TIMES ON BREAKLIST", font=g.get_font(14, True),
            fill=g.MUTED, anchor="rm")
-    if total_days is not None:
-        d.text((g.WIDTH - g.PAD - 330, top + 40), dh_text(total_days), font=g.get_font(30, True), fill=g.TEXT, anchor="rm")
-        d.text((g.WIDTH - g.PAD - 330, top + 82), "TOTAL DAYS IN GUILD", font=g.get_font(14, True), fill=g.MUTED, anchor="rm")
+    if total_days is not None:                      # under the name, so it never covers it
+        d.text((g.PAD + 34 + 80 + 22, top + 86), f"TOTAL IN GUILD  {dh_text(total_days)}", font=g.get_font(18, True),
+               fill=g.SOFT, anchor="lm")
 
     y = top + id_h + 14
     for e in entries:
@@ -5508,55 +5508,65 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
                            str(interaction.user.id), str(did) if did else None))
         if link:
             await q_run("UPDATE mutes SET link = ? WHERE id = ?", (link.strip(), mid))
-        gave = False if (silent or over) else await self.bridge_role(did, give=True)
-        total_mutes = (await q_one("SELECT COUNT(*) AS c FROM mutes WHERE uuid = ?", (uuid,)))["c"]
-        head = await self.core.head_for(uuid, name)
-        await load_flag(uuid, name)
-        card = await asyncio.to_thread(
-            draw_punish_card, "MUTE", name, head, reason,
-            [("LENGTH", "Permanent" if end is None else gc.fmt_duration(td.total_seconds())),
-             ("EXPIRES", "Never" if end is None else gc.fmt_et(end)), ("MUTES SO FAR", str(total_mutes))],
-            interaction.user.display_name, mid, await punish_history(uuid, "m", mid))
-        if silent:
-            await interaction.followup.send(
-                f"✅ Mute of **{esc(name)}** logged quietly ({'already over' if over else 'active, the role was NOT added'}): "
-                "no role, no ping, nothing posted.", file=send_file(card, "mute.png"), allowed_mentions=NO_MENTIONS)
-            return
-        how_long = "permanently" if end is None else length.strip()
-        expires_line = ("This mute does not expire." if end is None else
-                        f"Expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)")
-        role_txt = ("The **No Guild Bridge** role was added: you can't write there until the mute ends."
-                    if gave else "Staff will remove your guild bridge permissions.")
-        if did:
-            who = f"<@{did}>"
-        else:
-            who = (f"**{esc(name)}** (I don't know their Discord account: link it with `/link` or give it with the "
-                   "`user` option)")
-        template = (await kv_get("mute_msg")) or DEFAULT_MUTE_MSG
-        content = fill_mute_msg(template, ign=name, length=how_long, reason=reason, expires=expires_line, user=who,
-                                role=role_txt, ping=mute_ping())
-        if link:
-            content += f"\nMessage: {link.strip()}"
-        posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, data=card, filename="mute.png",
-                                         mentions=MUTE_MENTIONS, view=mute_view(mid))
-        first = self.core.last_message if posted else None
-        if not posted:
-            first = await interaction.followup.send(content=content, file=send_file(card, "mute.png"),
-                                                    allowed_mentions=MUTE_MENTIONS, view=mute_view(mid), wait=True)
-            if first is not None:
-                await q_run("UPDATE mutes SET post_ch = ?, post_msg = ? WHERE id = ?",
-                            (str(first.channel.id), str(first.id), mid))
-        else:
-            if first is not None:
-                await q_run("UPDATE mutes SET post_ch = ?, post_msg = ? WHERE id = ?",
-                            (str(first.channel.id), str(first.id), mid))
-            await interaction.followup.send(f"Mute logged in {posted}. This is the message:\n\n{content}",
-                                            file=send_file(card, "mute.png"), allowed_mentions=NO_MENTIONS)
-        if proofs and first is not None:                       # every proof in its own message, in order
-            await send_proofs(first.channel, "m", mid, proofs)
-        if not gave:                       # only the staff who ran the command sees this, not the player
-            await interaction.followup.send("⚠️ The **No Guild Bridge** role could not be added automatically: "
-                                            "please add it manually.", ephemeral=True)
+        try:
+            gave = False if (silent or over) else await self.bridge_role(did, give=True)
+            total_mutes = (await q_one("SELECT COUNT(*) AS c FROM mutes WHERE uuid = ?", (uuid,)))["c"]
+            head = await self.core.head_for(uuid, name)
+            await load_flag(uuid, name)
+            card = await asyncio.to_thread(
+                draw_punish_card, "MUTE", name, head, reason,
+                [("LENGTH", "Permanent" if end is None else gc.fmt_duration(td.total_seconds())),
+                 ("EXPIRES", "Never" if end is None else gc.fmt_et(end)), ("MUTES SO FAR", str(total_mutes))],
+                interaction.user.display_name, mid, await punish_history(uuid, "m", mid))
+            if silent:
+                await interaction.followup.send(
+                    f"✅ Mute of **{esc(name)}** logged quietly ({'already over' if over else 'active, the role was NOT added'}): "
+                    "no role, no ping, nothing posted.", file=send_file(card, "mute.png"), allowed_mentions=NO_MENTIONS)
+                return
+            how_long = "permanently" if end is None else length.strip()
+            expires_line = ("This mute does not expire." if end is None else
+                            f"Expires <t:{int(end.timestamp())}:F> (<t:{int(end.timestamp())}:R>)")
+            role_txt = ("The **No Guild Bridge** role was added: you can't write there until the mute ends."
+                        if gave else "Staff will remove your guild bridge permissions.")
+            if did:
+                who = f"<@{did}>"
+            else:
+                who = (f"**{esc(name)}** (I don't know their Discord account: link it with `/link` or give it with the "
+                       "`user` option)")
+            template = (await kv_get("mute_msg")) or DEFAULT_MUTE_MSG
+            content = fill_mute_msg(template, ign=name, length=how_long, reason=reason, expires=expires_line, user=who,
+                                    role=role_txt, ping=mute_ping())
+            if link:
+                content += f"\nMessage: {link.strip()}"
+            posted = await self.core.post_to("MUTE_LOG_CHANNEL_ID", content=content, data=card, filename="mute.png",
+                                             mentions=MUTE_MENTIONS, view=mute_view(mid))
+            first = self.core.last_message if posted else None
+            if not posted:
+                first = await interaction.followup.send(content=content, file=send_file(card, "mute.png"),
+                                                        allowed_mentions=MUTE_MENTIONS, view=mute_view(mid), wait=True)
+                if first is not None:
+                    await q_run("UPDATE mutes SET post_ch = ?, post_msg = ? WHERE id = ?",
+                                (str(first.channel.id), str(first.id), mid))
+            else:
+                if first is not None:
+                    await q_run("UPDATE mutes SET post_ch = ?, post_msg = ? WHERE id = ?",
+                                (str(first.channel.id), str(first.id), mid))
+                await interaction.followup.send(f"Mute logged in {posted}. This is the message:\n\n{content}",
+                                                file=send_file(card, "mute.png"), allowed_mentions=NO_MENTIONS)
+            if proofs and first is not None:                       # every proof in its own message, in order
+                await send_proofs(first.channel, "m", mid, proofs)
+            if not gave:                       # only the staff who ran the command sees this, not the player
+                await interaction.followup.send("⚠️ The **No Guild Bridge** role could not be added automatically: "
+                                                "please add it manually.", ephemeral=True)
+        except Exception as e:                      # nothing is left half done: the mute is removed and can be retried
+            log.exception("/mute add failed for %s", name)
+            await q_run("DELETE FROM mutes WHERE id = ?", (mid,))
+            try:
+                await self.bridge_role(did, give=False)
+            except Exception:
+                pass
+            await interaction.followup.send(f"❌ The mute of **{esc(name)}** could not be completed and was cancelled, so you "
+                                            f"can run `/mute add` again. Error: `{type(e).__name__}: {str(e)[:150]}`")
 
     @app_commands.command(name="message", description="See or change the text of the mute message (guild staff)")
     @app_commands.describe(text="New text. Words in {braces} are filled in: {ign} {length} {reason} {expires} {user} {role} {ping}",
@@ -5682,7 +5692,6 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
             else:
                 await interaction.followup.send(text, allowed_mentions=MUTE_MENTIONS)
 
-
     @app_commands.command(name="warnlength", description="How long a verbal warning lasts from now on (guild staff). No options: show it")
     @app_commands.describe(days="Days a new verbal warning lasts (0 = never expires)",
                            apply_to_old="Also change the warnings that have not expired yet")
@@ -5764,6 +5773,20 @@ class MuteCog(commands.GroupCog, name="mute", description="Guild mute logs"):
         await q_run("DELETE FROM mutes WHERE id = ?", (mute,))
         await interaction.followup.send(f"🗑️ Mute #{mute} of **{esc(m['ign'])}** was deleted.{note}",
                                         allowed_mentions=NO_MENTIONS)
+
+    @app_commands.command(name="view", description="A player's mutes and verbal warnings, with their numbers")
+    @app_commands.describe(ign="Minecraft username")
+    async def view(self, interaction: discord.Interaction, ign: str):
+        await interaction.response.defer()
+        r = await lookup(interaction, ign)
+        if r is None:
+            return
+        uuid, name = r
+        embed = await punishment_embed(uuid, name)
+        if embed is None:
+            await interaction.followup.send(f"**{esc(name)}** has no mutes or verbal warnings.", allowed_mentions=NO_MENTIONS)
+            return
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="list", description="Players with an active mute (guild staff)")
     @app_commands.check(staff_check)

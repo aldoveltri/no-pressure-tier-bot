@@ -174,7 +174,8 @@ async def gather_player(bot, uuid, name):
     d["days"] = await safe(core.days_info(uuid), (0.0, "unknown"))
     ws = gc.week_start(now_utc())
     d["week"] = await safe(core.window_sum(uuid, ws, now_utc()), (0, 0))
-    d["bl"] = await QA("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC", uuid)
+    d["bl"] = [x for x in await QA("SELECT * FROM bl_entries WHERE uuid = ? ORDER BY (status = 'active') DESC, left_at DESC, id DESC", uuid)
+               if not x.get("no_count") or x["status"] == "active"]      # the ones set as "does not count" are not shown or counted
     d["excuse_now"] = await Q1("SELECT week FROM excuses WHERE uuid = ? AND week >= ? LIMIT 1", uuid, ws.date().isoformat())
     d["excuses"] = (await Q1("SELECT COUNT(*) AS c FROM excuses WHERE uuid = ?", uuid) or {"c": 0})["c"]
     d["left"] = await QA("SELECT * FROM guild_left WHERE uuid = ? ORDER BY left_at DESC", uuid)
